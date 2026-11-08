@@ -2412,6 +2412,148 @@ test_reviewer_launch_is_refused_at_the_box_agent_budget() {
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
+
+# ------------------------------------------- extra reviewers (--focus, review.extra)
+# An extra reviewer is a reviewer of its own: its alias and checkout carry
+# the focus, the focus pack rides on the reviewer role, its brief records
+# with --focus under its own alias, and its row is keyed by the focus too.
+test_reviewer_focus_gets_its_pack_alias_checkout_and_row() {
+  _ws_pr_fixture
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --focus security 2>&1)" \
+    || { echo "focus reviewer refused: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-review-security --kind pi" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^agent start' "$HERDR_LOG")" 1 || { echo "--focus started more than its own reviewer"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "CEL_INBOX_ME=widget-pr-12-review-security" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "CEL_REVIEW_FOCUS=security" || { rm -rf "$T"; return 1; }
+  local body; body="$(cat "$T/.cel/reviews/pr-12/security.role-reviewer.md")" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "## Focus: security" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "# reviewer focus: security" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "Trust boundaries" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "--by widget-pr-12-review-security --focus security" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "$HEAD_SHA" || { rm -rf "$T"; return 1; }
+  local row; row="$(reviewers_find "$T" widget 12 security)" || { echo "no row for the focus reviewer"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .agent <<<"$row")" widget-pr-12-review-security || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .checkout <<<"$row")" "$T/reviews/widget-pr-12-review-security" || { rm -rf "$T"; return 1; }
+  assert_eq "$(git -C "$T/reviews/widget-pr-12-review-security" rev-parse HEAD)" "$HEAD_SHA" || { rm -rf "$T"; return 1; }
+  # the plain reviewer's slot is a different key: nothing recorded there
+  assert_fails reviewers_find "$T" widget 12 || { rm -rf "$T"; return 1; }
+  reviewer_checkout_release widget 12 "" security
+  [ ! -e "$T/reviews/widget-pr-12-review-security" ] || { echo "the focus checkout outlived its release"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_reviewer_unknown_focus_is_refused_naming_the_packs() {
+  _ws_pr_fixture
+  local out rc=0
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --focus speed 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "an unknown focus launched: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no reviewer focus 'speed' - have: db-migration performance security" || { rm -rf "$T"; return 1; }
+  ! grep -q "agent start" "$HERDR_LOG" || { echo "a reviewer started for an unknown focus"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/reviews" ] || [ -z "$(ls -A "$T/reviews")" ] || { echo "a checkout was made for an unknown focus"; rm -rf "$T"; return 1; }
+  # --focus belongs to a reviewer
+  out="$(cd "$T" && _cmd_run_in_subshell orchestrator --repo widget --focus security --dry-run 2>&1)" \
+    && { echo "--focus accepted for an orchestrator"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "--focus names an extra PR reviewer's focus"
+  rm -rf "$T"
+}
+# A focus reviewer is a helper like any reviewer: counted, and refused at the
+# budget - and a live one counts toward it.
+test_reviewer_focus_is_held_against_the_box_agent_budget() {
+  _ws_pr_fixture
+  export ROSTER; ROSTER="$(_roster_of 7 | jq -c '.result.agents += [{name:"gizmo-pr-3-review-security", pane_id:"w4:p1", cwd:"/elsewhere", agent_status:"idle"}]')"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") printf '%s\n' "$ROSTER" ;;
+      *) : ;;
+    esac
+  }
+  local out rc=0
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --focus security 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "focus reviewer started over the budget: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "box agent budget: 8 helper agents live, the limit is 8"
+  rm -rf "$T"
+}
+# THE POLICY PICKS THE EXTRA REVIEWERS: a plain `cel run reviewer` starts the
+# plain reviewer and every extra one whose paths match a file the PR touches,
+# and says which and why; one whose paths match nothing is not started.
+_ws_extra_policy() {
+  cat >> "$T/workspace.yaml" <<'YAML'
+  extra:
+    - focus: security
+      paths: ['lib/auth/**', '**/*token*']
+    - focus: db-migration
+      paths: ['migrations/**']
+YAML
+}
+test_plain_reviewer_starts_every_extra_reviewer_the_policy_requires() {
+  _ws_pr_fixture; _ws_extra_policy
+  export PR_FILES='[[{"filename":"lib/auth/login.ts","status":"modified"},{"filename":"README.md","status":"modified"}]]'
+  gh() {
+    case "$*" in
+      *"pulls/12/files"*) printf '%s\n' "$PR_FILES" ;;
+      *"pr view"*) jq -n --arg h "$HEAD_SHA" '{number:12, state:"OPEN", headRefOid:$h, baseRefName:"main"}' ;;
+      *) return 1 ;;
+    esac
+  }
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)" || { echo "refused: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-review --kind pi" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-review-security --kind pi" || { rm -rf "$T"; return 1; }
+  ! grep -q "agent start widget-pr-12-review-db-migra" "$HERDR_LOG" || { echo "started a reviewer no file asked for"; rm -rf "$T"; return 1; }
+  assert_contains "$out" 'security reviewer for widget#12: review.extra: lib/auth/login.ts matches "lib/auth/**"' || { rm -rf "$T"; return 1; }
+  reviewers_find "$T" widget 12 >/dev/null && reviewers_find "$T" widget 12 security >/dev/null \
+    || { echo "the two reviewers are not both recorded"; rm -rf "$T"; return 1; }
+  # asked again, both are reused: nothing new starts
+  : > "$HERDR_LOG"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") reviewers_rows | jq -c '{result:{agents:[.[] | {name:.agent, pane_id:.pane, cwd:.checkout, agent_status:"idle"}]}}' ;;
+      *) : ;;
+    esac
+  }
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)" || { echo "reuse refused: $out"; rm -rf "$T"; return 1; }
+  ! grep -q "agent start" "$HERDR_LOG" || { echo "a second call started another reviewer"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "security reviewer for widget#12 is already running" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_plain_reviewer_with_no_matching_path_starts_no_extra_one() {
+  _ws_pr_fixture; _ws_extra_policy
+  gh() {
+    case "$*" in
+      *"pulls/12/files"*) printf '%s\n' '[[{"filename":"docs/guide.md"}]]' ;;
+      *"pr view"*) jq -n --arg h "$HEAD_SHA" '{number:12, state:"OPEN", headRefOid:$h, baseRefName:"main"}' ;;
+      *) return 1 ;;
+    esac
+  }
+  # a dry run asks the forge nothing and names what the policy could add
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
+  assert_contains "$out" "extra reviewers: review.extra may add db-migration, security" || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)" || { echo "refused: $out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^agent start' "$HERDR_LOG")" 1 || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "no extra reviewer for widget#12: no file it touches matches review.extra (db-migration, security)"
+  rm -rf "$T"
+}
+test_plain_reviewer_refuses_a_malformed_policy_before_starting_anything() {
+  _ws_pr_fixture
+  printf '  extra:\n    - focus: security\n      path: [lib/**]\n' >> "$T/workspace.yaml"
+  local out rc=0
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a malformed policy started reviewers: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "unknown key(s) path"
+  ! grep -q "agent start" "$HERDR_LOG" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The roster names every reviewer, plain and extra: an extra one's focus comes
+# from its checkout, whole even when its 32-character name was cut.
+test_reviewers_discover_reads_each_reviewers_pr_and_focus() {
+  local roster='{"result":{"agents":[
+    {"name":"widget-pr-7-review","pane_id":"w1:p1","cwd":"/r/widget-pr-7","agent_status":"idle"},
+    {"name":"widget-pr-7-review-security","pane_id":"w1:p2","cwd":"/r/widget-pr-7-review-security","agent_status":"idle"},
+    {"name":"celestial-pr-277-review-db-migra","pane_id":"w1:p3","cwd":"/r/celestial-pr-277-review-db-migration.round.Ab12","agent_status":"done"},
+    {"name":"widget-orch","pane_id":"w1:p4","cwd":"/x","agent_status":"idle"}]}}'
+  assert_eq "$(reviewers_discover "$roster" | awk -F'\t' '{print $1 "#" $2 "@" $3 "[" $7 "]"}' | paste -sd' ' -)" \
+    "widget#7@w1:p1[] widget#7@w1:p2[security] celestial#277@w1:p3[db-migration]"
+}
 # Product agents are never counted and never blocked: a full helper budget
 # says nothing to them.
 test_product_agent_is_never_held_against_the_helper_budget() {

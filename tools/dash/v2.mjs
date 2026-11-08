@@ -382,22 +382,28 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   //  - a solo LANE (cel run solo --lane) stands in
   //    <ws>/.cel/solo/<product>/lane-<lane> and is named <product>-<lane>;
   //  - a reviewer (cel run reviewer) stands in its review checkout of
-  //    <repo>#<n> and is named <repo>-pr-<n>-review, for a repo the
-  //    workspace declares;
+  //    <repo>#<n> and is named <repo>-pr-<n>-review (an extra one,
+  //    --focus, <repo>-pr-<n>-review-<focus>), for a repo the workspace
+  //    declares;
   //  - a main agent carries one of the workspace's `-orch` names (w.mains)
   //    and stands in that workspace.
   const under = (cwd, dir) => !!cwd && !!dir && (cwd === dir || cwd.startsWith(dir + '/'));
   const LANE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-  const REVIEWER = /-pr-(\d+)-review$/;
+  const REVIEWER = /-pr-(\d+)-review(?:-[a-z0-9_-]*)?$/;
   // where `cel run reviewer` checks a PR out and stands its reviewer
   // (lib/run.sh _run_review_dir, reviewer_checkout_path): <dir>/<repo>-pr-<n>,
-  // or a later round's <dir>/<repo>-pr-<n>.round.<k>
+  // or a later round's <dir>/<repo>-pr-<n>.round.<k>; an extra reviewer's
+  // (--focus) <dir>/<repo>-pr-<n>-review-<focus>[.round.<k>]. Answers the
+  // focus (null for the plain reviewer), or undefined when cwd is neither.
   const REVIEWS = () => process.env.CEL_REVIEW_DIR
     || join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'cel', 'reviews');
   const inReview = (cwd, repo, pr) => {
     const c = cwd.replace(/ \(deleted\)$/, '');
     const at = join(REVIEWS(), `${repo}-pr-${pr}`);
-    return under(c, at) || c.startsWith(`${at}.round.`);
+    if (under(c, at) || c.startsWith(`${at}.round.`)) return null;
+    if (!c.startsWith(`${at}-review-`)) return undefined;
+    const focus = c.slice(`${at}-review-`.length).split('/')[0].split('.round.')[0];
+    return LANE.test(focus) ? focus : undefined;
   };
   const laneBase = (w, product) => join(w.path, '.cel', 'solo', product, 'lane-');
   const soloProducts = (w) => w.products.filter((p) => p.mode === 'solo').map((p) => p.name);
@@ -421,7 +427,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const m = REVIEWER.exec(me.name);
       // a reviewer is its canonical name AND its own review checkout
       if (m) for (const w of wss) for (const r of w.repos) {
-        if (r && r.name && inReview(cwd, r.name, m[1])) review.push({ w, repo: r.name, pr: Number(m[1]), key: `${r.name}/pr-${m[1]}-review` });
+        const focus = r && r.name ? inReview(cwd, r.name, m[1]) : undefined;
+        if (focus !== undefined) review.push({ w, repo: r.name, pr: Number(m[1]), focus, key: `${r.name}/pr-${m[1]}-review${focus ? `-${focus}` : ''}` });
       }
       for (const c of [...lane, ...review]) keys.push(c.key);
       rest.push({ me, lane, review });
@@ -431,7 +438,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const l = lane.find((c) => canon.get(c.key) === me.name);
       if (l) { lanes.push({ ...me, ws: l.w.name, mode: 'solo', product: l.product, lane: l.lane }); continue; }
       const rv = review.find((c) => canon.get(c.key) === me.name);
-      if (rv) { reviewers.push({ ...me, ws: rv.w.name, repo: rv.repo, pr: rv.pr }); continue; }
+      if (rv) { reviewers.push({ ...me, ws: rv.w.name, repo: rv.repo, pr: rv.pr, ...(rv.focus ? { focus: rv.focus } : {}) }); continue; }
       const home = wss.find((w) => under(me.cwd, w.path) && w.mains.has(me.name));
       if (home) mains.push({ ...me, ws: home.name, ...home.mains.get(me.name) });
     }
@@ -559,9 +566,32 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- fleet: who is running and what is open, across workspaces ----------
+  // A solo product's PR is approved by `cel solo land`'s rule, asked of
+  // `cel solo approvals` (lib/solo.sh) and never re-derived here: the plain
+  // reviewer and every extra one the review policy requires, each at the
+  // current head. A PR that is not a solo product's (`n/a`) keeps the forge's
+  // review decision, and so does every PR of a workspace `cel solo approvals`
+  // could not answer for at all; a solo PR whose reviews cannot be read
+  // (`unknown`) is not approved. `waiting` names the required reviewers that
+  // have not approved the current head.
+  const approvals = async (wss, pulls) => {
+    const out = new Map();
+    for (const ws of wss) {
+      const refs = pulls.filter((p) => p.ws === ws.name).map((p) => `${p.repo}#${p.number}`);
+      if (!refs.length) continue;
+      const v = await slow(`approvals:${ws.name}`, 60000, async () => {
+        const raw = await run(CEL(), ['solo', 'approvals', '--workspace', ws.name, '--json', ...refs], 120000);
+        try { const j = JSON.parse(raw || ''); return Array.isArray(j) ? j : null; } catch { return null; }
+      });
+      for (const a of v || []) if (a && a.ref) out.set(`${ws.name}:${a.ref}`, a);
+    }
+    return out;
+  };
+  const REVIEW_OF = { approved: 'APPROVED', changes: 'CHANGES_REQUESTED' };
   const fleet = async (wss) => {
     const id = await identities(wss);
     const pulls = await open(wss);
+    const appr = await approvals(wss, pulls);
     // main agents and solo lanes: each restartable and mailable by its name;
     // a solo one says which branch and PR it is on where its pane shows it
     const orchestrators = [...id.mains, ...id.lanes].map(({ cwd, ...x }) => ({ ...x, ...(x.mode === 'solo' ? soloWork({ ...x, cwd }, pulls) : {}) }));
@@ -569,8 +599,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const pr = pulls.find((p) => p.ws === x.ws && p.repo === x.repo && p.number === x.pr);
       return { ...x, ...(pr ? { branch: pr.headRefName, title: pr.title } : {}) };
     });
-    const prs = pulls.map((p) => ({ ws: p.ws, repo: p.repo, number: p.number, title: p.title, url: p.url, branch: p.headRefName,
-      review: p.reviewDecision || 'REVIEW_REQUIRED', mergeable: p.mergeable || '', draft: !!p.isDraft }));
+    const prs = pulls.map((p) => {
+      const a = appr.get(`${p.ws}:${p.repo}#${p.number}`);
+      const solo = !!a && a.state !== 'n/a';
+      const waiting = solo ? (a.reviewers || []).filter((r) => r.required && r.state !== 'approved').map((r) => r.alias) : [];
+      return { ws: p.ws, repo: p.repo, number: p.number, title: p.title, url: p.url, branch: p.headRefName,
+        // approved only by land's rule; a change request the forge holds is still one
+        review: solo ? REVIEW_OF[a.state] || (p.reviewDecision === 'CHANGES_REQUESTED' ? 'CHANGES_REQUESTED' : 'REVIEW_REQUIRED')
+          : p.reviewDecision || 'REVIEW_REQUIRED',
+        ...(solo ? { waiting } : {}), mergeable: p.mergeable || '', draft: !!p.isDraft };
+    });
     return { orchestrators, reviewers, prs };
   };
 

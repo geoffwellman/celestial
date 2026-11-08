@@ -18,14 +18,17 @@ _solo_setup() { # [author] [reviewDecision] [rollup-conclusion] [draft] [state]
   ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
   GH_LOG="$T/gh.log"; : > "$GH_LOG"
   # the head's checks, latest run of each: `suite`, green unless the third
-  # argument (or STUB_ROLLUP) says otherwise
+  # argument (or STUB_ROLLUP) says otherwise; the files the PR touches are
+  # STUB_FILES (gh api --paginate --slurp pages), none by default
   export STUB_HEAD="$H" STUB_ROLLUP_DEFAULT="[{\"name\":\"suite\",\"conclusion\":\"${3:-SUCCESS}\"}]"
   cat > "$T/gh" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
+view() { echo '{"number":7,"author":{"login":"${1:-fleetbot}"},"reviewDecision":"${2:-}","isDraft":${4:-false},"mergeable":"'"\${STUB_MERGEABLE:-MERGEABLE}"'","state":"${5:-OPEN}","headRefOid":"'"\$STUB_HEAD"'","baseRefName":"main","statusCheckRollup":'"\${STUB_ROLLUP:-\$STUB_ROLLUP_DEFAULT}"'}'; }
 case "\$1 \$2" in
   "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"${1:-fleetbot}"},"reviewDecision":"${2:-}","isDraft":${4:-false},"mergeable":"'"\${STUB_MERGEABLE:-MERGEABLE}"'","state":"${5:-OPEN}","headRefOid":"'"\$STUB_HEAD"'","baseRefName":"main","statusCheckRollup":'"\${STUB_ROLLUP:-\$STUB_ROLLUP_DEFAULT}"'}';;
+  "pr view")  view;;
+  "pr list")  echo "[\$(view)]";;
   "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || exit 1; exit 0;;
   *) case "\$2" in
        */protection) case "\${STUB_UNPROTECTED:-}" in
@@ -35,6 +38,7 @@ case "\$1 \$2" in
                      echo '{"required_status_checks":{"contexts":["suite"]}}';;
        */rules/branches/*) [ "\${STUB_RULES:-}" != denied ] || { echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; }
                            printf '%s' "\${STUB_RULES:-[[]]}";;
+       */pulls/*/files) printf '%s' "\${STUB_FILES:-[[]]}";;
        *) echo '{}';;
      esac;;
 esac
@@ -524,5 +528,162 @@ test_solo_reviewer_brief_names_solo_commands() {
   assert_contains "$b" "cel solo review widget#7"
   assert_contains "$b" "bundle-orch"
   assert_contains "$(_run_reviewer_solo_brief "$T" lone 7)" "cel solo review lone#7"
+  rm -rf "$T"
+}
+
+# --- extra reviewers: review.extra ---------------------------------------------
+# A security reviewer is required for anything under lib/auth/; the PR touches
+# lib/auth/session.ts unless STUB_FILES says otherwise.
+SEC=widget-pr-7-review-security PERF=widget-pr-7-review-performance
+B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+_solo_policy() {
+  cat >> "$T/workspace.yaml" <<'YAML'
+review:
+  model: sonnet
+  extra:
+    - focus: security
+      paths: ['lib/auth/**']
+YAML
+  export STUB_FILES='[[{"filename":"lib/auth/session.ts","status":"modified"},{"filename":"README.md","status":"modified"}]]'
+}
+# A verdict recorded from an extra reviewer's own pane: its launch line's
+# role and mailbox.
+_review_as() { # <alias> <focus> <verdict> <head>
+  ( export CEL_ROLE=reviewer CEL_INBOX_ME="$1"; cd "$T" && cmd_solo_review widget#7 "$3" --head "$4" --by "$1" --focus "$2" )
+}
+test_solo_land_refuses_when_a_required_extra_review_is_missing() {
+  _solo_setup; _solo_policy
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged without the security review: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "lacks a review the workspace's policy requires" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "$SEC (focus security; review.extra: lib/auth/session.ts matches \"lib/auth/**\") has recorded no verdict" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "start it: cel run reviewer --repo widget --pr 7 --focus security" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  # a PR that touches nothing the policy names needs only its plain reviewer
+  STUB_FILES='[[{"filename":"README.md"}]]' _land widget#7 >/dev/null 2>&1 && _merged || { echo "refused a PR the policy does not reach"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_solo_land_refuses_a_stale_extra_approval_and_merges_when_all_are_current() {
+  _solo_setup; _solo_policy
+  _review_as "$SEC" security approved "$H" >/dev/null || { echo "the security reviewer could not record"; rm -rf "$T"; return 1; }
+  # the author pushes; the plain reviewer approves the new head, security does not
+  export STUB_HEAD="$B"
+  _review widget#7 approved --head "$B" --by widget-pr-7-review >/dev/null
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged on a stale security approval"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$SEC (focus security; review.extra: lib/auth/session.ts matches \"lib/auth/**\") has a verdict for head aaaaaaaaaaaa, not bbbbbbbbbbbb" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  # ...and a `changes` from it at the current head says so
+  _review_as "$SEC" security changes "$B" >/dev/null
+  out="$(_land widget#7 2>&1)" && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "$SEC (focus security; review.extra: lib/auth/session.ts matches \"lib/auth/**\") asked for changes at bbbbbbbbbbbb" || { rm -rf "$T"; return 1; }
+  _review_as "$SEC" security approved "$B" >/dev/null
+  out="$(_land widget#7 2>&1)" || { echo "refused with every review current: $out"; rm -rf "$T"; return 1; }
+  _merged || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "Reviewed-by: $SEC (approved, focus security)" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "Reviewed-by: widget-pr-7-review (approved)" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# NOT SATISFIABLE BY A REVIEWER THAT WAS NEVER STARTED: a focus verdict is
+# recorded only by the process launched as that focus reviewer, under its
+# alias; a verdict in its slot from anyone else is no verdict; and the
+# reviewer cannot file its verdict as the plain one's.
+test_solo_extra_review_is_recorded_only_by_its_own_reviewer() {
+  _solo_setup; _solo_policy
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out
+  out="$(_review widget#7 approved --head "$H" --by "$SEC" --focus security 2>&1)" && { echo "a focus verdict from no reviewer pane: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "a security verdict is recorded by the reviewer started for it" || { rm -rf "$T"; return 1; }
+  out="$(_review_as widget-pr-7-review security approved "$H" 2>&1)" && { echo "the plain reviewer signed the security slot"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "the security reviewer of widget#7 is $SEC" || { rm -rf "$T"; return 1; }
+  out="$( (export CEL_ROLE=reviewer CEL_INBOX_ME="$SEC"; _review widget#7 approved --head "$H" --by "$SEC") 2>&1)" && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "$SEC is the security reviewer - record its verdict with --focus security" || { rm -rf "$T"; return 1; }
+  out="$(_review_as "$SEC" speed approved "$H" 2>&1)" && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "no reviewer focus 'speed'" || { rm -rf "$T"; return 1; }
+  assert_eq "$(solo_review_get "$T" widget 7 review-security)" "" || { rm -rf "$T"; return 1; }
+  # a hand-written verdict in the slot, signed by someone else, is not its review
+  jq --arg h "$H" '."widget#7/review-security" = {verdict:"approved", by:"someone", head:$h, at:"2026-11-08T10:00:00Z"}' \
+    "$T/.cel/solo-reviews.json" > "$T/v" && mv "$T/v" "$T/.cel/solo-reviews.json"
+  out="$(_land widget#7 2>&1)" && { echo "merged on a verdict its reviewer never recorded"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "has no verdict of its own (the one on record is by someone)" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# THE ADVISORY REVIEWER. One started by hand (--focus) that the policy does
+# not require is advisory: its approval adds nothing land needs and a stale
+# verdict holds nothing up - but its `changes` at the head being merged is a
+# finding at that head, and it blocks, like a red check.
+test_solo_land_advisory_reviewer_blocks_only_on_changes_at_the_head() {
+  _solo_setup; _solo_policy
+  export STUB_FILES='[[{"filename":"README.md"}]]'   # the policy requires no extra review here
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  _review_as "$PERF" performance changes "$H" >/dev/null || { rm -rf "$T"; return 1; }
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged over a specialist's changes at the head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$PERF (focus performance; started by hand, not required by policy) asked for changes at aaaaaaaaaaaa" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  # a push makes that verdict stale: it no longer blocks, and is not needed
+  export STUB_HEAD="$B"
+  _review widget#7 approved --head "$B" --by widget-pr-7-review >/dev/null
+  out="$(_land widget#7 2>&1)" || { echo "a stale advisory verdict blocked: $out"; rm -rf "$T"; return 1; }
+  _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_solo_land_refuses_when_the_prs_files_cannot_be_read() {
+  _solo_setup; _solo_policy
+  export STUB_FILES='{"message":"Server Error"}'
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged without knowing what the PR touches"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cannot read the files widget#7 touches from its forge" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# THE POLICY IS workspace.yaml's: a workspace.local.yaml that drops the
+# extra reviewers (workspace-wide or on the repo) changes nothing land asks.
+test_solo_land_policy_cannot_be_dropped_by_a_local_override() {
+  _solo_setup; _solo_policy
+  printf 'review:\n  extra: []\nrepos:\n  - name: widget\n    review: { extra: [] }\n' > "$T/workspace.local.yaml"
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out; out="$(_land widget#7 2>&1)" && { echo "a local file dropped a required review"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$SEC" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# THE STEWARD'S "land it" AGREES WITH LAND: listed (and nudged) exactly when
+# land would take the reviews, on the same PR facts.
+test_steward_land_nudge_agrees_with_land_on_every_required_review() {
+  source "$CEL_ROOT/lib/steward.sh"
+  _solo_setup; _solo_policy
+  export CEL_REGISTRY="$T/registry.yaml"; registry_add demo "$T" ""
+  CEL_STEWARD_STATE="$T/state" _STEWARD_STATE="$T/state"
+  cmd_inbox() { printf '%s\n' "$*" >> "$T/mail"; }
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  # the security review missing: not ready, no nudge, and land refuses
+  assert_eq "$(solo_ready_prs "$T" bundle)" "" || { rm -rf "$T"; return 1; }
+  _steward_solo_sweep >/dev/null 2>&1
+  [ ! -s "$T/mail" ] || { echo "nudged to land what land refuses: $(cat "$T/mail")"; rm -rf "$T"; return 1; }
+  ! _land widget#7 >/dev/null 2>&1 || { rm -rf "$T"; return 1; }
+  # an advisory `changes` at the head: the same
+  _review_as "$SEC" security approved "$H" >/dev/null
+  _review_as "$PERF" performance changes "$H" >/dev/null
+  assert_eq "$(solo_ready_prs "$T" bundle)" "" || { rm -rf "$T"; return 1; }
+  ! _land widget#7 >/dev/null 2>&1 || { rm -rf "$T"; return 1; }
+  # every required review current and nothing blocking: listed, nudged, landed
+  _review_as "$PERF" performance approved "$H" >/dev/null
+  assert_eq "$(solo_ready_prs "$T" bundle)" "widget	7	$H" || { rm -rf "$T"; return 1; }
+  _steward_solo_sweep >/dev/null 2>&1
+  assert_contains "$(cat "$T/mail")" "cel solo land widget#7" || { rm -rf "$T"; return 1; }
+  _land widget#7 >/dev/null 2>&1 && _merged || { echo "land refused what the steward nudged"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# What a view shows is land's answer too.
+test_solo_approvals_reports_each_reviewer_by_lands_rule() {
+  _solo_setup; _solo_policy
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local j; j="$( cd "$T" && cmd_solo_approvals widget#7 nowhere#3 --json)" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.[0].state' <<<"$j")" pending || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '[.[0].reviewers[] | [.alias, .required, .state]]' <<<"$j")" \
+    "[[\"widget-pr-7-review\",true,\"approved\"],[\"$SEC\",true,\"missing\"]]" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.[1].state' <<<"$j")" "n/a" || { rm -rf "$T"; return 1; }
+  _review_as "$SEC" security approved "$H" >/dev/null
+  assert_eq "$( cd "$T" && cmd_solo_approvals widget#7 --json | jq -r '.[0].state')" approved || { rm -rf "$T"; return 1; }
+  assert_contains "$( cd "$T" && cmd_solo_approvals widget#7)" "$SEC (security)  approved  required: review.extra: lib/auth/session.ts matches" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }

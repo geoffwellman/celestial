@@ -36,7 +36,7 @@ budget_max_team_members() { _boxguard_cfg "${CEL_BUDGET_MAX_TEAM_MEMBERS:-}" bud
 # WHO IS LIVE, BY ROLE. A Rex row says its role; a herdr row is classified by
 # what cel run named it and where it stands:
 #   team member  stands under <ws>/.cel/teams/ (its worktree or its team dir)   helper
-#   reviewer     <repo>-pr-<n>-review                                           helper
+#   reviewer     <repo>-pr-<n>-review, <repo>-pr-<n>-review-<focus>             helper
 #   core/root    core, <ws>-root                                                not counted
 #   product      <product>-orch, or a solo lane (<ws>/.cel/solo/<p>/lane-<l>)   not counted
 #   other        anything else on the roster - still an agent                  helper
@@ -44,7 +44,7 @@ _BUDGET_JQ_COUNTS='
   def class:
     ((.role // "") | tostring) as $r | ((.name // "") | tostring) as $n | ((.cwd // "") | tostring) as $c
     | if $r == "member" or ($c | test("/\\.cel/teams/")) then "members"
-      elif $r == "reviewer" or ($n | test("-pr-[0-9]+-review$")) then "reviewers"
+      elif $r == "reviewer" or ($n | test("-pr-[0-9]+-review(-[a-z0-9_-]*)?$")) then "reviewers"
       elif $r == "core" or $r == "root" or $n == "core" or ($n | test("-root$")) then "core_root"
       elif $r == "orchestrator" or $r == "solo" or ($n | test("-orch$")) or ($c | test("/\\.cel/solo/[^/]+/lane-[^/]+$")) then "products"
       else "other" end;

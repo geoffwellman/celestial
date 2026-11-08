@@ -133,7 +133,7 @@ function byRank(a,b){return (WRANK[a.status]==null?4:WRANK[a.status])-(WRANK[b.s
 // a PR's agent: the solo agent whose branch it is
 function prRows(){var w={};solos().forEach(function(x){if(x.pr)w[x.repo+'#'+x.pr]=x.name});
   return (((F.fleet||{}).prs)||[]).map(function(p){return {ws:p.ws,repo:p.repo,number:p.number,title:p.title,url:p.url,review:p.review,
-    checks:p.mergeable==='CONFLICTING'?'failing':'',draft:p.draft,agent:w[p.repo+'#'+p.number]||''}})}
+    waiting:p.waiting||[],checks:p.mergeable==='CONFLICTING'?'failing':'',draft:p.draft,agent:w[p.repo+'#'+p.number]||''}})}
 function prOf(w){return w.pr?prRows().filter(function(p){return p.repo===w.repo&&p.number===w.pr})[0]||null:null}
 function repoWs(){var m={};(((F.cycle||{}).repos)||[]).forEach(function(r){m[r.repo]=r.ws});return m}
 function feedItems(f,key){return (((F[f]||{})[key||'items'])||[]).filter(function(x){return inWs(x.ws)})}
@@ -158,7 +158,7 @@ var BODY={
  activity:function(){var it=feedItems('activity');if(!F.activity)return none('waiting for the activity feed');
   return '<div class="feed">'+it.slice(0,12).map(actRow).join('')+'</div>'||none('quiet')},
  prs:function(){var it=prRows().filter(function(p){return inWs(p.ws)});
-  return it.map(function(p){var ok=p.review==='APPROVED';return '<div class="row" data-ws="'+esc(p.ws)+'" data-pr="'+esc(p.repo+'#'+p.number)+'"><span class="dot '+(p.checks==='failing'?'bad':ok?'ok':'warn')+'"></span><span class="t">'+esc(p.title)+'</span>'+wsTag(p.ws)+'<a class="sub mono" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.repo+'#'+p.number)+'</a><span class="sub">'+(ok?'approved':p.review==='CHANGES_REQUESTED'?'changes':'in review')+'</span></div>'}).join('')||none('no open PRs')},
+  return it.map(function(p){var ok=p.review==='APPROVED';return '<div class="row" data-ws="'+esc(p.ws)+'" data-pr="'+esc(p.repo+'#'+p.number)+'"><span class="dot '+(p.checks==='failing'?'bad':ok?'ok':'warn')+'"></span><span class="t">'+esc(p.title)+'</span>'+wsTag(p.ws)+'<a class="sub mono" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.repo+'#'+p.number)+'</a><span class="sub"'+(p.waiting.length?' title="waiting on '+esc(p.waiting.join(', '))+'"':'')+'>'+(ok?'approved':p.review==='CHANGES_REQUESTED'?'changes':'in review'+(p.waiting.length?' · waiting on '+esc(p.waiting.join(', ')):''))+'</span></div>'}).join('')||none('no open PRs')},
  orchs:function(){var it=orchs().filter(function(o){return inWs(o.ws)});
   // a lane has no room (rooms are the `-orch` agents cel drive lists): its
   // name opens it like any other agent

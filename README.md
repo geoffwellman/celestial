@@ -305,6 +305,10 @@ repos:
     url: git@github.com:acme/atlas-api.git
     prefix: API
     gate: go test ./...
+    review:
+      extra:                   # this repo's own specialist reviewers, beside the ones below
+        - focus: db-migration
+          paths: ['migrations/**']
   - name: billing              # in no product, so it is its own product
     url: git@github.com:acme/billing.git
     prefix: BIL
@@ -324,7 +328,12 @@ people:                        # who is on the team; ids are what home: names
     products: { atlas: [product-lead], billing: [qa] }   # per product
 layout:
   orchestrators: auto          # cel ws up acme starts one agent per product
-review: { runtime: pi, model: sonnet }   # one reviewer per PR, through the gateway
+review:                        # one reviewer per PR, through the gateway
+  runtime: pi
+  model: sonnet
+  extra:                       # specialist reviewers by the files a PR touches (policy)
+    - focus: security          # a pack in core/roles/focus/reviewer/
+      paths: ['lib/auth/**', '**/*token*']
 
 thinking: medium               # reasoning level when a profile names none
 worker_profiles:               # a name for each CLI + model + effort you use
@@ -340,7 +349,10 @@ role_profiles:                 # which profile each role launches on
 A team member's model comes from `role_profiles.team-<role>`, else
 `role_profiles.member`, else `runtime.orchestrator` with that CLI's default
 model. A product entry may narrow any binding for itself
-(`products[].role_profiles: { team-builder: sol }`). The model ids above are
+(`products[].role_profiles: { team-builder: sol }`). The lookup tries
+`team-<role>` on the product (or repo) and then the workspace before it tries
+`member` anywhere, so a product-level `member` loses to a workspace-level
+`team-<role>`: narrow a role for one product with `team-<role>` there. The model ids above are
 examples: use what `cel gateway status` and your providers offer. More on
 profiles: [Profiles](#profiles-runtime-model-and-effort-per-role).
 
@@ -352,6 +364,13 @@ person whose login runs a product's agents: on any other login, `cel ws up`
 and the steward skip that product, and `cel run solo` refuses it unless you
 pass `--force`. A personal workspace leaves `people:` and `home:` out, and
 nothing changes.
+
+`review.extra` is review policy: every PR gets its plain reviewer, and a PR
+that touches a file one of the `paths` globs matches also needs that focus's
+reviewer (a repo's own list adds to the workspace-wide one, so an `atlas-api` PR answers to both). `cel run reviewer` starts them and
+`cel solo land` waits for each one's approval of the head; see
+[The review loop](#the-review-loop). It is read from `workspace.yaml` only -
+`workspace.local.yaml` cannot add or drop one.
 
 How many helpers may run at once is a box setting, not a workspace one. It
 lives in `~/.local/share/cel/config.yaml` and covers every workspace on the
@@ -888,12 +907,15 @@ Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
 
 - the reviewer records `cel solo review <repo>#<n> approved|changes --head
   <sha> --by <alias>` (an approval must equal the PR's current head; verdicts
-  live in `<ws>/.cel/solo-reviews.json`) and sends findings to
+  live in `<ws>/.cel/solo-reviews.json`, an extra reviewer's under
+  `<repo>#<n>/review-<focus>`) and sends findings to
   `<product>-orch`. The solo agent itself can never record a verdict on its
   own PR, and only it (or a person) lands one - not a reviewer;
 - `cel solo land <repo>#<n>` merges with the checks in `lib/land.sh`:
   `merge: self`, the workspace account's own open non-draft
-  PR, an approval of the exact head, no red check, no conflict, and every
+  PR, an approval of the exact head from every reviewer the review policy
+  requires ([extra reviewers](#extra-reviewers-a-focus-by-hand-or-by-policy)),
+  no red check, no conflict, and every
   check the base branch requires - through classic branch protection or a
   repository/organisation ruleset - green on that head. It merges only that
   head (`--match-head-commit`), and CI on the head is the evidence the squash
@@ -1012,6 +1034,61 @@ token-free) backstops the loop: verified disposable worktrees are removed,
 stalled PRs are nudged, and blocked agents or preserved unlanded work are
 named until dealt with. Unknown state is a reason to retain work, not
 evidence that it is safe to delete.
+
+### Extra reviewers: a focus, by hand or by policy
+
+A specialist reviews a PR beside its plain reviewer, through one focus pack
+(`core/roles/focus/reviewer/`: `security`, `performance`, `db-migration`):
+
+```sh
+cel run reviewer --repo atlas-web --pr 41 --focus security
+```
+
+It is a reviewer of its own: the pack is appended to the reviewer role, it is
+named `<repo>-pr-<n>-review-<focus>` (`atlas-web-pr-41-review-security`; a
+name cut to 32 characters into another reviewer's is refused), has its own
+pane, checkout and mailbox, and counts against the box's helper budget like
+any reviewer. It records with `cel solo review atlas-web#41 approved|changes
+--head <sha> --by <its alias> --focus security`, and only from its own pane:
+a focus verdict needs the launch's `CEL_ROLE=reviewer` and `CEL_INBOX_ME` of
+that alias. A focus with no pack is refused, naming the packs there are.
+
+The workspace can require them instead, by the files a PR touches -
+`review.extra` workspace-wide and under a `repos[]` entry, read from
+`workspace.yaml` only:
+
+```yaml
+review:
+  model: sonnet
+  extra:
+    - focus: security
+      paths: ['lib/auth/**', '**/*token*']
+    - focus: db-migration
+      paths: ['migrations/**']
+```
+
+An entry has `focus`, `paths` and an optional `kind`; `review`, the default,
+is the only kind. Globs match repo-relative paths, both sides of a rename,
+and the whole path: `*` and `?` stay inside one directory level, `**` as a
+whole segment spans any number of directories (`**/*token*` matches
+`token.sh` and `a/b/api_token.ts`; `lib/auth/**` everything under
+`lib/auth/`, not `lib/auth` itself), everything else is literal. A malformed
+entry is refused, never skipped. With a policy, `cel run reviewer --repo r
+--pr n` starts (or reuses) the plain reviewer and then every extra reviewer
+whose paths match a file the PR touches now, saying which and why.
+
+`cel solo land` then requires an approval of the exact current head from
+every reviewer the policy requires for that PR - the plain one and each
+matching extra one, computed from the PR's files at land time - and counts an
+extra one only by a verdict its own alias recorded. A missing or stale one is
+refused by name, with the command that starts it. A focus reviewer started
+by hand that the policy does not require is **advisory**: its approval adds
+nothing and a verdict for an older head holds nothing up, but its `changes`
+at the head being merged blocks the land, as a red check does - a finding at
+that head is a finding whoever asked for it. The steward's "approved and
+green, land it" nudge and the dashboard's PR approval use the same rule;
+`cel solo approvals <repo>#<n> [--json]` shows each reviewer the PR needs and
+its word on the current head.
 
 ## Agents talk without hijacking your keyboard
 
@@ -1773,7 +1850,8 @@ policy block into every agent.
 | `cel run solo --product <p> [--lane <name>]` | start a product's agent, or a further lane for a parallel goal |
 | `cel run [root·orchestrator·reviewer]` | start an agent, role injected; `orchestrator` starts the product's solo agent |
 | `cel mode [<p>] [solo]` | show a product's mode, or set it to solo |
-| `cel solo review · land <repo>#<n>` | record a reviewer's verdict bound to the head / merge an approved, green PR |
+| `cel solo review · land <repo>#<n>` | record a reviewer's verdict bound to the head (`--focus f` for an extra reviewer) / merge a PR approved by every required reviewer, green |
+| `cel solo approvals <repo>#<n>... [--json]` | each reviewer a PR needs (plain, and every extra one `review.extra` requires) and its word on the current head, by land's rule |
 | `cel forge pr view · checks · reviews · list · create <repo>[#<n>]` | a PR in Celestial's words on GitHub or Forgejo alike (`--json` for the normalised value) |
 | `cel forge pr close <repo>#<n> [--comment-file f]` · `cel forge pr ready <repo>#<n>` | close a PR (the comment posted first, the branch kept) or take it out of draft (Forgejo: the `WIP:` title prefix removed; a no-op if it is not a draft) - only the product's own agent (`CEL_ROLE` solo or orchestrator, its product from `CEL_PRODUCT` or its `<product>-orch` mailbox), on its OWN product's repos and its own account's PRs (or a migrated Forgejo PR, author Ghost). A process with no agent identity is refused: the owner closes or readies PRs in the forge's web UI (Forgejo or GitHub) or with `gh` |
 | `cel forge run list <repo> [--branch b] [--sha <head>] · view <repo> <run-id> · logs <repo> <job-id> [--tail N] [--raw]` | CI runs, a run's jobs and a job's log, read-only for every role: Forgejo Actions over its API (no web login, no token in the agent's hands), GitHub through `gh run`; ids are the API's (the web page's run number shows as `web #N`), `--sha` lists a commit's runs with their job ids, and `view`/`logs` also take a run's or job's web page when it maps exactly; states are success · failure · cancelled · skipped · running · queued; `logs` drops per-line timestamps unless `--raw` (GitHub shows the job's failed steps) |

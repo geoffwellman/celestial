@@ -472,7 +472,7 @@ example:
 
 `lib/forge.sh` holds pull-request and CI operations in Celestial's own
 vocabulary (`forge_pr_view`, `forge_pr_list`, `forge_pr_checks`,
-`forge_pr_reviews`, `forge_pr_merge`, `forge_pr_create`, `forge_pr_close`,
+`forge_pr_reviews`, `forge_pr_files`, `forge_pr_merge`, `forge_pr_create`, `forge_pr_close`,
 `forge_pr_ready`, `forge_whoami`, `forge_run_list`, `forge_run_view`,
 `forge_run_rerun`, `forge_run_resolve`): each prints one normalised JSON value
 or fails, with the same shape from either backend; `forge_run_logs` prints a
@@ -627,6 +627,37 @@ classic protection and rulesets, or Forgejo's branch protection rules) and
 their latest runs on the head come from the same provider-dispatched answer.
 gc and release still call `gh` directly and move onto these operations
 separately.
+
+### Review policy: extra reviewers
+
+`lib/review-policy.sh` answers which reviewers a PR needs. Every PR has its
+plain reviewer; `review.extra` (workspace-wide, and under a `repos[]` entry,
+joined per focus) adds one per focus pack (`core/roles/focus/reviewer/`)
+whose path globs match a file the PR touches - both sides of a rename, as
+`forge_pr_files` lists them (GitHub refuses a list at its 3000-file cap,
+Forgejo is read page by page). The policy is read with `_yqr` from
+`workspace.yaml` alone, never through the `workspace.local.yaml` overlay,
+and a malformed entry fails the read; a repo with no entry asks the forge
+nothing. An entry's `kind` (default and only value `review`) is the seam for
+other kinds of required agent.
+
+An extra reviewer is a reviewer row of its own: alias, checkout
+(`<reviews>/<repo>-pr-<n>-review-<focus>`), registry row (`focus` beside
+workspace, repo and PR in the key), and verdict slot (`<repo>#<n>/review-<focus>`
+in `.cel/solo-reviews.json`, writable only from the process launched as that
+alias). `reviewers_discover` reads the focus from the checkout a pane stands
+in, so a name cut to 32 characters still says which. `cel gc` closes it on the
+same facts as the plain reviewer - its PR closed, or its own slot approving
+the current head - and `tools/reviewers/retire.mjs` finds a Rex one's round
+by its alias in either key.
+
+One rule decides "approved": `solo_plain_approval` (the recorded verdict or
+the forge's decision, at the head) and `solo_extra_approvals` (each required
+extra reviewer's own verdict at the head, computed from the PR's files at
+that moment; a hand-started one that is not required counts only when its
+`changes` is at the head, and then blocks). `cel solo land`, `solo_ready_prs`
+(the steward's land nudge) and `cel solo approvals` (the dashboard's PR
+approval) all call them.
 
 ## Credentials
 
