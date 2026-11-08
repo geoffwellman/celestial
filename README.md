@@ -115,6 +115,315 @@ shows `orch unnamed` rather than `-`, `cel doctor` says which directory it is
 in, `cel ws up` renames it, and `cel run orchestrator` refuses to start a
 second one over it without `--force`.
 
+## Setups at a glance
+
+"Team" means two different things in Celestial. A **feature team** is a group
+of short-lived agents that one product's agent leads for one feature
+(`cel team`). A **team workspace** is one workspace shared by several people,
+each on their own box. [Configure your teams](#configure-your-teams) sets up
+both.
+
+### One box: core, product agents, reviewers
+
+```mermaid
+flowchart TB
+  owner(["you"])
+  core["cel core<br/>one per box, never builds"]
+  subgraph acme["workspace acme"]
+    atlas["atlas-orch<br/>atlas's agent"]
+    billing["billing-orch<br/>billing's agent"]
+    ra["reviewer<br/>one per PR"]
+    rb["reviewer<br/>one per PR"]
+  end
+  subgraph lab["workspace lab"]
+    gizmo["gizmo-orch"]
+  end
+  owner <--> core
+  core -- "cel inbox" --> atlas
+  core -- "cel inbox" --> billing
+  core -- "cel inbox" --> gizmo
+  atlas -- "cel run reviewer" --> ra
+  billing -- "cel run reviewer" --> rb
+```
+
+Every setup is built on this one. You talk to `cel core`, one per box, which
+reads `root`'s mail in every workspace and directs each product's agent; each
+product's agent builds and lands its own PRs and starts one reviewer per PR.
+Selected by: `cel core` once per box; one `products:` entry per product (a repo
+that is in no product is its own product); `layout: { orchestrators: auto }`
+so `cel ws up <workspace>` starts every product's agent; and a `review:` block
+so there are reviewers at all.
+
+### One product, solo (the default)
+
+```mermaid
+flowchart LR
+  agent["atlas-orch"] -- "branch, gate, push, open PR" --> pr["PR on atlas-web"]
+  agent -- "cel run reviewer" --> rev["reviewer for that PR"]
+  rev -- "reads the head" --> pr
+  rev -- "cel solo review" --> agent
+  agent -- "cel solo land" --> main[("main")]
+```
+
+Choose this for almost everything: one agent holds the whole product, uses its
+own worktrees and subagents, and lands each PR once its reviewer approved that
+exact head and the checks are green. Selected by `mode: solo` on the product,
+which is also the default when absent, and `policy: { merge: self }` (with
+`merge: humans-only` the agent opens the PR and stops). Details:
+[Solo mode](#solo-mode).
+
+### Solo lanes: several goals on one product
+
+```mermaid
+flowchart LR
+  subgraph atlas["product atlas, same repos"]
+    direction TB
+    orch["atlas-orch<br/>main agent"]
+    checkout["atlas-checkout<br/>lane checkout"]
+    search["atlas-search<br/>lane search"]
+    checkout -. "cel inbox about shared files" .- search
+  end
+  prs["each agent: its own branches,<br/>PRs and reviewers"]
+  main[("main")]
+  orch & checkout & search --> prs
+  prs -- "cel solo land" --> main
+```
+
+Choose lanes when one product has two or three large goals that each want one
+agent holding the whole picture, in different parts of the code. Nothing in
+`workspace.yaml` selects a lane: start one with
+`cel run solo --product atlas --lane checkout`. Details:
+[Solo lanes](#solo-lanes-several-big-goals-one-agent-each).
+
+### A feature team, led by the product's agent
+
+```mermaid
+flowchart LR
+  subgraph team["members, added with cel team add"]
+    b1["builder<br/>owns src/auth"]
+    b2["builder<br/>owns src/ui/login"]
+    qa["qa"]
+    des["design"]
+  end
+  lead["atlas-orch, the lead<br/>integrates the branches"]
+  pr["one PR per repo"]
+  rev["PR reviewer"]
+  main[("main")]
+  b1 & b2 -- "push team branches" --> lead
+  qa & des -- "verdicts on the candidate head" --> lead
+  lead -- "opens" --> pr
+  rev -- "approves" --> pr
+  lead -- "cel solo land" --> main
+```
+
+Choose a team when a feature has two or more parts that can be built at the
+same time, or needs a specialist (device QA, design, data, a release check).
+The product's agent stays the only integrator: builders push
+`team/<feature>/<member>` branches and never open PRs, qa and design judge the
+lead's candidate head, and the lead opens one PR per repo, gets it reviewed
+and lands it with `cel solo land`. Selected by: `role_profiles` lines
+`team-<role>` and `member` for the members' models, and the box's `budget:`
+for how many may run. The product's agent runs the `cel team` commands.
+Details: [Feature teams](#feature-teams).
+
+### A team workspace, shared by several people
+
+```mermaid
+flowchart TB
+  remote[("acme/ws-acme<br/>workspace.yaml, the team contract")]
+  subgraph boxa["your box"]
+    ya["workspace.yaml"]
+    la["workspace.local.yaml<br/>your routing"]
+    ea["env.local<br/>your keys"]
+  end
+  subgraph boxb["a teammate's box"]
+    yb["workspace.yaml"]
+    lb["workspace.local.yaml<br/>their routing"]
+    eb["env.local<br/>their keys"]
+  end
+  remote -- "cel ws add, git pull" --> ya
+  remote -- "cel ws add, git pull" --> yb
+  la -. "overrides routing" .-> ya
+  lb -. "overrides routing" .-> yb
+```
+
+Choose this when several people, or one person on several boxes, work on the
+same products. Everyone shares `workspace.yaml` through git: repos, products,
+policy, review and the default routing. Each person keeps a gitignored
+`workspace.local.yaml` that changes only routing (which profile each role runs
+on) and per-box `env:`, and an `env.local` with their own keys. Details:
+[Team workspaces](#team-workspaces) and [Per-box routing](#per-box-routing).
+
+### How agents reach models: the gateway
+
+```mermaid
+flowchart LR
+  agents["agents on a via: gateway profile<br/>and every PR reviewer"] --> gw["cel gateway<br/>one door on 127.0.0.1"]
+  gw --> c1["Claude subscription 1"]
+  gw --> c2["Claude subscription 2"]
+  gw --> cx["Codex subscription"]
+```
+
+A profile with `via: gateway` reaches its model through `cel gateway`, which
+holds several subscriptions and keeps each agent on one account. Reviewers
+always go through it. Details:
+[Gateway](#gateway--several-subscriptions-behind-one-door).
+
+## Configure your teams
+
+| | Feature team | Team workspace |
+|---|---|---|
+| What it is | members one product's agent leads for one feature | one workspace shared by several people |
+| Configured in | `workspace.yaml` (`role_profiles`, `worker_profiles`) and the box config (`budget:`) | `workspace.yaml` (committed), plus `workspace.local.yaml` and `env.local` per person |
+| Started by | the product's agent: `cel team start` | you: `cel ws new`, then `cel ws add` on each box |
+
+### 1. Declare products, models and review
+
+A complete `workspace.yaml` for one workspace with two products:
+
+```yaml
+# ~/ws/acme/workspace.yaml - committed: everyone who clones the workspace reads it
+name: acme
+kind: team                     # a label; cel ws new asks, and defaults to personal
+org: acme                      # GitHub owner; cel ws push creates acme/ws-acme
+tickets: { system: none, adhoc: "AH-<yymmdd>" }
+policy:
+  merge: self                  # product agents land their own approved, green PRs
+  pr: required
+  pr_open: ready               # open PRs ready for review, not as drafts
+runtime: { root: claude, orchestrator: claude }   # the CLI when no profile applies
+env: {}                        # plain settings only; keys go in env.local
+repos:
+  - name: atlas-web
+    url: git@github.com:acme/atlas-web.git
+    prefix: ATL                # branch prefix
+    gate: npm test             # the check an agent runs before it pushes
+  - name: atlas-api
+    url: git@github.com:acme/atlas-api.git
+    prefix: API
+    gate: go test ./...
+  - name: billing              # in no product, so it is its own product
+    url: git@github.com:acme/billing.git
+    prefix: BIL
+    gate: npm test
+products:
+  - name: atlas                # one agent, atlas-orch, owns both repos
+    repos: [atlas-web, atlas-api]
+    mode: solo                 # the default
+layout:
+  orchestrators: auto          # cel ws up acme starts one agent per product
+review: { runtime: pi, model: sonnet }   # one reviewer per PR, through the gateway
+
+thinking: medium               # reasoning level when a profile names none
+worker_profiles:               # a name for each CLI + model + effort you use
+  opus: { runtime: pi, model: claude-opus-5-5, via: gateway, thinking: medium }
+  sol:  { runtime: pi, model: gpt-6.1-sol, via: gateway, thinking: low }
+role_profiles:                 # which profile each role launches on
+  solo: opus                   # the product agents and their lanes
+  member: sol                  # any team member without its own line below
+  team-builder: opus           # team-<role>: product, design, builder, qa,
+  team-qa: sol                 #   platform, release or analyst
+```
+
+A team member's model comes from `role_profiles.team-<role>`, else
+`role_profiles.member`, else `runtime.orchestrator` with that CLI's default
+model. A product entry may narrow any binding for itself
+(`products[].role_profiles: { team-builder: sol }`). The model ids above are
+examples: use what `cel gateway status` and your providers offer. More on
+profiles: [Profiles](#profiles-runtime-model-and-effort-per-role).
+
+How many helpers may run at once is a box setting, not a workspace one. It
+lives in `~/.local/share/cel/config.yaml` and covers every workspace on the
+box:
+
+```yaml
+budget:
+  max_live_agents: 8           # helpers: reviewers, team members and other launched agents
+  max_team_members: 4          # of those, team members
+```
+
+Both values above are the defaults. Product agents and core are never
+counted. `cel budget` shows what is live against both limits.
+
+Then, from the workspace:
+
+```sh
+cel ws sync acme               # clone the repos, render the policy into each one
+cel doctor                     # check the box and the workspace
+cel profiles                   # each profile's exact launch line
+cel ws up acme                 # start atlas-orch and billing-orch
+```
+
+### 2. Run a feature team, start to close
+
+You don't run these yourself: `cel team` refuses a shell with no agent role,
+except `cel team status`. Ask the product's agent, for example
+`cel inbox send atlas-orch "build login as a team"`, and it runs:
+
+```sh
+cel team start login --product atlas --repo atlas-web --brief-file brief.md
+# push the integration branch, then post its head as the candidate
+cel team event login candidate.updated --data '{"repo":"atlas-web","head":"<40-char sha>","branch":"ATL-login"}'
+cel team add login builder --repo atlas-web --owns 'src/auth/**' --focus backend --task-file auth.md
+cel team add login builder --repo atlas-web --owns 'src/ui/login/**' --focus frontend --task-file ui.md
+cel team add login qa --repo atlas-web --focus browser --task-file qa.md
+cel team add login design --focus ux --task-file design.md
+cel team status login          # roster, candidate heads, verdict freshness, who owes next
+# builders push team/login/<member> and report task.ready; the lead merges them,
+# runs the gate, pushes and posts candidate.updated again; qa and design judge
+# that head with: cel team verdict login --repo atlas-web --head <sha> pass --evidence report.md
+cel team cap login "<cap> (decision <id>)"   # only if members may spend; zero otherwise
+cel run reviewer --repo atlas-web --pr <n>   # one PR per repo, its own reviewer
+cel solo land atlas-web#<n>
+cel team close login           # retires every member; refuses over unpushed builder work
+```
+
+Members are admitted against the box budget, and `cel team add` is refused
+rather than queued when it is full. Roles, focus packs, events and verdicts:
+[Feature teams](#feature-teams).
+
+### 3. Share a workspace with your team
+
+One person creates the workspace and publishes it:
+
+```sh
+cel ws new acme --kind team --org acme --merge self
+# edit ~/ws/acme/workspace.yaml as in step 1, then commit it
+cel ws push acme               # creates the private repo acme/ws-acme and pushes
+```
+
+Each teammate, on their own box:
+
+```sh
+cel ws add git@github.com:acme/ws-acme.git   # clones to ~/ws/acme, registers and syncs it
+cd ~/ws/acme
+cp workspace.local.example.yaml workspace.local.yaml   # then edit it, below
+# put your own keys in env.local
+cel doctor
+cel profiles                   # bindings and profiles from your file are marked (local)
+```
+
+```yaml
+# ~/ws/acme/workspace.local.yaml - gitignored, this box only
+worker_profiles:
+  mine: { runtime: claude, model: claude-sonnet-5, thinking: medium }  # adds, or replaces one by name
+role_profiles:
+  solo: mine
+  team-builder: mine
+products:
+  - name: atlas                # by name; only role_profiles is read here
+    role_profiles: { team-qa: mine }
+env:
+  TMPDIR: /tmp/you             # per-box settings; keys still go in env.local
+```
+
+The local file may change only `role_profiles`, `worker_profiles`, `env:` and
+the `role_profiles` of a `products[]` or `repos[]` entry. Policy, repos,
+review, gates and the box budget stay in the shared files. To change the
+contract, edit `workspace.yaml`, commit and push; teammates `git pull` and run
+`cel ws sync acme`. Details: [Team workspaces](#team-workspaces) and
+[Per-box routing](#per-box-routing).
+
 ## How it works
 
 Three layers on disk, and a factory floor of agents above them.
@@ -131,17 +440,13 @@ Three layers on disk, and a factory floor of agents above them.
 ├── layouts.yml            herdr layouts (wins over the plane's)
 ├── externals.yaml         extra tools (additive overlay)
 ├── skills/                workspace-scoped skills
-└── repos/<product>/       the actual product clones (gitignored here)
+└── repos/<repo>/          the actual product clones (gitignored here)
 
 ~/.local/share/cel         box state: registry, published pages (never in git)
 ```
 
-```
-core                one per box - coordinates products, owns root's mail; never builds
-   └── solo         one per product (1..n repos) - plans, builds, tests, opens PRs, lands
-          ├── reviewer   one per PR it opens, one verdict per round
-          └── lanes      optional: further solo agents on the same product, one per goal
-```
+The agents above them, and how they reach each other, are drawn in
+[Setups at a glance](#setups-at-a-glance).
 
 A **workspace** is not a tier. It is the scope that holds configuration and
 grouping: policy, ticket tracker, environment, profiles, dashboard. A
@@ -603,8 +908,13 @@ write holds the folder's lock and JSON is replaced whole.
   member`. It is `reserved` until the launcher confirmed the exact agent AND
   the member ran `cel team ack`; a launch that never confirms stays reserved
   and is not relaunched.
-- **Reporting** — members append `task.ready` (head + gate result),
-  `preview.ready` and `decision` events with `cel team event ... --to
+- **Models** — a member launches on `role_profiles.team-<role>`, else
+  `role_profiles.member`, else the workspace's `runtime.orchestrator` with
+  that CLI's default model; a `products[]` entry may narrow either binding
+  for its own product, and `cel team add ... --model m` sets the model for
+  one member. Example: [Configure your teams](#1-declare-products-models-and-review).
+- **Reporting** — members append `task.ready` (head + gate result) and
+  `preview.ready` (platform or qa) events with `cel team event ... --to
   <alias>` (which also mails), and judge the lead's candidate head with `cel
   team verdict <f> --repo r --head <sha> pass|changes|blocked|advisory
   --evidence <file>`. A newer `candidate.updated` makes older verdicts show
@@ -1158,7 +1468,8 @@ role_profiles:
 A product or repo entry may narrow a binding for itself
 (`products[].role_profiles`). `cel run solo|reviewer ... --profile <name>`
 overrides once; a lane remembers it. `cel profiles` prints every profile, the
-exact launch flags it resolves to, and the role bindings.
+exact launch flags it resolves to, and the workspace-level bindings for root,
+orchestrator, solo, reviewer and direct (not `member` or `team-<role>`).
 
 `agents.yaml` records each runtime's model flag and how it takes a reasoning
 level — claude `--effort`, omp/pi `--thinking`, codex
@@ -1391,7 +1702,7 @@ policy block into every agent.
 | `cel forge run list <repo> [--branch b] [--sha <head>] · view <repo> <run-id> · logs <repo> <job-id> [--tail N] [--raw]` | CI runs, a run's jobs and a job's log, read-only for every role: Forgejo Actions over its API (no web login, no token in the agent's hands), GitHub through `gh run`; ids are the API's (the web page's run number shows as `web #N`), `--sha` lists a commit's runs with their job ids, and `view`/`logs` also take a run's or job's web page when it maps exactly; states are success · failure · cancelled · skipped · running · queued; `logs` drops per-line timestamps unless `--raw` (GitHub shows the job's failed steps) |
 | `cel forge run rerun <repo> <job-id>` | run one job again on the same head (an approval of it stands) - only the product's own agent on its own product's repos; the owner reruns in the forge's web UI or with `gh run rerun` |
 | `cel budget [--json]` | live helpers (reviewers, team members, other) against `budget.max_live_agents` (default 8) and team members against `budget.max_team_members` (default 4); product agents and core shown, not counted; and the memory floor |
-| `cel team start · add · ack · event · verdict · status · retire · close` | a [feature team](#feature-teams) under the product's lead: budget-admitted, scoped members, head-bound verdicts, close that keeps unpushed work |
+| `cel team start · add · ack · event · verdict · status · retire · close · cap` | a [feature team](#feature-teams) under the product's lead: budget-admitted, scoped members, head-bound verdicts, a lead-set spend cap, close that keeps unpushed work |
 | `cel here <verb>` | what `/cel-<verb>` runs inside an agent |
 | `cel profiles` | profiles, role bindings and the exact launch flags each resolves to |
 | `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |
