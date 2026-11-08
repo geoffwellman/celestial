@@ -54,12 +54,15 @@ _wslife_label() { printf '%s' "$1"; }
 # `layout.orchestrators` is the workspace-wide switch (auto | manual | none),
 # `products[].orchestrator` overrides it in EITHER direction, and silence -
 # in any of its three shapes - means manual, which starts nothing (see
-# ws_orchestrator_mode in lib/workspace.sh).
+# ws_orchestrator_mode in lib/workspace.sh). An auto product whose home is
+# another login (products[].home, ws_product_home_check) is not this login's
+# to start, and is left out without a word.
 wslife_orchestrators() { # <wsdir>
   local p mode
   for p in $(ws_product_names "$1"); do
     IFS=$'\t' read -r mode _ <<< "$(ws_orchestrator_mode "$1" "$p")"
     [ "$mode" = auto ] || continue
+    ws_product_home_check "$1" "$p" >/dev/null || continue
     printf '%s\n' "$p"
   done
 }
@@ -182,8 +185,16 @@ cmd_ws_up() { # <name> [--dry-run]
     occupant="$(_run_live_agent_in_cwd "$dir")"
     if [ -z "$occupant" ] && ! printf '%s\n' "$wanted" | grep -qxF "$p"; then
       # A dry run is where the operator goes to ask why nothing starts, so it
-      # says the mode AND where the mode came from rather than saying nothing.
-      [ "$dry" -eq 0 ] || _wslife_say "orchestrator $alias" "$mode via $src - nothing starts it"
+      # says the mode AND where the mode came from rather than saying nothing -
+      # or whose login runs the product. A real `up` says nothing of either.
+      if [ "$dry" -eq 1 ]; then
+        local home_why
+        if home_why="$(ws_product_home_check "$wsdir" "$p")"; then
+          _wslife_say "orchestrator $alias" "$mode via $src - nothing starts it"
+        else
+          _wslife_say "orchestrator $alias" "$home_why - not started here"
+        fi
+      fi
       continue
     fi
     if [ -n "$occupant" ]; then
@@ -345,7 +356,10 @@ _wslife_members() { # <wsdir> <name> -> kind\tname\tdeclared\tlive\taction\tsour
     local action='-'
     case "$live" in
       unnamed) action='would rename' ;;
-      no) [ "$declared" = auto ] && action='would start' ;;
+      no) if [ "$declared" = auto ]; then
+            if ws_product_home_check "$wsdir" "$p" >/dev/null; then action='would start'
+            else action="runs on $(ws_product_home "$wsdir" "$p")'s login"; fi
+          fi ;;
     esac
     printf 'orchestrator\t%s\t%s\t%s\t%s\t%s\n' "$alias" "$declared" "$live" "$action" "$source"
   done

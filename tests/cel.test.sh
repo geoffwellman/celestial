@@ -122,3 +122,74 @@ test_cel_reexecutes_without_smuggled_shell_code() {
   assert_contains "$out" "refusing to run" || { rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
 }
+
+# `cel people`: who is who in a team workspace, and which person this login
+# is (its workspace.local.yaml me:).
+_cel_people_ws() {
+  T="$(mktemp -d)"
+  mkdir -p "$T/acme"
+  cat > "$T/acme/workspace.yaml" <<'YAML'
+name: acme
+kind: team
+people:
+  - id: sam
+    login: sam-example
+    roles: [owner, approver]
+    products: { atlas: [qa] }
+  - id: jo
+    login: jo-example
+    products: { atlas: [product-lead], billing: [qa] }
+products:
+  - { name: atlas, repos: [atlas-web], home: sam }
+repos:
+  - { name: atlas-web, prefix: ATL }
+  - { name: billing, prefix: BIL }
+YAML
+  printf 'me: jo\n' > "$T/acme/workspace.local.yaml"
+  printf 'workspaces:\n  acme: {path: "%s/acme"}\n' "$T" > "$T/registry.yaml"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_YAML_CACHE="$T/cache"
+}
+
+test_help_lists_cel_people() {
+  assert_contains "$("$CEL" help 2>&1)" "cel people"
+  assert_contains "$("$CEL" people --help 2>&1)" "--json"
+}
+
+test_cel_people_json_says_who_is_who_and_who_this_login_is() {
+  _cel_people_ws
+  local out
+  out="$("$CEL" people --workspace acme --json)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r .workspace)" "acme"
+  assert_eq "$(printf '%s' "$out" | jq -r .me)" "jo"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.people[] | select(.me) | .id] | join(",")')" "jo"
+  assert_eq "$(printf '%s' "$out" | jq -r '.people[] | select(.id == "sam") | .login')" "sam-example"
+  assert_eq "$(printf '%s' "$out" | jq -r '.people[] | select(.id == "sam") | .roles | join(",")')" "owner,approver"
+  assert_eq "$(printf '%s' "$out" | jq -r '.people[] | select(.id == "jo") | .products.billing | join(",")')" "qa"
+  assert_eq "$(printf '%s' "$out" | jq -r '.homes[] | select(.product == "atlas") | .home')" "sam"
+  assert_eq "$(printf '%s' "$out" | jq -r '.homes[] | select(.product == "billing") | .home')" "null"
+  assert_eq "$(printf '%s' "$out" | jq -r '.people[] | select(.id == "sam") | .home_of | join(",")')" "atlas"
+  rm -rf "$T"
+}
+
+test_cel_people_text_marks_this_login() {
+  _cel_people_ws
+  local out
+  out="$(cd "$T/acme" && "$CEL" people)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "this login is jo"
+  assert_contains "$out" "sam-example"
+  assert_contains "$out" "atlas: product-lead"
+  assert_contains "$out" "runs on sam's login"
+  rm -rf "$T"
+}
+
+test_cel_people_without_people_says_how_to_declare_them() {
+  T="$(mktemp -d)"; mkdir -p "$T/solo"
+  export CEL_YAML_CACHE="$T/cache"
+  printf 'name: solo\nrepos:\n  - { name: widget, prefix: WG }\n' > "$T/solo/workspace.yaml"
+  local out
+  out="$(cd "$T/solo" && "$CEL" people 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "declares no people"
+  assert_contains "$out" "people:"
+  assert_eq "$(cd "$T/solo" && "$CEL" people --json | jq -c '[.people, .me]')" '[[],null]'
+  rm -rf "$T"
+}

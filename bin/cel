@@ -226,6 +226,11 @@ cel - the celestial plane
                                 token cel team add writes (and it spends it)
   cel profiles [name]           launch profiles this workspace declares, and
                                 the exact launch flags each one resolves to
+  cel people [--workspace w] [--json]
+                                who is who in a team workspace: people:, their
+                                forge logins and roles, which person this login
+                                is (me: in workspace.local.yaml), and which
+                                login runs each product (products[].home)
   cel quota [provider] [--json] the signed-in Claude and Codex subscriptions -
                                 each window, its percentage and when it resets -
                                 above the API balance per provider, asked of
@@ -371,6 +376,7 @@ case "${1:-help}" in
   team)     shift; . "$CEL_ROOT/lib/team.sh";    cmd_team "$@";;
   forge)    shift; . "$CEL_ROOT/lib/forge.sh";   cmd_forge "$@";;
   profiles) shift; . "$CEL_ROOT/lib/profiles.sh"; cmd_profiles "$@";;
+  people)   shift; . "$CEL_ROOT/lib/people.sh";  cmd_people "$@";;
   quota)    shift; . "$CEL_ROOT/lib/quota.sh";    cmd_quota "$@";;
   gateway)  shift; . "$CEL_ROOT/lib/gateway.sh";  cmd_gateway "$@";;
   learn)    shift; . "$CEL_ROOT/lib/learn.sh";    cmd_learn "$@";;

@@ -249,10 +249,13 @@ flowchart TB
 
 Choose this when several people, or one person on several boxes, work on the
 same products. Everyone shares `workspace.yaml` through git: repos, products,
-policy, review and the default routing. Each person keeps a gitignored
-`workspace.local.yaml` that changes only routing (which profile each role runs
-on) and per-box `env:`, and an `env.local` with their own keys. Details:
-[Team workspaces](#team-workspaces) and [Per-box routing](#per-box-routing).
+policy, review, the default routing, and `people:` - who is on the team.
+Each person keeps a gitignored `workspace.local.yaml` that changes only
+routing (which profile each role runs on), per-box `env:` and `me:` (which
+person this login is), and an `env.local` with their own keys. A product's
+`home:` names the one login that runs its agents, so two teammates' boxes
+never both build it. Details: [Team workspaces](#team-workspaces) and
+[Per-box routing](#per-box-routing).
 
 ### How agents reach models: the gateway
 
@@ -306,10 +309,19 @@ repos:
     url: git@github.com:acme/billing.git
     prefix: BIL
     gate: npm test
+    home: jo                   # a repo in no product names its home here
 products:
   - name: atlas                # one agent, atlas-orch, owns both repos
     repos: [atlas-web, atlas-api]
     mode: solo                 # the default
+    home: sam                  # only sam's login starts atlas's agents (team workspaces)
+people:                        # who is on the team; ids are what home: names
+  - id: sam
+    login: sam-example         # their own forge login (GitHub or Forgejo)
+    roles: [owner, approver]   # workspace-wide
+  - id: jo
+    login: jo-example
+    products: { atlas: [product-lead], billing: [qa] }   # per product
 layout:
   orchestrators: auto          # cel ws up acme starts one agent per product
 review: { runtime: pi, model: sonnet }   # one reviewer per PR, through the gateway
@@ -332,6 +344,15 @@ model. A product entry may narrow any binding for itself
 examples: use what `cel gateway status` and your providers offer. More on
 profiles: [Profiles](#profiles-runtime-model-and-effort-per-role).
 
+`people:` and `home:` matter once several people share the workspace (step
+3). Each person's `login` is their own forge account. Roles come from a fixed
+list: `owner`, `product-lead`, `qa`, `design`, `release` and `approver`,
+held workspace-wide (`roles:`) or per product (`products:`). `home:` names the
+person whose login runs a product's agents: on any other login, `cel ws up`
+and the steward skip that product, and `cel run solo` refuses it unless you
+pass `--force`. A personal workspace leaves `people:` and `home:` out, and
+nothing changes.
+
 How many helpers may run at once is a box setting, not a workspace one. It
 lives in `~/.local/share/cel/config.yaml` and covers every workspace on the
 box:
@@ -351,7 +372,7 @@ Then, from the workspace:
 cel ws sync acme               # clone the repos, render the policy into each one
 cel doctor                     # check the box and the workspace
 cel profiles                   # each profile's exact launch line
-cel ws up acme                 # start atlas-orch and billing-orch
+cel ws up acme                 # sam's login starts atlas-orch, jo's billing-orch
 ```
 
 ### 2. Run a feature team, start to close
@@ -388,7 +409,8 @@ One person creates the workspace and publishes it:
 
 ```sh
 cel ws new acme --kind team --org acme --merge self
-# edit ~/ws/acme/workspace.yaml as in step 1, then commit it
+# edit ~/ws/acme/workspace.yaml as in step 1 - add everyone to people: and give
+# each product a home: - then commit it
 cel ws push acme               # creates the private repo acme/ws-acme and pushes
 ```
 
@@ -399,12 +421,14 @@ cel ws add git@github.com:acme/ws-acme.git   # clones to ~/ws/acme, registers an
 cd ~/ws/acme
 cp workspace.local.example.yaml workspace.local.yaml   # then edit it, below
 # put your own keys in env.local
-cel doctor
+cel doctor                     # checks me: against your own forge login
+cel people                     # who is who, and which person this login is
 cel profiles                   # bindings and profiles from your file are marked (local)
 ```
 
 ```yaml
 # ~/ws/acme/workspace.local.yaml - gitignored, this box only
+me: jo                         # your id in people: - which products start here
 worker_profiles:
   mine: { runtime: claude, model: claude-sonnet-5, thinking: medium }  # adds, or replaces one by name
 role_profiles:
@@ -418,11 +442,33 @@ env:
 ```
 
 The local file may change only `role_profiles`, `worker_profiles`, `env:` and
-the `role_profiles` of a `products[]` or `repos[]` entry. Policy, repos,
-review, gates and the box budget stay in the shared files. To change the
-contract, edit `workspace.yaml`, commit and push; teammates `git pull` and run
-`cel ws sync acme`. Details: [Team workspaces](#team-workspaces) and
-[Per-box routing](#per-box-routing).
+the `role_profiles` of a `products[]` or `repos[]` entry, and set `me:`.
+Policy, repos, people, homes, review, gates and the box budget stay in the
+shared files. To change the contract, edit `workspace.yaml`, commit and push;
+teammates `git pull` and run `cel ws sync acme`.
+
+`cel people` on jo's login, for the workspace in step 1:
+
+```text
+acme: 2 people; this login is jo
+
+    sam              sam-example              owner, approver
+  * jo               jo-example               atlas: product-lead; billing: qa
+
+who runs each product's agents (products[].home):
+  atlas            runs on sam's login - not started here
+  billing          this login (jo)
+```
+
+On jo's login, `cel ws up acme` and the steward start billing-orch and leave
+atlas alone, without a warning. `cel run solo --product atlas` refuses:
+
+```text
+cel run: atlas runs on sam's login (products[].home: sam); this login is jo - ask sam, or pass --force
+```
+
+A login with no `me:` starts no product that has a `home:`. Details:
+[Team workspaces](#team-workspaces) and [Per-box routing](#per-box-routing).
 
 ## How it works
 
@@ -1487,19 +1533,49 @@ A team workspace has three layers:
 | Layer | File | Committed | Holds |
 |---|---|---|---|
 | Team contract | `workspace.yaml` | yes | everything, including the default routing |
-| Personal routing | `workspace.local.yaml` | no | routing overrides only |
+| Personal routing | `workspace.local.yaml` | no | routing overrides, and `me:` |
 | Secrets | `env.local` | no | keys |
 
 The local file may change `role_profiles` (workspace-level and per
-`products[]`/`repos[]` entry), add or replace `worker_profiles`, and override
-`env:` keys. It may not change `policy`, `tickets`, `repos`, `products`,
-gates, prefixes, merge or review settings, or `services` - and the policy
-block rendered into CLAUDE.md/AGENTS.md always comes from `workspace.yaml`
-alone. `cel doctor` fails if `workspace.yaml` is not committed.
+`products[]`/`repos[]` entry), add or replace `worker_profiles`, override
+`env:` keys, and set `me:`. It may not change `policy`, `tickets`, `repos`,
+`products`, `people`, gates, prefixes, merge or review settings, or
+`services` - and the policy block rendered into CLAUDE.md/AGENTS.md always
+comes from `workspace.yaml` alone. `cel doctor` fails if `workspace.yaml` is
+not committed.
+
+**People.** `people:` in `workspace.yaml` lists who is on the team: an `id`
+(`[a-z][a-z0-9-]{0,30}`), their own forge `login`, `roles:` held for every
+product and `products: { <product>: [roles] }` held for one. Roles are
+`owner`, `product-lead`, `qa`, `design`, `release` and `approver`. Each login
+says which person it is with `me: <id>` in its own `workspace.local.yaml`.
+That is self-asserted: `cel doctor` checks it against the login's own forge
+account (`gh api user` without the workspace's `github.user` token, or the
+login's own Forgejo token) and warns on a mismatch. `cel people [--json]`
+lists everyone, their roles, and which person this login is.
+
+**One login runs each product.** Each teammate's steward otherwise starts
+every `orchestrator: auto` product, and two builders then work the same repos
+with separate review state. `products[].home: <id>` (or `repos[].home` for a
+repo in no product) names the person whose login runs the product's agents.
+On any other login:
+
+- `cel run orchestrator|solo --product <p>`, lanes included, refuses with
+  `cel run: atlas runs on sam's login (products[].home: sam); this login is jo - ask sam, or pass --force`;
+- `cel ws up` and the steward skip the product silently (`cel ws up
+  --dry-run` and `cel ws status` say whose it is);
+- a login with no `me:` is treated as nobody's, so it starts no product
+  that has a home (fail closed).
+
+`cel doctor` reports an error for a malformed `people:` entry, a role that
+is not in the list, a `me:` or `home:` that names nobody, or a `me:` committed
+to `workspace.yaml`. It warns about a `kind: team` workspace with an
+`orchestrator: auto` product that has no `home`. With none of these keys,
+nothing changes.
 
 Joining a team workspace: clone it (`cel ws add <url>`), copy
-`workspace.local.example.yaml` to `workspace.local.yaml`, choose your
-profiles, run `cel doctor`.
+`workspace.local.example.yaml` to `workspace.local.yaml`, set `me:` and choose
+your profiles, run `cel doctor`.
 
 ### Per-box routing
 
@@ -1515,7 +1591,8 @@ uncommitted edit to a file everyone else also reads.
 matched by name) and adds `worker_profiles` - or replaces one whole, by name,
 if it names one the committed file already has, so a local `sonnet` profile
 never inherits a base `sonnet` profile's `via:`, `fallback:` or `thinking:`.
-It is allowed to do only that: it cannot add a repo, change policy, or hide
+It is allowed to do only that, plus `me:` (which person this login is, see
+[Team workspaces](#team-workspaces)): it cannot add a repo, change policy, or hide
 anything a teammate reading `workspace.yaml` needs to know. Local always wins
 over the committed file. `cel doctor` warns on anything else the file
 declares (an unrelated top-level key, or a `products[]`/`repos[]` name with
@@ -1705,6 +1782,7 @@ policy block into every agent.
 | `cel team start · add · ack · event · verdict · status · retire · close · cap` | a [feature team](#feature-teams) under the product's lead: budget-admitted, scoped members, head-bound verdicts, a lead-set spend cap, close that keeps unpushed work |
 | `cel here <verb>` | what `/cel-<verb>` runs inside an agent |
 | `cel profiles` | profiles, role bindings and the exact launch flags each resolves to |
+| `cel people [--workspace w] [--json]` | who is who in a [team workspace](#team-workspaces): people, forge logins, roles per product, which person this login is (`me:`) and which login runs each product (`home:`) |
 | `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |
 | `cel quota [provider] [--json]` | the signed-in Claude and Codex subscriptions — every window, its percentage and when it resets — above the credit left per API provider; a route below its floor, or on a spent 5h window, is vetoed before a pane spawns |
 | `cel learn add · list · reinforce · stow` | durable facts the workspace has established — pinned / aging / perishable — budgeted into every agent's policy block |

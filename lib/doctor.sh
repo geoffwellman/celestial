@@ -41,6 +41,8 @@ _CEL_DOCTOR=1
 # shellcheck source=lib/serve.sh
 . "${BASH_SOURCE[0]%/*}/serve.sh"
 . "${BASH_SOURCE[0]%/*}/steward_timer.sh"   # steward_timer_health, steward_timer_upgrade
+# shellcheck source=lib/people.sh
+. "${BASH_SOURCE[0]%/*}/people.sh"   # people_forge_login, for the me: check
 
 # One line for the services this box runs on nobody's behalf in particular:
 # how many it declares and how many are actually answering. The second half is
@@ -353,6 +355,96 @@ doctor_ws_contract_lines() { # <wsdir> <name> -> 1 if the contract is not commit
   fi
 }
 
+# PEOPLE, ME AND HOME (lib/workspace.sh: ws_people_json, ws_me,
+# ws_product_home). Errors are declarations that break something: a malformed
+# people: entry, a committed me: (it would name the same person on every
+# teammate's box), a me: naming nobody, a home naming nobody (every login
+# would refuse that product). Warnings are things that may be right: this
+# login's forge account is not its me:'s login (doctor cannot always ask the
+# right account), no me: where products have a home (this login starts none
+# of them), and a team workspace with auto products and no home (every
+# teammate's steward starts them). Says nothing for a workspace with none of
+# these keys.
+doctor_people_lines() { # <wsdir> <name> -> 1 when the declaration is broken
+  local wsdir="$1" n="$2" f="$1/workspace.yaml" fail=0 line me people prods p home homes=""
+  if [ -n "$(_wsy "$wsdir" '.me')" ]; then
+    c_err "$n: workspace.yaml declares me: - it says which person a login is, so it belongs in that login's own workspace.local.yaml (gitignored); remove it from workspace.yaml"
+    fail=1
+  fi
+  prods="$(ws_product_names "$wsdir" | jq -R . | jq -sc .)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    c_err "$n: people: $line"; fail=1
+  done < <(_yqr -r --argjson prods "$prods" --arg roles "$_WS_PERSON_ROLES" '
+    ($roles | split(" ")) as $R
+    | def badroles($who; $for):
+        if type != "array" then "\($who): roles\($for) must be a list"
+        else .[] | select((type != "string") or ((. as $r | $R | index($r)) == null))
+             | "\($who): role '"'"'\(.)'"'"'\($for) is not one of \($roles)" end;
+    if .people == null then empty
+    elif (.people | type) != "array" then "must be a list"
+    else
+      (.people | to_entries[] | .key as $i | .value as $p
+       | if ($p | type) != "object" then "entry \($i + 1) is not a mapping"
+         else ("person \($p.id // "#\($i + 1)")") as $who
+         | (if (($p.id // "") | tostring | test("^[a-z][a-z0-9-]{0,30}$")) then empty
+            else "\($who): id '"'"'\($p.id // "")'"'"' - want [a-z][a-z0-9-]{0,30}" end),
+           (if $p.login == null or (($p.login | tostring) | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,38}$")) then empty
+            else "\($who): login '"'"'\($p.login)'"'"' is not a forge login" end),
+           ($p.roles // [] | badroles($who; "")),
+           (if ($p.products // {} | type) != "object" then "\($who): products must map a product to its roles"
+            else ($p.products // {}) | to_entries[] | .key as $k
+              | (if ($prods | index($k)) == null then "\($who): product '"'"'\($k)'"'"' is not in this workspace" else empty end),
+                (.value | badroles($who; " for \($k)"))
+            end)
+         end),
+      ([.people[] | objects | .id // empty] | group_by(.) | map(select(length > 1) | .[0])[]
+       | "person id '"'"'\(.)'"'"' is declared more than once")
+    end' "$f")
+  people="$(ws_people_json "$wsdir")"
+  me="$(ws_me "$wsdir")"
+  for p in $(ws_product_names "$wsdir"); do
+    home="$(ws_product_home "$wsdir" "$p")"
+    if [ -z "$home" ]; then
+      # C1: with no home, every teammate's `cel ws up` and steward start it.
+      if [ "$(ws_kind "$wsdir")" = team ] && [ "$(ws_orchestrator_mode "$wsdir" "$p" | cut -f1)" = auto ]; then
+        c_warn "$n/$p: orchestrator: auto in a team workspace and no home - every teammate's steward starts $p's agent, and two builders work the same repos; name the login that runs it with home: <people id> (products[].home, or repos[].home for a repo in no product)"
+      fi
+      continue
+    fi
+    homes="$homes${homes:+, }$p → $home"
+    if ! jq -e --arg h "$home" 'any(.[]; .id == $h)' <<< "$people" >/dev/null; then
+      c_err "$n/$p: home: $home names no person in people: - every login refuses to start $p"
+      fail=1
+    fi
+  done
+  if [ -n "$me" ]; then
+    local login actual
+    if ! jq -e --arg m "$me" 'any(.[]; .id == $m)' <<< "$people" >/dev/null; then
+      c_err "$n: workspace.local.yaml me: $me names no person in workspace.yaml's people: - fix the id, or add the person"
+      fail=1
+    else
+      login="$(jq -r --arg m "$me" 'first(.[] | select(.id == $m)) | .login // ""' <<< "$people")"
+      if [ -z "$login" ]; then
+        c_ok "$n: this login is $me (no forge login declared to check it against)"
+      else
+        actual="$(people_forge_login "$wsdir")"
+        if [ -z "$actual" ]; then
+          c_warn "$n: this login is $me (login $login), but doctor could not tell this login's own forge account to check it"
+        elif [ "$actual" = "$login" ]; then
+          c_ok "$n: this login is $me ($login)"
+        else
+          c_warn "$n: workspace.local.yaml says this login is $me, whose login is $login, but this login's own forge account is $actual - fix me:, or log in as $login"
+        fi
+      fi
+    fi
+  elif [ -n "$homes" ]; then
+    c_warn "$n: this login names no person (no me: in workspace.local.yaml), so it starts none of the products with a home ($homes) - add me: <your people id>"
+  fi
+  [ -z "$homes" ] || [ -z "$me" ] || c_ok "$n: product homes: $homes"
+  return "$fail"
+}
+
 # Per-registered-workspace audit. Warnings (local-only, uncloned
 # repos, missing gate binaries) never fail the pass; only c_err findings do.
 check_workspaces() {
@@ -453,6 +545,7 @@ check_workspaces() {
     doctor_ws_local_summary "$path" "$n"
     doctor_ws_local_lines "$path" "$n" || fail=1
     doctor_ws_contract_lines "$path" "$n" || fail=1
+    doctor_people_lines "$path" "$n" || fail=1
 
     for role in root orchestrator; do
       rt="$(ws_runtime "$path" "$role")"

@@ -263,6 +263,56 @@ test_steward_reports_a_failed_orchestrator_launch() {
   rm -rf "$T"
 }
 
+# ONE LOGIN RUNS A PRODUCT. An auto product whose products[].home is another
+# person - or any home, on a login that names no person - is not this box's
+# to start: the steward starts nothing, says nothing and raises nothing.
+test_steward_skips_a_product_whose_home_is_another_login_silently() {
+  _orch_fixture
+  RAISED="$T/raised"; : > "$RAISED"
+  _steward_raise() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >> "$RAISED"; }
+  sed -i 's/orchestrator: auto}/orchestrator: auto, home: sam}/' "$T/alpha/workspace.yaml"
+  printf 'people:\n  - {id: sam, login: sam-example}\n  - {id: jo, login: jo-example}\n' >> "$T/alpha/workspace.yaml"
+  local me out
+  for me in jo -; do
+    rm -f "$T/alpha/workspace.local.yaml"
+    [ "$me" = - ] || printf 'me: %s\n' "$me" > "$T/alpha/workspace.local.yaml"
+    : > "$T/state"
+    out="$(STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" 2>&1)"
+    assert_eq "$(cat "$T/launched")" "" || { rm -rf "$T"; return 1; }
+    ! printf '%s' "$out" | grep -q bundle \
+      || { echo "the steward spoke about a product that is not this login's ($me): $out"; rm -rf "$T"; return 1; }
+    assert_eq "$(cat "$RAISED")" "" || { rm -rf "$T"; return 1; }
+    assert_eq "$(_steward_rows)" "0" || { rm -rf "$T"; return 1; }
+  done
+  # ...and on the home login it starts as before
+  printf 'me: sam\n' > "$T/alpha/workspace.local.yaml"
+  _steward_orchestrators "$ROSTER" >/dev/null
+  assert_eq "$(cat "$T/launched")" "bundle alpha"
+  rm -rf "$T"
+}
+# A fault raised before the home was set comes down once it is set.
+test_steward_clears_an_old_start_fault_for_a_product_now_homed_elsewhere() {
+  _orch_fixture
+  _steward_raise alpha "orch-ensure-bundle" blocked "steward: alpha/bundle resolves orchestrator: auto and bundle-orch will not start"
+  sed -i 's/orchestrator: auto}/orchestrator: auto, home: sam}/' "$T/alpha/workspace.yaml"
+  printf 'people:\n  - {id: sam, login: sam-example}\n' >> "$T/alpha/workspace.yaml"
+  printf 'me: jo\n' > "$T/alpha/workspace.local.yaml"
+  _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  ! cmd_inbox open --for root --workspace alpha 2>/dev/null | grep -q 'bundle-orch will not start' \
+    || { echo "the stale start fault is still open"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/launched")" ""
+  rm -rf "$T"
+}
+# With no people:, home: or me: the steward starts the auto product as
+# before; a me: alone changes nothing.
+test_steward_without_home_keys_is_unchanged() {
+  _orch_fixture
+  printf 'me: jo\n' > "$T/alpha/workspace.local.yaml"
+  _steward_orchestrators "$ROSTER" >/dev/null
+  assert_eq "$(cat "$T/launched")" "bundle alpha"
+  rm -rf "$T"
+}
+
 # An open owner card, written the way `cel decide ask` records one.
 _owner_card() { # <ws> <id> <title> <blocks>
   jq -nc --arg id "$2" --arg t "$3" --arg b "$4" \
