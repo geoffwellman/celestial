@@ -726,6 +726,9 @@ _ws_gateway() {
 worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 YAML
+  _gw_state
+}
+_gw_state() { # an isolated gateway (state, stub, pi root) for the workspace in $T
   GWT_PREVIOUS_CEL_PI_AGENT_DIR_SET="${CEL_PI_AGENT_DIR+x}"
   GWT_PREVIOUS_CEL_PI_AGENT_DIR="${CEL_PI_AGENT_DIR:-}"
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
@@ -1525,6 +1528,130 @@ test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
   assert_eq "$(cat "$T/agent-ran")" "tok-b"
   rm -rf "$T"
 }
+
+# ---- a helper starts with a clean environment ------------------------------
+# A reviewer pane once inherited CLOUDFLARE_API_TOKEN and other owner secrets
+# from the shell that launched it. Reviewers and team members now start with
+# every inherited variable whose NAME looks like a credential removed, except
+# what their own launch line sets and the provider key their profile needs.
+# Every value below is a fixture, never a real credential, and no test prints
+# an environment: the stand-in runtime records only the variables it is told.
+_caller_secrets() { export CLOUDFLARE_API_TOKEN=fixture-cloudflare FOO_TOKEN=fixture-foo AWS_ACCESS_KEY_ID=fixture-aws; }
+_caller_secrets_clean() { unset CLOUDFLARE_API_TOKEN FOO_TOKEN AWS_ACCESS_KEY_ID; }
+_PROBED="CLOUDFLARE_API_TOKEN FOO_TOKEN AWS_ACCESS_KEY_ID OMP_GATEWAY_TOKEN CEL_SESSION_ID"
+_probe_runtime() { # <out-file> <var...>: $T/probe, a runtime stand-in recording only those variables
+  local out="$1"; shift
+  cat > "$T/probe" <<EOF
+#!/usr/bin/env bash
+for n in $*; do printf '%s=%s;' "\$n" "\${!n-<unset>}"; done > '$out'
+EOF
+  chmod +x "$T/probe"
+}
+_expect_probe() { # NAME=value|NAME=<unset> ... -> what _probe_runtime records for them
+  local kv; for kv in "$@"; do printf '%s;' "$kv"; done
+}
+test_helper_launch_env_drops_secret_names_and_keeps_what_its_line_sets() {
+  _ws
+  local role line drop="CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID FOO_TOKEN MY_API_KEY DEPLOY_SECRET DB_PASSWORD SIGNING_KEY AWS_REGION OPENROUTER_BASE_URL GH_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY github_token"
+  local keep="OMP_GATEWAY_TOKEN CEL_SESSION_ID CEL_ROLE KEEP_ME"
+  local -a GATEWAY_ENV=("OMP_GATEWAY_TOKEN=fixture-gateway" "CEL_SESSION_ID=fixture-session")
+  local -a seeded=() n
+  for n in $drop KEEP_ME; do seeded+=("$n=fixture-$n"); done
+  # shellcheck disable=SC2086  # word lists on purpose
+  _probe_runtime "$T/got" $drop $keep
+  for role in reviewer member; do
+    line="$(_run_launch_env "$role" "$T" /r.md "" pi)"
+    rm -f "$T/got"
+    env "${seeded[@]}" OMP_GATEWAY_TOKEN=fixture-inherited bash -c "$line $T/probe"
+    local want=""
+    for n in $drop; do want+="$n=<unset>;"; done
+    want+="$(_expect_probe OMP_GATEWAY_TOKEN=fixture-gateway CEL_SESSION_ID=fixture-session "CEL_ROLE=$role" KEEP_ME=fixture-KEEP_ME)"
+    assert_eq "$(cat "$T/got")" "$want" || { echo "role $role"; rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+# Not gateway-routed: nothing on the line sets the gateway key, so one the
+# pane happens to carry is an inherited secret like any other.
+test_helper_launch_env_without_the_gateway_drops_an_inherited_gateway_token() {
+  _ws
+  _probe_runtime "$T/got" OMP_GATEWAY_TOKEN
+  local line; line="$(_run_launch_env reviewer "$T" /r.md "" pi)"
+  OMP_GATEWAY_TOKEN=fixture-inherited bash -c "$line $T/probe"
+  assert_eq "$(cat "$T/got")" "OMP_GATEWAY_TOKEN=<unset>;"
+  rm -rf "$T"
+}
+# A direct (non-gateway) profile authenticates with its provider's key, which
+# lives in the pane's environment (env.local): that one name survives.
+test_helper_launch_env_keeps_the_provider_key_its_profile_needs() {
+  _ws
+  _probe_runtime "$T/got" OPENROUTER_API_KEY ANTHROPIC_API_KEY
+  local line; line="$(LAUNCH_ENV_KEEP=(OPENROUTER_API_KEY); _run_launch_env member "$T" /r.md "" pi)"
+  OPENROUTER_API_KEY=fixture-or ANTHROPIC_API_KEY=fixture-an bash -c "$line $T/probe"
+  assert_eq "$(cat "$T/got")" "OPENROUTER_API_KEY=fixture-or;ANTHROPIC_API_KEY=<unset>;"
+  rm -rf "$T"
+}
+test_run_provider_key_env_names_only_a_direct_keyed_provider() {
+  assert_eq "$(_run_provider_key_env openrouter/deepseek/deepseek-v4-flash "")" OPENROUTER_API_KEY
+  assert_eq "$(_run_provider_key_env deepseek/deepseek-chat "")" DEEPSEEK_API_KEY
+  assert_eq "$(_run_provider_key_env openrouter/deepseek/deepseek-v4-flash gateway)" ""
+  assert_eq "$(_run_provider_key_env openai-codex/gpt-5.5 "")" ""
+  assert_eq "$(_run_provider_key_env sonnet "")" ""
+  assert_eq "$(_run_provider_key_env "" "")" ""
+}
+# The workspace's account routing injects GH_TOKEN on the line: that value is
+# the one the helper gets, never the caller's.
+test_helper_launch_env_keeps_the_workspace_account_token_not_the_callers() {
+  _ws_gh_acct acct-b
+  _probe_runtime "$T/got" GH_TOKEN GITHUB_TOKEN
+  local line; line="$(_run_launch_env reviewer "$T" /r.md "" pi)"
+  GH_TOKEN=fixture-caller GITHUB_TOKEN=fixture-caller bash -c "$line $T/probe"
+  assert_eq "$(cat "$T/got")" "GH_TOKEN=tok-b;GITHUB_TOKEN=<unset>;"
+  rm -rf "$T"
+}
+# Product agents and core are NOT changed here: they may legitimately need
+# deploy credentials, and narrowing them is the owner's decision
+# (docs/architecture.md, "Launch environment by role").
+test_product_agent_and_core_launch_env_still_inherit_the_callers_environment() {
+  _ws
+  _probe_runtime "$T/got" CLOUDFLARE_API_TOKEN
+  local role line
+  for role in solo orchestrator root core direct; do
+    line="$(_run_launch_env "$role" "$T" /r.md "" pi)"
+    case "$line" in *cel-launch-clean*) echo "$role launch is scrubbed"; rm -rf "$T"; return 1;; esac
+    CLOUDFLARE_API_TOKEN=fixture-cloudflare bash -c "$line $T/probe"
+    assert_eq "$(cat "$T/got")" "CLOUDFLARE_API_TOKEN=fixture-cloudflare;" || { echo "role $role"; rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+# The real launches, end to end through the line typed into the pane.
+test_reviewer_launch_never_carries_the_callers_secrets_and_keeps_its_gateway_token() {
+  _ws_pr_fixture
+  # shellcheck disable=SC2086
+  _probe_runtime "$T/agent-env" $_PROBED
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start") bash -c "$typed_prefix $T/probe" ;;
+      *) : ;;
+    esac
+  }
+  _caller_secrets
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  _caller_secrets_clean
+  assert_eq "$(cat "$T/agent-env")" "$(_expect_probe "CLOUDFLARE_API_TOKEN=<unset>" "FOO_TOKEN=<unset>" "AWS_ACCESS_KEY_ID=<unset>" \
+    OMP_GATEWAY_TOKEN=reviewer-test-api-key CEL_SESSION_ID=widget-pr-12-review)" \
+    || { reviewer_checkout_release widget 12; _ws_gateway_clean; return 1; }
+  case "$typed_prefix" in *fixture-*|*reviewer-test-api-key*) echo "a value reached the typed line"; reviewer_checkout_release widget 12; _ws_gateway_clean; return 1;; esac
+  reviewer_checkout_release widget 12
+  _ws_gateway_clean
+}
+
 
 # ------------------------------------------------------------ pane labels
 # The agent name is sanitised and cut to 32 characters, which reads
@@ -2348,6 +2475,63 @@ test_run_member_env_mailbox_and_identity_are_exact() {
   # a Claude member's new directory is trusted before it starts
   assert_eq "$(jq -r --arg d "$TD/wt/$ALIAS" '.projects[$d].hasTrustDialogAccepted' "$CLAUDE_CONFIG_DIR/.claude.json")" true
   rm -rf "$T"
+}
+# The team fixture's herdr, also running the typed line against $T/probe.
+_member_probe_herdr() {
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") jq -c '{result:{agents:.}}' "$T/started.json" ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") MEMBER_TYPED="$4" ;;
+      "agent start")
+        _fake_pane "$@" || return 1
+        bash -c "$MEMBER_TYPED $T/probe"
+        jq -c --arg n "$3" --arg p "$7" '. + [{name:$n, pane_id:$p, cwd:"x", agent_status:"idle"}]' \
+          "$T/started.json" > "$T/started.tmp" && mv "$T/started.tmp" "$T/started.json" ;;
+      *) : ;;
+    esac
+  }
+}
+test_member_launch_never_carries_the_callers_secrets() {
+  _team_fixture qa
+  # shellcheck disable=SC2086
+  _probe_runtime "$T/agent-env" $_PROBED
+  _member_probe_herdr
+  _caller_secrets
+  local rc=0
+  OMP_GATEWAY_TOKEN=fixture-inherited _member_run >/dev/null || rc=$?
+  _caller_secrets_clean
+  assert_eq "$rc" 0 || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/agent-env")" "$(_expect_probe "CLOUDFLARE_API_TOKEN=<unset>" "FOO_TOKEN=<unset>" "AWS_ACCESS_KEY_ID=<unset>" \
+    "OMP_GATEWAY_TOKEN=<unset>" "CEL_SESSION_ID=<unset>")" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_member_launch_through_the_gateway_keeps_its_gateway_token_and_drops_the_callers_secrets() {
+  _team_fixture qa
+  cat >>"$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
+role_profiles:
+  member: gw
+YAML
+  _gw_state
+  printf 'member-test-api-key\n' > "$GWT/state/api-key"
+  # shellcheck disable=SC2086
+  _probe_runtime "$T/agent-env" $_PROBED
+  _member_probe_herdr
+  _caller_secrets
+  local rc=0
+  _member_run >/dev/null || rc=$?
+  _caller_secrets_clean
+  assert_eq "$rc" 0 || { _ws_gateway_clean; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start $ALIAS --kind pi --pane w1:p9" || { _ws_gateway_clean; return 1; }
+  assert_eq "$(cat "$T/agent-env")" "$(_expect_probe "CLOUDFLARE_API_TOKEN=<unset>" "FOO_TOKEN=<unset>" "AWS_ACCESS_KEY_ID=<unset>" \
+    OMP_GATEWAY_TOKEN=member-test-api-key "CEL_SESSION_ID=$ALIAS")" || { _ws_gateway_clean; return 1; }
+  case "$(cat "$HERDR_LOG")" in *fixture-*|*member-test-api-key*) echo "a value reached the typed line"; _ws_gateway_clean; return 1;; esac
+  _ws_gateway_clean
 }
 test_run_member_read_only_role_stands_in_the_team_dir() {
   _team_fixture qa

@@ -310,3 +310,36 @@ test_rex_pre_scope_receipt_lists_as_session_scope_and_hosts() {
   assert_eq "$(rex_agent_list | jq '.result.agents | length')" 2
   _sg_down
 }
+
+# A REVIEWER OR MEMBER STARTS CLEAN UNDER REX TOO. Its private launch script
+# exports the workspace's env and env.local before the shared launch line, so
+# the line's scrub is what keeps those owner secrets - and the caller's - out
+# of the runtime, while the gateway key the line sets survives. A product
+# agent is unchanged: it still inherits them (docs/architecture.md). Values
+# are fixtures; the runtime records only the named variables.
+test_rex_helper_runtime_gets_no_workspace_or_caller_secrets() {
+  _sg_setup
+  printf 'export CLOUDFLARE_API_TOKEN=fixture-cloudflare\nDEPLOY_SECRET=fixture-deploy\n' > "$WS/env.local"
+  cat > "$RT/bin/runtime" <<EOF
+#!/bin/bash
+for n in CLOUDFLARE_API_TOKEN DEPLOY_SECRET FOO_TOKEN OMP_GATEWAY_TOKEN CEL_SESSION_ID; do printf '%s=%s;' "\$n" "\${!n-<unset>}"; done > "$RT/env-\$CEL_ROLE.tmp"
+mv "$RT/env-\$CEL_ROLE.tmp" "$RT/env-\$CEL_ROLE"
+exec sleep 300
+EOF
+  local role prefix i want
+  for role in reviewer member solo; do
+    prefix="$(GATEWAY_ENV=("OMP_GATEWAY_TOKEN=fixture-gateway" "CEL_SESSION_ID=widget-$role"); _run_launch_env "$role" "$WS" "" "" omp)"
+    ( export FOO_TOKEN=fixture-foo; env_role="$role" wsdir="$WS"
+      _rex_launch "widget-$role" omp "$WS/repos/widget" "widget $role" "$prefix" ) >/dev/null 2>&1 \
+      || { echo "the Rex launch of $role failed"; _sg_down; return 1; }
+    for ((i=0;i<50;i++)); do [ -f "$RT/env-$role" ] && break; sleep 0.1; done
+    if [ "$role" = solo ]; then
+      want="CLOUDFLARE_API_TOKEN=fixture-cloudflare;DEPLOY_SECRET=fixture-deploy;FOO_TOKEN=fixture-foo;"
+    else
+      want="CLOUDFLARE_API_TOKEN=<unset>;DEPLOY_SECRET=<unset>;FOO_TOKEN=<unset>;"
+    fi
+    want+="OMP_GATEWAY_TOKEN=fixture-gateway;CEL_SESSION_ID=widget-$role;"
+    assert_eq "$(cat "$RT/env-$role" 2>/dev/null)" "$want" || { echo "role $role"; _sg_down; return 1; }
+  done
+  _sg_down
+}
