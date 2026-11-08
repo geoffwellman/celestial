@@ -344,6 +344,30 @@ _guard_cel_env_tamper() { # <command> -> 0 when it does
 }
 _GUARD_CEL_ENV_DENY='deny cel reads who is asking from its environment - a line that runs cel while setting, emptying, exporting or declaring a CEL_* or HERDR_* variable, a variable whose name is an expansion ($X, ${X}, $(...)) or a nameref, or shell code for it (BASH_ENV, ENV, SHELLOPTS, BASHOPTS, BASH_FUNC_*, export -f), is refused for every agent; run cel as you are (--workspace <name> picks a workspace, cel inbox send --from names a sender)'
 
+# NOR DOES THE SUITE RUN UNDER A HOOK. Every process beneath a checkout's
+# tests/run.sh is trusted with the test seams (lib/common.sh
+# cel_under_suite), so a line that runs the suite - `bash tests/run.sh`,
+# `./tests/run.sh`, through env, exec, timeout or `cel build-slot --` -
+# while setting or exporting BASH_ENV, ENV or PATH, or handing it an
+# exported function (a BASH_FUNC_ spelling, `export -f`, `declare -fx`), is
+# refused for every agent; tests/run.sh itself also refuses to start with
+# BASH_ENV or ENV set. A tripwire like the rest: a script file still runs,
+# and agents run as the owner anyway (the limit is spelled out at
+# cel_under_suite).
+_guard_suite_tamper() { # <command> -> 0 when it does
+  local s="$1" re='(^|[^A-Za-z0-9_.-])([^[:space:];&|()]*/)?tests/run\.sh([^A-Za-z0-9_.-]|$)'
+  [[ "$s" =~ $re ]] || return 1
+  re='(^|[^A-Za-z0-9_])(BASH_ENV|ENV|PATH)='
+  [[ "$s" =~ $re ]] && return 0
+  [[ "$s" == *BASH_FUNC_* ]] && return 0
+  local decl='(^|[[:space:];&|(])(export|declare|typeset|readonly)'
+  re="$decl"'[[:space:]]([^;&|]*[[:space:]])?(BASH_ENV|ENV|PATH)([^A-Za-z0-9_]|$)'
+  [[ "$s" =~ $re ]] && return 0
+  re="$decl"'([[:space:]]+-[-A-Za-z+]*)*[[:space:]]+-[A-Za-z]*f'
+  [[ "$s" =~ $re ]]
+}
+_GUARD_SUITE_TAMPER_DENY='deny the suite trusts every process beneath tests/run.sh with its test seams, so it does not run under a hook - a line that runs tests/run.sh while setting or exporting BASH_ENV, ENV or PATH, or handing it an exported function (BASH_FUNC_*, export -f, declare -fx), is refused for every agent; run the suite from a plain environment (bash tests/run.sh <file>.test.sh)'
+
 # A TEAM MEMBER'S LAUNCH TOKEN IS NOBODY'S TO READ EITHER: cel team add writes
 # <ws>/.cel/teams/<feature>/launch/<alias>.token and `cel run member` spends
 # it, both inside one process. An agent that could read or write one could
@@ -1002,6 +1026,7 @@ guard_classify() { # <role> <command>
   if _guard_names_forge_token "$cmd"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
   if _guard_forge_lib "$cmd"; then printf '%s' "$_GUARD_FORGE_LIB_DENY"; return 0; fi
   if _guard_cel_env_tamper "$cmd"; then printf '%s' "$_GUARD_CEL_ENV_DENY"; return 0; fi
+  if _guard_suite_tamper "$cmd"; then printf '%s' "$_GUARD_SUITE_TAMPER_DENY"; return 0; fi
   if _guard_cmd_reaches_launch "$cmd"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
   # cel team add's launcher is not a door any agent opens by hand - `other`
   # (a reviewer) included: a member is added, and admitted against the box

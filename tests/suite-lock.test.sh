@@ -377,3 +377,32 @@ test_quick_tests_leave_no_watchdog_sleep_behind() {
   assert_eq "$left" "0"
   rm -rf "$T"
 }
+
+# NO SUITE RUNS UNDER A HOOK. Every process beneath the runner is trusted
+# with the test seams (lib/common.sh cel_under_suite), so a BASH_ENV or ENV
+# file - which every bash the suite starts would source - stops the runner
+# before it takes the lock or runs a test. The file has run once, in the
+# runner itself, by then; it never runs again beneath it.
+test_the_runner_refuses_to_start_under_a_hook() {
+  _suite_fixture
+  local out rc var
+  printf 'test_marks_that_it_ran() { : > "%s/ran"; }\n' "$T" > "$T/tests/slow.test.sh"
+  printf 'echo hook >> "%s/hook.log"\n' "$T" > "$T/hook.sh"
+  for var in BASH_ENV ENV; do
+    rc=0; out="$(env "$var=$T/hook.sh" bash "$T/tests/run.sh" --no-lock 2>&1)" || rc=$?
+    [ "$rc" -eq 2 ] || { echo "$var: exit $rc: $out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "refusing to run with BASH_ENV or ENV set" || { rm -rf "$T"; return 1; }
+    assert_contains "$out" "No test ran" || { rm -rf "$T"; return 1; }
+    [ ! -e "$T/ran" ] || { echo "$var: a test ran under the hook"; rm -rf "$T"; return 1; }
+  done
+  # BASH_ENV ran once, in the runner that then stopped; ENV is never read by
+  # a non-interactive bash
+  assert_eq "$(wc -l < "$T/hook.log")" 1 || { rm -rf "$T"; return 1; }
+  # an empty value is still set, and still refused
+  rc=0; BASH_ENV= bash "$T/tests/run.sh" --no-lock >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || { echo "an empty BASH_ENV was let through"; rm -rf "$T"; return 1; }
+  # and a plain run is untouched
+  out="$(bash "$T/tests/run.sh" --no-lock 2>&1)"
+  assert_contains "$out" "1 passed, 0 failed" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}

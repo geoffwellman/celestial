@@ -142,6 +142,19 @@ every exported function (`BASH_FUNC_*`) unless the environ it started with
 carries none of them, so smuggled shell code (an exported `exit` that
 returns, a function that shadows the check) never reaches cel's checks.
 
+The limit, plainly: `CEL_PROC_DIR` and `CEL_FORGE_CURL` are trusted for every
+process beneath that checkout's `tests/run.sh`, not only for its tests. Agent
+code the suite runs - a test file, or a tool a test calls that a `PATH` put
+first - can point them at a tree that vouches for a forged identity, or at a
+binary that then receives the forge token. The gh stub seams
+(`CEL_FORGE_GH`, `CEL_WS_GH_BIN`) are still honoured from the environment
+everywhere. This is accepted: agents run as the owner's Unix user, so they can
+read the token file and call the forge API directly; nothing in-process stops a
+determined one. What the checks stop is the easy route. `tests/run.sh` refuses
+to start with `BASH_ENV` or `ENV` set, and the guard refuses an agent line that
+runs the suite with `BASH_ENV`, `ENV`, `PATH` or an exported function set.
+Like the rest of the guard, these are tripwires, not a boundary.
+
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
 so a refusal leaves nothing behind; N counts team-member rows that are

@@ -392,6 +392,27 @@ test_cel_with_a_tampered_cel_environment_is_refused() {
     case "$(guard_classify solo "$c")" in "deny cel reads who is asking"*) echo "refused: $c"; return 1;; esac
   done
 }
+# The suite trusts every process beneath tests/run.sh with its test seams, so
+# no agent runs it under a hook: BASH_ENV, ENV or PATH set or exported on the
+# line, or an exported function handed to it - however the runner is reached.
+test_the_suite_does_not_run_under_a_hook() {
+  local role c
+  for role in orchestrator root core solo other member; do
+    for c in 'BASH_ENV=/tmp/h.sh bash tests/run.sh forge.test.sh' 'ENV=/tmp/h.sh ./tests/run.sh' \
+             'PATH=/tmp/evil:$PATH bash tests/run.sh' 'env PATH=/tmp/evil:/usr/bin bash /w/celestial/tests/run.sh guard.test.sh' \
+             'export BASH_ENV=/tmp/h.sh; bash tests/run.sh' 'export PATH; timeout 600 bash tests/run.sh' \
+             'declare -x ENV=/tmp/h.sh && exec bash tests/run.sh' 'sh -c "PATH=/x:\$PATH tests/run.sh"' \
+             'jq() { :; }; export -f jq; bash tests/run.sh forge.test.sh' 'declare -fx jq; bash tests/run.sh' \
+             "env 'BASH_FUNC_jq%%=() { :; }' bash tests/run.sh"; do
+      case "$(guard_classify "$role" "$c")" in "deny the suite trusts every process"*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+  done
+  for c in 'bash tests/run.sh forge.test.sh' 'bash tests/run.sh' './tests/run.sh --no-lock guard.test.sh' \
+           'CEL_TEST_JOBS=1 bash tests/run.sh' 'NODE_ENV=test bash tests/run.sh' 'cat tests/run.sh' \
+           'export PATH="$HOME/bin:$PATH"; make test' 'BASH_ENV=/tmp/h.sh make test' 'grep -n BASH_ENV tests/run.sh'; do
+    case "$(guard_classify solo "$c")" in "deny the suite trusts every process"*) echo "refused: $c"; return 1;; esac
+  done
+}
 # ...and the hook enforces it where it runs: a reviewer pane outside any
 # workspace (otherwise untouched) included, the native Read tool included.
 test_hook_refuses_the_forge_token_to_every_pane() {

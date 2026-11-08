@@ -27,8 +27,20 @@ die()    { c_err "$*"; exit 1; }
 # function was defined, never from CEL_ROOT, which common.sh inherits. Only
 # `bash <that run.sh>` counts: an argument elsewhere (`bash -c '...' run.sh`,
 # `find run.sh -exec ...`) or another program renamed with `exec -a` does not.
-# Reads only, no forks. The limit is the runner itself: whatever its test
-# files run is under the suite, so seams are as trusted as that checkout.
+# Reads only, no forks.
+#
+# THE LIMIT, PLAINLY: the seams are trusted for EVERY process beneath this
+# checkout's tests/run.sh, not only for its tests. Any agent code the suite
+# runs - a test file, or a tool a test calls that a PATH put first - can
+# point CEL_PROC_DIR at a tree that vouches for a forged identity, or
+# CEL_FORGE_CURL at a binary that then receives the forge token. That is
+# accepted: agents run as the owner's Unix user, so they can read the token
+# file and call the forge API directly anyway; nothing in-process stops a
+# determined one. What this does stop is the easy route - an exported
+# variable, from anywhere, outside the suite. tests/run.sh refuses to start
+# with BASH_ENV or ENV set, and the guard refuses an agent line that runs the
+# suite with BASH_ENV, ENV, PATH or exported functions; both are tripwires,
+# not a boundary.
 cel_under_suite() {
   local runner="${BASH_SOURCE[0]%/*}/../tests/run.sh" pid="$$" n=0 stat arg
   local -a argv
