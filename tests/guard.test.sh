@@ -373,7 +373,11 @@ test_cel_with_a_tampered_cel_environment_is_refused() {
              'declare -n r=$X; r=1; cel forge pr close gizmo#3' 'local -n r; cel team status' \
              'X=CEL_TESTING; eval "$X=1"; cel forge pr close gizmo#3' 'env "$X=1" cel forge pr close gizmo#3' \
              'printf -v "$X" 1; cel forge pr close gizmo#3' 'read -r "$X" <<< 1; cel forge pr close gizmo#3' \
-             'eval "${X}=1" && cel forge run rerun gizmo 15'; do
+             'eval "${X}=1" && cel forge run rerun gizmo 15' \
+             'BASH_ENV=/tmp/e.sh cel forge pr close gizmo#3' 'export BASH_ENV=/tmp/e.sh; cel forge pr close gizmo#3' \
+             'ENV=/tmp/e.sh cel team status' 'env SHELLOPTS=xtrace PS4=x cel forge pr close gizmo#3' 'BASHOPTS=extdebug cel status' \
+             'exit() { return 0; }; export -f exit; cel forge pr close gizmo#3' 'declare -fx exit && cel forge pr ready gizmo#3' \
+             'typeset -xf cat; cel team cap login 5' "env 'BASH_FUNC_exit%%=() { return 0; }' cel forge pr close gizmo#3"; do
       case "$(guard_classify "$role" "$c")" in "deny cel reads who is asking"*) ;; *) echo "$role allowed: $c"; return 1;; esac
     done
   done
@@ -383,7 +387,8 @@ test_cel_with_a_tampered_cel_environment_is_refused() {
            'cel inbox send celestial-orch "done" --from celestial-pr-1-review --workspace plane' \
            'CEL_GUARD_ALLOW_ONCE=1 cel team status' 'grep -r CEL_ROLE= lib/' 'X=1 make -C ~/.cel/solo/x' \
            'export PATH="$HOME/bin:$PATH"; cel status' 'for x in a b; do cel inbox send "$x" hi; done' \
-           'cel inbox send root "a=$b" --workspace plane' 'X=CEL_TESTING; export $X=1; make test'; do
+           'cel inbox send root "a=$b" --workspace plane' 'X=CEL_TESTING; export $X=1; make test' \
+           'NODE_ENV=test cel status' 'BASH_ENV=/tmp/e.sh make test' 'cel forge pr view gizmo#3 --json | jq -r .state'; do
     case "$(guard_classify solo "$c")" in "deny cel reads who is asking"*) echo "refused: $c"; return 1;; esac
   done
 }

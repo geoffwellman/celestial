@@ -134,7 +134,13 @@ honoured only for a process under that checkout's own `tests/run.sh`
 (`cel_under_suite`, lib/common.sh), decided from the process's ancestry in
 `/proc` - an ancestor that is the same bash running that `run.sh` as its
 script - which no exported variable changes. The forge's curl seam
-(`CEL_FORGE_CURL`) is gated the same way.
+(`CEL_FORGE_CURL`) is gated the same way. The check reads `/proc` with shell
+builtins only, so a `PATH` with other binaries first cannot feed it a forged
+environ, and it runs in a clean process: before loading anything, `bin/cel`
+re-executes itself without `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS` and
+every exported function (`BASH_FUNC_*`) unless the environ it started with
+carries none of them, so smuggled shell code (an exported `exit` that
+returns, a function that shadows the check) never reaches cel's checks.
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
@@ -384,7 +390,9 @@ even to empty (`VAR=`, `env VAR=`, `export`, `declare`), or any variable
 whose name the guard cannot read - an expansion (`export $X=1`, `eval
 "$X=1"`, `printf -v "$X"`) or a nameref (`declare -n`) - dressing up as
 another product, lead, member or mailbox (`CEL_GUARD_ALLOW_ONCE`, the human's
-approval, does not count; `cel inbox send --from` is a flag). Shedding one
+approval, does not count; `cel inbox send --from` is a flag), or that hands
+`cel`'s own bash shell code (`BASH_ENV=`, `ENV=`, `SHELLOPTS=`, `BASHOPTS=`,
+a `BASH_FUNC_` spelling, `export -f`, `declare -fx`). Shedding one
 (`unset`, `env -u`, `env -i`, `setsid`) is left to `cel forge` and `cel
 team`, which change nothing for a process with no agent identity. Like the rest of
 the guard these are tripwires matched as text, not a sandbox: a script file

@@ -670,6 +670,50 @@ test_forge_writes_check_the_launch_whatever_the_environment_says() {
   rm -rf "$T"
 }
 
+# CEL'S CHECKS RUN IN A CLEAN PROCESS (bin/cel). Shell functions arrive two
+# ways an agent controls - exported (`export -f`) or defined by a BASH_ENV
+# file - and either one shadows what cel's checks call (an `exit` that
+# returns turns every refusal into a pass). bin/cel re-executes itself
+# without BASH_ENV, ENV, SHELLOPTS, BASHOPTS or any exported function
+# before it loads a lib, so a forged product is refused through the real
+# bin/cel either way, and an honest call still works.
+_cel_bin_as() { # <launch product> <script>: run <script> in a bash whose launch is <launch product>'s agent
+  OUT_P="$T/proc" OUT_T="$T" OUT_LP="$1" bash -c '
+    mkdir -p "$OUT_P/$$"
+    printf "%s\0" CEL_ROLE=solo "CEL_PRODUCT=$OUT_LP" "CEL_INBOX_ME=$OUT_LP-orch" > "$OUT_P/$$/environ"
+    printf "%s (bash) S 1 1 1" "$$" > "$OUT_P/$$/stat"
+    cd "$OUT_T"
+    export CEL_PROC_DIR="$OUT_P"
+    '"$2"'
+    echo "rc=$?"' 2>&1
+}
+test_cel_runs_its_checks_in_a_process_without_smuggled_shell_code() {
+  _fj_ws $'products:\n  - name: shop\n    repos: [web]\n  - name: tools\n    repos: [widget]'
+  local out
+  printf 'exit() { return 0; }\ncel_launch_identity() { return 0; }\n' > "$T/evil.sh"
+  # exported functions: an exit that never exits, and the check itself
+  out="$(_cel_bin_as shop 'exit() { return 0; }; cel_launch_identity() { return 0; }; export -f exit cel_launch_identity
+    CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "this process says CEL_PRODUCT=tools but its launch" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { echo "an exported function let a forged product close a PR"; rm -rf "$T"; return 1; }
+  # a BASH_ENV file that defines the same
+  out="$(_cel_bin_as shop 'BASH_ENV="$OUT_T/evil.sh" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "this process says CEL_PRODUCT=tools but its launch" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { echo "a BASH_ENV file let a forged product close a PR"; rm -rf "$T"; return 1; }
+  # a forged marker skips nothing: still cleaned and refused
+  out="$(_cel_bin_as shop '_CEL_CLEAN_EXEC=1 BASH_ENV="$OUT_T/evil.sh" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "rc=1" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { echo "a forged marker let a forged product close a PR"; rm -rf "$T"; return 1; }
+  # an honest call through bin/cel is unaffected, smuggled code or not
+  out="$(_cel_bin_as tools 'CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "rc=0" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "PATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
+  out="$(_cel_bin_as tools 'BASH_ENV="$OUT_T/evil.sh" "$CEL_ROOT/bin/cel" forge whoami widget')"
+  assert_contains "$out" $'\ngeoff\n' || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "rc=0" || { echo "$out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # A product's agent changes only its own product's repos, however the
 # workspace account authored the PR.
 test_forge_agent_changes_only_its_own_products_repos() {

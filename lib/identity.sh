@@ -20,20 +20,29 @@
 # a writing verb as an agent gives it a launch fixture - nothing exported
 # skips or redirects the check.
 #
+# It reads /proc with shell builtins only (read and redirections, no cat or
+# grep), so a PATH that puts other binaries first cannot feed it a forged
+# environ. Shell functions an agent smuggles in (exported, or defined by a
+# BASH_ENV file) never reach it: bin/cel re-executes itself without them
+# before any lib is loaded.
+#
 # Callers: `cel team`'s writing verbs (lib/team.sh) and `cel forge`'s writes
 # (lib/forge.sh _forge_cli_authorise). A process with no identity at all
 # passes here; each caller refuses that itself.
 _CEL_IDENTITY_VARS='CEL_ROLE CEL_PRODUCT CEL_INBOX_ME CEL_INBOX_WS CEL_TEAM CEL_TEAM_ROLE CEL_TEAM_MEMBER'
 cel_launch_identity() { # <what, e.g. "cel team start"> -> dies unless this identity is its launch's
-  local proc=/proc pid="$PPID" n=0 stat item v
+  local proc=/proc pid="$PPID" n=0 stat item v launch
   if [ -n "${CEL_PROC_DIR:-}" ] && cel_under_suite; then proc="$CEL_PROC_DIR"; fi
   [ -n "${CEL_ROLE:-}${CEL_TEAM_MEMBER:-}" ] || return 0   # no identity: the caller refuses it
-  local -A env=()
+  local -A env
   while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
-    if grep -qsz '^CEL_ROLE=' "$proc/$pid/environ"; then
-      while IFS= read -r -d '' item; do
-        case "$item" in CEL_*=*) env["${item%%=*}"]="${item#*=}" ;; esac
-      done < <({ cat "$proc/$pid/environ"; } 2>/dev/null)
+    env=(); launch=0
+    { while IFS= read -r -d '' item; do
+        case "$item" in
+          CEL_*=*) env["${item%%=*}"]="${item#*=}"; [[ "$item" != CEL_ROLE=* ]] || launch=1 ;;
+        esac
+      done < "$proc/$pid/environ"; } 2>/dev/null
+    if [ "$launch" = 1 ]; then
       for v in $_CEL_IDENTITY_VARS; do
         if [ "${!v+set}" != "${env[$v]+set}" ] || [ "${!v:-}" != "${env[$v]:-}" ]; then
           die "$1: this process says $v=${!v-<unset>} but its launch (pid $pid) says $v=${env[$v]-<unset>} - an agent acts as the one it was launched as; nothing changed"
@@ -41,7 +50,8 @@ cel_launch_identity() { # <what, e.g. "cel team start"> -> dies unless this iden
       done
       return 0
     fi
-    stat="$({ cat "$proc/$pid/stat"; } 2>/dev/null)" || break
+    stat=""
+    { read -r stat < "$proc/$pid/stat" || [ -n "$stat" ]; } 2>/dev/null || break
     stat="${stat##*) }"; stat="${stat#* }"; pid="${stat%% *}"
     n=$((n + 1))
   done

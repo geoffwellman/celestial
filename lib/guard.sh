@@ -308,11 +308,14 @@ _GUARD_FORGE_LIB_DENY='deny lib/forge.sh is cel'"'"'s own code - an agent does n
 # on a line that runs cel, export/declare/typeset/local/readonly with an
 # operand that starts with `$` or a backquote, any nameref (`declare -n`),
 # and an assignment to `$X`, `${X}` or `$(...)` (eval, env, printf -v and
-# read reach a variable that way) are refused as well. Shedding variables
-# (unset, env -u, env -i, setsid) is not refused here: cel forge and cel team
-# act only for a positively identified agent, and both check the identity
-# against its launch's environ (lib/identity.sh cel_launch_identity), whose
-# test seam no variable can turn on (cel_under_suite).
+# read reach a variable that way) are refused as well. So is SHELL CODE for
+# cel's own bash: BASH_ENV=, ENV=, SHELLOPTS=, BASHOPTS=, any BASH_FUNC_
+# spelling, and exporting a function (`export -f`, `declare -fx`) - bin/cel
+# re-executes itself without them anyway; this names the attempt. Shedding
+# variables (unset, env -u, env -i, setsid) is not refused here: cel forge
+# and cel team act only for a positively identified agent, and both check the
+# identity against its launch's environ (lib/identity.sh cel_launch_identity),
+# whose test seam no variable can turn on (cel_under_suite).
 _guard_cel_env_tamper() { # <command> -> 0 when it does
   local s="${1//CEL_GUARD_ALLOW_ONCE=/}" re='(^|[^A-Za-z0-9_.-])cel([[:space:]]|$)'
   [[ "$s" =~ $re ]] || return 1
@@ -331,9 +334,15 @@ _guard_cel_env_tamper() { # <command> -> 0 when it does
   re='\$(\{[^}]*\}|\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)["'"'"']?='
   [[ "$s" =~ $re ]] && return 0
   re='(^|[[:space:];&|(])(printf[[:space:]]+-v|read|mapfile|readarray)([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+["'"'"']?(\$|`)'
+  [[ "$s" =~ $re ]] && return 0
+  # shell code or options for cel's own bash
+  re='(^|[^A-Za-z0-9_])(BASH_ENV|ENV|SHELLOPTS|BASHOPTS)='
+  [[ "$s" =~ $re ]] && return 0
+  [[ "$s" == *BASH_FUNC_* ]] && return 0
+  re="$decl"'([[:space:]]+-[-A-Za-z+]*)*[[:space:]]+-[A-Za-z]*f'
   [[ "$s" =~ $re ]]
 }
-_GUARD_CEL_ENV_DENY='deny cel reads who is asking from its environment - a line that runs cel while setting, emptying, exporting or declaring a CEL_* or HERDR_* variable, or a variable whose name is an expansion ($X, ${X}, $(...)) or a nameref, is refused for every agent; run cel as you are (--workspace <name> picks a workspace, cel inbox send --from names a sender)'
+_GUARD_CEL_ENV_DENY='deny cel reads who is asking from its environment - a line that runs cel while setting, emptying, exporting or declaring a CEL_* or HERDR_* variable, a variable whose name is an expansion ($X, ${X}, $(...)) or a nameref, or shell code for it (BASH_ENV, ENV, SHELLOPTS, BASHOPTS, BASH_FUNC_*, export -f), is refused for every agent; run cel as you are (--workspace <name> picks a workspace, cel inbox send --from names a sender)'
 
 # A TEAM MEMBER'S LAUNCH TOKEN IS NOBODY'S TO READ EITHER: cel team add writes
 # <ws>/.cel/teams/<feature>/launch/<alias>.token and `cel run member` spends
