@@ -49,6 +49,58 @@ test_yaml_cache_rereads_an_edit_when_md5sum_is_unavailable() {
   rm -rf "$T"
 }
 
+# CONCURRENT FIRST READS SHARE ONE CACHE ENTRY. Background subshells and
+# process substitutions all have the parent's $$, so a temp named with it is
+# one file for all of them: one rename wins and every other reader failed.
+# The converters are slowed so the first reads overlap every time.
+_wl_race() { # <out-prefix> <reader...> - six background readers and two <( )
+  local p="$1" i; shift
+  for i in 1 2 3 4 5 6; do
+    ( rc=0; "$@" > "$p.out.$i" 2>/dev/null || rc=$?; printf '%s' "$rc" > "$p.rc.$i" ) &
+  done
+  cat <(rc=0; "$@" 2>/dev/null || rc=$?; printf ' rc=%s\n' "$rc") \
+    <(rc=0; "$@" 2>/dev/null || rc=$?; printf ' rc=%s\n' "$rc") > "$p.ps"
+  wait
+}
+test_yaml_cache_concurrent_first_reads_all_succeed_and_leave_no_temps() {
+  local T; T="$(mktemp -d)"
+  local CEL_YAML_CACHE="$T/cache" i
+  yq() { command yq "$@"; local rc=$?; sleep 0.3; return "$rc"; }
+  jq() { command jq "$@"; local rc=$?; [ "$1" = -s ] && sleep 0.3; return "$rc"; }
+  printf 'name: racy\n' > "$T/w.yaml"
+  _wl_race "$T/plain" _yqr -r .name "$T/w.yaml"
+  mkdir -p "$T/ws"; printf 'name: ws\nenv: {A: base}\n' > "$T/ws/workspace.yaml"
+  printf 'env: {A: local}\n' > "$T/ws/workspace.local.yaml"
+  _wl_race "$T/merged" _yqr_ws -r .env.A "$T/ws"
+  unset -f yq jq
+  for i in 1 2 3 4 5 6; do
+    assert_eq "$(cat "$T/plain.rc.$i"):$(cat "$T/plain.out.$i")" "0:racy"
+    assert_eq "$(cat "$T/merged.rc.$i"):$(cat "$T/merged.out.$i")" "0:local"
+  done
+  assert_eq "$(cat "$T/plain.ps")" $'racy\n rc=0\nracy\n rc=0'
+  assert_eq "$(cat "$T/merged.ps")" $'local\n rc=0\nlocal\n rc=0'
+  assert_eq "$(find "$T/cache" -name '*tmp*' | wc -l)" 0
+  rm -rf "$T"
+}
+
+# A LOST RENAME IS NOT A FAILED READ. If the publish cannot rename (another
+# reader's entry already stands there), a valid destination is the answer.
+test_yaml_cache_lost_rename_with_a_valid_entry_is_success() {
+  local T; T="$(mktemp -d)"
+  local CEL_YAML_CACHE="$T/cache" j
+  printf 'name: kept\n' > "$T/w.yaml"
+  j="$(_yaml_json "$T/w.yaml")"
+  rm -f "$j"
+  mv() { printf '{"name":"kept"}' > "${@: -1}"; return 1; }
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" kept
+  mv() { return 1; }
+  rm -f "$j"
+  if _yaml_json "$T/w.yaml" >/dev/null 2>&1; then printf 'lost rename with no entry succeeded\n' >&2; unset -f mv; return 1; fi
+  unset -f mv
+  assert_eq "$(find "$T/cache" -name '*tmp*' | wc -l)" 0
+  rm -rf "$T"
+}
+
 # --- 1: every routing read goes through the merge ---------------------------
 # A reader that asks workspace.yaml for role_profiles/worker_profiles directly
 # silently ignores the local override - the person whose login can't reach the

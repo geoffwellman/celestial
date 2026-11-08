@@ -6,6 +6,20 @@
 # call is a Python start, while callers read many fields per run. A file is
 # converted once per (content, path) and every accessor then asks jq. The
 # expressions are jq expressions already - the wrapper's language is jq's.
+#
+# A CACHE ENTRY IS PUBLISHED THROUGH A TEMP OF ITS OWN. Subshells and process
+# substitutions share $$, so "$out.tmp.$$" is one file for concurrent first
+# reads: one rename wins and the rest fail. mktemp beside the entry keeps the
+# rename on one filesystem, so it stays atomic. A rename that loses to another
+# reader is still a read, when the entry that won is valid JSON.
+_yaml_cache_put() { # <out> <converter...> - converter's stdout becomes <out>
+  local out="$1" tmp; shift
+  tmp="$(mktemp "$out.tmp.XXXXXX" 2>/dev/null)" || return 1
+  if ! "$@" > "$tmp" 2>/dev/null; then rm -f "$tmp"; return 1; fi
+  mv -f "$tmp" "$out" 2>/dev/null && return 0
+  rm -f "$tmp"
+  [ -s "$out" ] && jq -e . "$out" >/dev/null 2>&1
+}
 _yaml_json() { # <file> -> path of the cached JSON
   local f="$1" dir key sum fresh=""
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
@@ -23,7 +37,7 @@ _yaml_json() { # <file> -> path of the cached JSON
   local out="$dir/$key.json"
   if [ -n "$fresh" ] || [ ! -s "$out" ]; then
     mkdir -p "$dir"
-    yq -c . "$f" > "$out.tmp.$$" 2>/dev/null && mv -f "$out.tmp.$$" "$out" || { rm -f "$out.tmp.$$"; return 1; }
+    _yaml_cache_put "$out" yq -c . "$f" || return 1
   fi
   printf '%s' "$out"
 }
@@ -75,7 +89,7 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
   out="$dir/$key.json"
   if [ ! -s "$out" ] || [[ "$key" == *nohash-* ]]; then
     mkdir -p "$dir"
-    jq -s '
+    _yaml_cache_put "$out" jq -s '
       .[0] as $b | .[1] as $l |
       ($l.role_profiles // {}) as $lrp |
       ($l.products // []) as $lprod |
@@ -105,10 +119,9 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
       # me: is per login by definition. A committed one would name the same
       # person on every teammate'"'"'s box, so only the local file'"'"'s counts.
       | (if $l.me != null then .me = $l.me else del(.me) end)
-    ' "$basej" "$localj" > "$out.tmp.$$" 2>/dev/null && mv -f "$out.tmp.$$" "$out" || {
+    ' "$basej" "$localj" || {
       # Valid YAML of the wrong shape (`role_profiles: []`) fails the merge;
       # like a parse error, it costs the override, not the box's routing.
-      rm -f "$out.tmp.$$"
       c_warn "$wsdir/workspace.local.yaml does not merge (a key has the wrong type) - ignoring it, using workspace.yaml alone" >&2
       printf '%s' "$basej"; return 0
     }
