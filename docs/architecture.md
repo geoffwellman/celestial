@@ -320,28 +320,46 @@ example:
 `lib/forge.sh` holds pull-request and CI operations in Celestial's own
 vocabulary (`forge_pr_view`, `forge_pr_list`, `forge_pr_checks`,
 `forge_pr_reviews`, `forge_pr_merge`, `forge_pr_create`, `forge_pr_close`,
-`forge_pr_ready`, `forge_whoami`, `forge_run_list`, `forge_run_view`): each
-prints one normalised JSON value or fails, with the same shape from either
-backend; `forge_run_logs` prints a job's log as plain text. `cel forge` puts
-them on the command line (`repo`, `whoami`, `pr
-view|checks|reviews|list|create|close|ready`, `run list|view|logs`, `--json`
-for the normalised value). The guard leaves its reads - CI runs and job logs
-included - to every role; it refuses `pr create` to orchestrators and core, as
-it refuses `gh pr create`, and a reviewer never opens a PR; `pr close` and
-`pr ready` belong to the product's own agent (solo or orchestrator) and the
-owner, refused to core, root, members and reviewers, and `cel forge` itself
-lets an agent change only a PR its workspace's account authored, or a
-migrated Forgejo PR (author `Ghost`). Closing never deletes the branch.
+`forge_pr_ready`, `forge_whoami`, `forge_run_list`, `forge_run_view`,
+`forge_run_rerun`, `forge_run_resolve`): each prints one normalised JSON value
+or fails, with the same shape from either backend; `forge_run_logs` prints a
+job's log as plain text. Run and job ids are the API's (the web UI's run
+number is shown beside them as `web #N`, never taken as an id); `run list
+--sha <head>` lists a commit's runs with their job ids, and a web page is
+mapped to ids only through Forgejo's own `html_url` of the run and job, else
+refused. `cel forge` puts them on the command line (`repo`, `whoami`, `pr
+view|checks|reviews|list|create|close|ready`, `run list|view|logs|rerun`,
+`--json` for the normalised value). The guard leaves its reads - CI runs and
+job logs included - to every role; it refuses `pr create` to orchestrators
+and core, as it refuses `gh pr create`, and a reviewer never opens a PR; `pr
+close`, `pr ready` and `run rerun` belong to the product's own agent (solo or
+orchestrator) and the owner, refused to core, root, members and reviewers.
+`cel forge` itself decides who is asking (`_forge_cli_authorise`): the owner
+is a process with NO agent mark - none of the variables a launch sets
+(`CEL_ROLE`, `CEL_INBOX_ME`, `CEL_SESSION_ID`, `CEL_PRODUCT`, `CEL_TEAM*`...),
+not even emptied, and no ancestor whose environ carried one (every runtime
+is exec'd under `env CEL_ROLE=...`); an empty `CEL_ROLE` is never the owner.
+An agent with `CEL_ROLE` solo or orchestrator may change only its OWN
+product's repos (`CEL_PRODUCT`, else its `<product>-orch` mailbox), and a PR
+only if its workspace's account authored it or it is a migrated Forgejo PR
+(author `Ghost`). Every agent and the owner act as that one account, so
+authorship cannot tell an agent's own PR from the owner's on the same
+product - that is the limit. Closing never deletes the branch; a rerun keeps
+the head, so an approval of it stands.
 There is no merge verb: merging goes through `cel solo land`. The same writes
 by hand - curl at a forge API with a body or a non-GET method in any
 spelling, `tea api` beyond a plain GET, tea's write verbs - are refused to
 orchestrators, root, core and solo agents alike; no role may read, copy
 or write `~/.config/cel/forge` (by
-shell, or by the native read and edit tools where the guard hook runs); and no
-role may source `lib/forge.sh` or call its `_forge_*`/`forge_*` functions,
-which carry the token without `cel forge`'s checks. Like the rest of the
-guard these are tripwires, not a sandbox: a script file that sources the
-library still runs.
+shell, or by the native read and edit tools where the guard hook runs); no
+role may source `lib/forge.sh` or call its `_forge_*`/`forge_*` functions
+(also in `bash -c`, `$(...)`, `eval`, or through a variable holding the
+name), which carry the token without `cel forge`'s checks; and no role may
+run `cel forge` on a line that sets, empties or unsets a `CEL_*` variable
+(`VAR=`, `env -u`, `env -i`, `unset`, `export`). Like the rest of the guard
+these are tripwires matched as text, not a sandbox: a script file that
+sources the library, or a name assembled at run time, still runs - which is
+why `cel forge` checks the caller's marks and ancestry itself.
 
 - **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
   `CEL_FORGE_GH` is its test seam.

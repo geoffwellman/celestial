@@ -95,10 +95,15 @@ case "$method $path" in
   "POST $R/issues/"*/comments)
     [ "${STUB_FJ_WRITE:-ok}" = ok ] || say 403 "$(cat "$FJX/forbidden.json")"
     say 201 "$(jq -nc --argjson b "$body" '{id: 901, body: $b.body}')" ;;
-  # Actions: runs page by page; run 9 and its jobs; job 15's plain-text log.
+  # Actions: runs page by page (head_sha filters, as the server does); run 9
+  # and its jobs; job 15's plain-text log; a job rerun answers 204.
   "GET $R/actions/runs")
-    [ "$page" = 1 ] && say 200 "$(cat "$FJX/actions-runs.json")"
+    sha=""; [[ "$query" =~ (^|&)head_sha=([0-9a-f]+) ]] && sha="${BASH_REMATCH[2]}"
+    [ "$page" = 1 ] && say 200 "$(jq -c --arg s "$sha" 'if $s == "" then . else .workflow_runs |= map(select(.commit_sha == $s)) end' "$FJX/actions-runs.json")"
     say 200 '{"workflow_runs":[],"total_count":6}' ;;
+  "POST $R/actions/jobs/"*/rerun)
+    [ "${STUB_FJ_WRITE:-ok}" = ok ] || say 403 "$(cat "$FJX/forbidden.json")"
+    say 204 '' ;;
   "GET $R/actions/runs/9/jobs") say 200 "$(cat "$FJX/actions-jobs.json")" ;;
   "GET $R/actions/runs/9") say 200 "$(cat "$FJX/actions-run.json")" ;;
   "GET $R/actions/jobs/15/logs") say 200 "$(cat "$FJX/actions-job.log")" ;;

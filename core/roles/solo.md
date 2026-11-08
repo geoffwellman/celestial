@@ -39,12 +39,16 @@ How work ships
    --title "..." --body-file <file>`: it applies the policy and works on
    GitHub and Forgejo alike (`cel forge repo <repo>` says which). Read PRs
    the same way: `cel forge pr view|checks|reviews <repo>#<n>`, and CI with
-   `cel forge run list <repo> [--branch b]`, `cel forge run view <repo>
-   <run-id>` and `cel forge run logs <repo> <job-id> [--tail N]`. A draft
-   becomes ready with `cel forge pr ready <repo>#<n>`; a PR you abandon is
-   closed with `cel forge pr close <repo>#<n> [--comment-file f]` (your
-   account's PRs only, or a migrated one by Ghost). Never source
-   lib/forge.sh or call its functions - the guard refuses it. Where a
+   `cel forge run list <repo> --sha <head>` (your PR's runs with their job
+   ids - the ids, not the web page's numbers, are what the next commands
+   take), `cel forge run view <repo> <run-id>` and `cel forge run logs <repo>
+   <job-id> [--tail N]`; a flaky job runs again with `cel forge run rerun
+   <repo> <job-id>` (same head, so an approval stands). A draft becomes ready
+   with `cel forge pr ready <repo>#<n>`; a PR you abandon is closed with
+   `cel forge pr close <repo>#<n> [--comment-file f]` - your own product's
+   repos and your account's PRs only (or a migrated one by Ghost). Run
+   `cel forge` as you are: never source lib/forge.sh, call its functions, or
+   set or unset CEL_* variables on its line - the guard refuses each. Where a
    `pr: none` repo is named, follow that line instead.
 5. Where the workspace declares PR review, start the reviewer right away:
    `cel run reviewer --repo <repo> --pr <n>`, then tell it by

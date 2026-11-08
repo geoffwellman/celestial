@@ -11,7 +11,10 @@ workflow network hash are zeroes, a run's event_payload is "{}", and PR, run
 and review titles and bodies are neutral text. Where a test needs a scenario
 the live server has no example of (a protected base, a stale approval, a
 second reviewer), the RECORDED SHAPE is kept and only the named scenario
-fields are overlaid on it.
+fields are overlaid on it. The host (forgejo.internal) and the login `geoff`
+are kept on purpose: they are the names the whole Forgejo test harness
+(tests/lib/forgejo-stub.sh, the workspace descriptors the tests build) already
+uses for the gizmo repo, and neither is a secret.
 
   file                          recorded                             from (GET)                                  overlaid scenario fields
   user.json                     recorded 2026-11-08, Forgejo 17.0.1  /user                                       -
