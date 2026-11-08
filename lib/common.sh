@@ -67,8 +67,10 @@ cel_under_suite() {
 # or `yq` whose answer decides who may write. So cel forge and cel team run
 # on cel_tool_path instead, and the token's own binaries are resolved by
 # cel_tool_bin:
-#   - the system directories ($_CEL_SYSTEM_PATH) - root-owned, nothing an
-#     agent writes;
+#   - the system directories ($_CEL_SYSTEM_PATH) - where root installs the
+#     distribution's packages; normally root-owned, though /usr/local/bin
+#     is user-writable on some boxes (Homebrew, a chown), and then a binary
+#     there is no better than one in the home directory;
 #   - then this user's ~/.local/bin, where `cel setup` installs what the
 #     distribution does not ship (yq, herdr, sometimes gh) - its home taken
 #     from /etc/passwd, not $HOME, which the caller sets. A binary there is
@@ -119,6 +121,18 @@ cel_gh_bin() { # [stub] -> the gh to run
   cel_tool_bin gh && return 0
   printf 'cel: no gh in the system directories or ~/.local/bin - cel runs no gh found elsewhere on PATH\n' >&2
   return 1
+}
+# AND IT RUNS ON THE TOOL PATH. gh starts git (remote and branch resolution,
+# pr create and merge) and a pager through PATH, and they inherit its
+# environment - GH_TOKEN included - so a git planted first on the caller's
+# PATH would be handed the token. Every gh call goes through here: PATH is
+# cel_tool_path, and the pager is cat (never one the caller names). Other
+# caller variables (GH_CONFIG_DIR, GH_EDITOR, BROWSER, ...) still reach gh;
+# the environment is not scrubbed.
+cel_gh_run() { # <gh> <args...>
+  local bin="$1" tp; shift
+  tp="$(cel_tool_path)"
+  PATH="$tp" GH_PAGER=cat PAGER=cat "$bin" "$@"
 }
 
 # The owner's Hermes desktop starts per-profile SSH servers, not previews or

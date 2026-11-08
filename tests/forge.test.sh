@@ -424,6 +424,36 @@ test_gh_outside_the_suite_is_never_a_planted_or_named_stub() {
   rm -rf "$T"
 }
 
+# gh STARTS git AND A PAGER THROUGH PATH, and they inherit GH_TOKEN. So the
+# token-carrying gh runs on the tool path (cel_gh_run): a git planted first
+# on the caller's PATH never runs inside a ws_gh call that starts one, and
+# the pager is cat. The gh here is a stub (honoured under the suite) that
+# does what gh does - asks git - with the production rule for everything
+# else (CEL_TOOL_PATH_REAL).
+test_ws_gh_runs_gh_and_its_children_on_the_tool_path() {
+  local T; T="$(mktemp -d)"
+  mkdir -p "$T/ws" "$T/stub" "$T/planted"
+  printf 'name: ghws\ngithub:\n  user: acct-b\nrepos:\n  - name: widget\n    url: git@github.com:acme/widget.git\n' > "$T/ws/workspace.yaml"
+  cat > "$T/stub/gh" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in "auth token") echo synthetic-gh-token; exit 0 ;; esac
+printf 'pager=%s\n' "${GH_PAGER:-unset}"
+git --version >/dev/null 2>&1 && echo "git ran"
+SH
+  printf '#!/usr/bin/env bash\necho "planted git ran with GH_TOKEN=${GH_TOKEN:-unset}" >> %q\necho "git version 0"\n' "$T/planted-git.log" > "$T/planted/git"
+  chmod +x "$T/stub/gh" "$T/planted/git"
+  local out
+  out="$(CEL_TOOL_PATH_REAL=1 CEL_WS_GH_BIN="$T/stub/gh" PATH="$T/planted:$PATH" GH_PAGER=less ws_gh "$T/ws" pr create 2>&1)" \
+    || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "git ran" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "pager=cat" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/planted-git.log" ] || { echo "the git first on PATH ran inside ws_gh: $(cat "$T/planted-git.log")"; rm -rf "$T"; return 1; }
+  # the plain (no workspace token) calls run the same way
+  out="$(. "$CEL_ROOT/lib/afk.sh"; CEL_TOOL_PATH_REAL=1 CEL_AFK_GH="$T/stub/gh" PATH="$T/planted:$PATH" _afk_ws_gh "" pr view 1 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/planted-git.log" ] || { echo "the git first on PATH ran inside afk's gh"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 test_forge_repo_describes_an_internal_forgejo_on_plain_http() {
   _forge_ws git@forgejo-ct.internal:geoff/gizmo.git forgejo http://forgejo.internal
   _json_eq "$(_desc)" "$GIZMO" || { rm -rf "$T"; return 1; }

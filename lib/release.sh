@@ -110,7 +110,7 @@ _release_gh() { # <wsdir-or-empty> <gh args...>
   local w="$1" bin; shift
   if [ -n "$w" ]; then ws_gh "$w" "$@"; return; fi
   bin="$(cel_gh_bin)" || return 1
-  "$bin" "$@"
+  cel_gh_run "$bin" "$@"
 }
 
 # THE REFUSAL THIS FILE EXISTS FOR. `gh` answers who you are on that repo, so

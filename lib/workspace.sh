@@ -268,19 +268,21 @@ ws_github_ready() { # <wsdir> [gh-binary]
 # planted over it - and a gh found nowhere there refuses the call.
 # CEL_WS_GH_BIN, the stub seam callers pass on (cel forge's CEL_FORGE_GH,
 # land's GH, afk's CEL_AFK_GH), is honoured only under this checkout's own
-# suite (cel_under_suite); anywhere else it names nothing.
+# suite (cel_under_suite); anywhere else it names nothing. Every call runs
+# through cel_gh_run: on the tool path, so the git and pager gh starts - which
+# inherit GH_TOKEN - are the box's too.
 ws_gh() { # <wsdir> <gh args...>
   local wsdir="$1"; shift
   local bin user tok
   bin="$(cel_gh_bin "${CEL_WS_GH_BIN:-}")" || { printf 'gh %s refused: no trusted gh\n' "$*" >&2; return 1; }
   user="$(ws_github_user "$wsdir")"
-  if [ -z "$user" ]; then "$bin" "$@"; return; fi
-  tok="$("$bin" auth token --user "$user" 2>/dev/null)" || tok=""
+  if [ -z "$user" ]; then cel_gh_run "$bin" "$@"; return; fi
+  tok="$(cel_gh_run "$bin" auth token --user "$user" 2>/dev/null)" || tok=""
   if [ -z "$tok" ]; then
     printf '%s refused: %s\n' "gh $*" "$(ws_github_fix "$user")" >&2
     return 1
   fi
-  GH_TOKEN="$tok" "$bin" "$@"
+  GH_TOKEN="$tok" cel_gh_run "$bin" "$@"
 }
 
 # What a pane evaluates for itself, in two halves: a GUARD typed at the head

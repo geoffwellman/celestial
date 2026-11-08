@@ -32,7 +32,7 @@ _afk_ws_gh() { # <wsdir-or-empty> <gh args...>
   local w="$1" bin; shift
   if [ -n "$w" ]; then CEL_WS_GH_BIN="${CEL_AFK_GH:-}" ws_gh "$w" "$@"; return; fi
   bin="$(cel_gh_bin "${CEL_AFK_GH:-}")" || return 1
-  "$bin" "$@"
+  cel_gh_run "$bin" "$@"
 }
 _afk_wsdir_for_slug() { # <owner/name> -> wsdir, or nothing
   local n w r

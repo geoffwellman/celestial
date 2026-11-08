@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { parseNative as parseNativeAtLeaf, emptyComposer, checkoutPreserved, validateNativeResponse, validateExitCommitment, validateArchivedRole, validatedProcessEvidence, sessionTopology, selectedRound, durableRound, githubBinary } from './retire.mjs';
+import { spawnSync } from 'node:child_process';
+import { parseNative as parseNativeAtLeaf, emptyComposer, checkoutPreserved, validateNativeResponse, validateExitCommitment, validateArchivedRole, validatedProcessEvidence, sessionTopology, selectedRound, durableRound, githubBinary, githubEnv } from './retire.mjs';
 
 // These are parser/preservation fixtures, not evidence of real review quality
 // or of the production Rex lifecycle (the latter requires a supported smoke).
@@ -274,4 +275,31 @@ test('the gh handed the workspace token is the one the bash side passed, never a
   } finally {
     if (saved === undefined) delete process.env.CEL_WS_GH_BIN; else process.env.CEL_WS_GH_BIN = saved;
   }
+});
+
+test('gh and the git it starts run on the tool path the bash side passed, never the caller\'s PATH', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'retire-gh-path-'));
+  try {
+    const planted = path.join(root, 'planted'), log = path.join(root, 'planted-git.log');
+    fs.mkdirSync(planted);
+    fs.writeFileSync(path.join(planted, 'git'), `#!/bin/sh\necho "planted git ran with GH_TOKEN=$GH_TOKEN" >> '${log}'\n`, { mode: 0o755 });
+    // a gh that does what gh does: asks git, through PATH
+    const gh = path.join(root, 'gh');
+    fs.writeFileSync(gh, '#!/bin/sh\necho "pager=$GH_PAGER"\ngit --version >/dev/null 2>&1 && echo "git ran"\n', { mode: 0o755 });
+    const toolPath = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+    const env = githubEnv(toolPath, 'synthetic-gh-token', { ...process.env, PATH: `${planted}:${process.env.PATH}`, GH_PAGER: 'less' });
+    assert.equal(env.PATH, toolPath);
+    assert.equal(env.GH_TOKEN, 'synthetic-gh-token');
+    const result = spawnSync(gh, [], { encoding: 'utf8', env });
+    assert.match(result.stdout, /pager=cat/);
+    assert.match(result.stdout, /git ran/);
+    assert.equal(fs.existsSync(log), false, 'the git first on the caller\'s PATH ran with the token');
+    // no tool path passed: refused rather than falling back to the caller's
+    refusal(() => githubEnv('', 'synthetic-gh-token'), 'github_tool_path_unavailable');
+    assert.equal(githubEnv(toolPath, '').GH_TOKEN, undefined);
+    // and every gh the retirement spawns is given that environment
+    const source = fs.readFileSync(new URL('./retire.mjs', import.meta.url), 'utf8');
+    const ghBody = source.slice(source.indexOf('const gh = () => {'), source.indexOf('const snapshot ='));
+    assert.equal((ghBody.match(/env: githubEnv\(toolPath/g) || []).length, 2);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

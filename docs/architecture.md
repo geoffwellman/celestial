@@ -499,14 +499,23 @@ on `cel_tool_path` (lib/common.sh): the system directories, then this user's
 caller's `PATH`. The Forgejo token goes only to the system's `curl`, and `jq`
 must be the system's; both refuse to run otherwise. Every `gh` call - `ws_gh`
 with a workspace's token, and the plain ones in lib/afk.sh, lib/release.sh
-and lib/gc.sh - runs `cel_gh_bin` (system, then `~/.local/bin`), and
-`tools/reviewers/retire.mjs` runs the gh the bash side resolved the same way
-and passes it as an argument; it reads no binary from its environment. A
+and lib/gc.sh - runs `cel_gh_bin` (system, then `~/.local/bin`) through
+`cel_gh_run`, which runs it on the tool path with `GH_PAGER=cat`: gh starts
+git and a pager through `PATH`, and they inherit `GH_TOKEN`, so a git
+planted first on the caller's `PATH` is never handed the token.
+`tools/reviewers/retire.mjs` runs the gh, and the tool path, the bash side
+resolved and passes as arguments; it reads neither from its environment.
+Other caller variables (`GH_CONFIG_DIR`, `GH_EDITOR`, `BROWSER`, ...) still
+reach gh - the environment is not scrubbed. The system directories are where
+root installs the distribution's packages and are normally root-owned, but
+`/usr/local/bin` is user-writable on some boxes (Homebrew, a chown), and a
 `gh` or `yq` installed only under the home directory cannot be told from one
-planted over it, so that is the least-bad rule - a prepended `PATH` or a
+planted over it; so this is the least-bad rule - a prepended `PATH` or a
 moved `HOME` no longer chooses the binary, a write over the installed file
-still would. Under the suite tests stub tools on `PATH` or as functions;
-`CEL_TOOL_PATH_REAL=1` runs the production rule.
+still would. A `gh` that lives only in a mise, Homebrew or cargo directory is
+now refused (gc reads that as unknown: kept). Under the suite tests stub
+tools on `PATH` or as functions; `CEL_TOOL_PATH_REAL=1` runs the production
+rule.
 
 - **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
   `CEL_FORGE_GH` is its test seam, honoured (as `CEL_WS_GH_BIN`, `GH` and

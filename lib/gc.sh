@@ -32,7 +32,7 @@ _gc_gh() { # <dir> <gh args...> - run in <dir>, as its workspace's account
   w="$(ws_of_checkout "$d")" || w=""
   if [ -n "$w" ]; then (cd "$d" && ws_gh "$w" "$@"); return; fi
   bin="$(cel_gh_bin)" || return 1
-  (cd "$d" && "$bin" "$@")
+  (cd "$d" && cel_gh_run "$bin" "$@")
 }
 
 _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
@@ -561,7 +561,7 @@ _gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> gh pr view JS
       out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json "$f" 2>/dev/null)" || return 1
     else
       local bin; bin="$(cel_gh_bin)" || return 1
-      out="$("$bin" pr view "$2" --repo "$1" --json "$f" 2>/dev/null)" || return 1
+      out="$(cel_gh_run "$bin" pr view "$2" --repo "$1" --json "$f" 2>/dev/null)" || return 1
     fi
   fi
   printf '%s' "$out"
