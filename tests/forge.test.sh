@@ -4,11 +4,8 @@ source "$CEL_ROOT/lib/forge.sh"
 
 # A workspace with one repo, `widget`, whose url and per-repo forge keys a
 # test sets; `extra` is appended at the top level (a github: block).
-# CEL_FORGE_PROC_DIR (honoured under CEL_TESTING) stands in for /proc, so who
-# ran the suite - an agent's process tree, or none - never decides whether a
-# test is the owner: an empty one is a process with no agent ancestry.
 _forge_ws() { # <url-or-empty> [forge] [host] [extra-yaml]
-  T="$(mktemp -d)"; mkdir -p "$T/proc"; export CEL_FORGE_PROC_DIR="$T/proc"
+  T="$(mktemp -d)"
   printf 'name: forgetest\n%s\nrepos:\n  - name: widget\n    prefix: WG\n' "${4:-}" > "$T/workspace.yaml"
   [ -z "$1" ] || printf '    url: %s\n' "$1" >> "$T/workspace.yaml"
   [ -z "${2:-}" ] || printf '    forge: %s\n' "$2" >> "$T/workspace.yaml"
@@ -510,8 +507,10 @@ test_forgejo_pr_close_and_ready() {
   out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot STUB_FJ_TITLE='WIP: x' CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#29 2>&1)" && { echo "readied someone else's PR"; rm -rf "$T"; return 1; }
   assert_contains "$out" "helper-bot's pull request" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -cE '^(POST|PATCH)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
-  # ...but the owner (no CEL_ROLE) may
-  ( cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge pr close widget#29 ) >/dev/null || { rm -rf "$T"; return 1; }
+  # ...and a process with no agent identity is refused, whatever it is
+  out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge pr close widget#29 2>&1)" && { echo "no identity closed a PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "web UI" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
   # roles that never close or ready
   local r
   for r in reviewer member core; do
@@ -524,7 +523,7 @@ test_forgejo_pr_close_and_ready() {
   assert_eq "$(jq -r .draft <<<"$out")" false || { rm -rf "$T"; return 1; }
   assert_eq "$(cat "$FJ_BODY_LOG")" '{"title":"Session audio"}' || { rm -rf "$T"; return 1; }
   : > "$FJ_LOG"
-  ( cd "$T" && STUB_FJ_TITLE='[WIP] Session audio' cmd_forge pr ready widget#31 ) >/dev/null || { rm -rf "$T"; return 1; }
+  ( cd "$T" && STUB_FJ_TITLE='[WIP] Session audio' CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#31 ) >/dev/null || { rm -rf "$T"; return 1; }
   assert_contains "$(cat "$FJ_LOG")" "PATCH" || { rm -rf "$T"; return 1; }
   : > "$FJ_LOG"
   out="$(cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#31 --json)" || { rm -rf "$T"; return 1; }
@@ -532,7 +531,7 @@ test_forgejo_pr_close_and_ready() {
   assert_eq "$(grep -c '^PATCH' "$FJ_LOG")" 0 || { echo "readied a ready PR"; rm -rf "$T"; return 1; }
   # a refused comment closes nothing
   : > "$FJ_LOG"
-  ( cd "$T" && STUB_FJ_WRITE=denied cmd_forge pr close widget#31 --comment-file "$T/why.md" ) >/dev/null 2>&1 && { echo "closed after a refused comment"; rm -rf "$T"; return 1; }
+  ( cd "$T" && STUB_FJ_WRITE=denied CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr close widget#31 --comment-file "$T/why.md" ) >/dev/null 2>&1 && { echo "closed after a refused comment"; rm -rf "$T"; return 1; }
   assert_eq "$(grep -c '^PATCH' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
   _fj_no_gh || { rm -rf "$T"; return 1; }
   rm -rf "$T"
@@ -546,37 +545,43 @@ test_github_pr_close_and_ready() {
   ( cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr close widget#12 --comment-file "$T/why.md" ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
   assert_contains "$(grep '^pr close' "$GH_LOG")" "pr close 12 --repo acme/widget --comment Superseded." || { rm -rf "$T"; return 1; }
   assert_fails grep -q -- '--delete-branch' "$GH_LOG" || { rm -rf "$T"; return 1; }
-  ( cd "$T" && cmd_forge pr ready widget#12 ) >/dev/null 2>&1 || { rm -rf "$T"; return 1; }
+  ( cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#12 ) >/dev/null 2>&1 || { rm -rf "$T"; return 1; }
   assert_fails grep -q '^pr ready' "$GH_LOG" || { rm -rf "$T"; return 1; }
   # a draft is made ready
   jq '.isDraft = true' "$FX/pr-view.json" > "$T/draft.json"
-  ( cd "$T" && FX_VIEW="$T/draft.json" cmd_forge pr ready widget#12 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  ( cd "$T" && FX_VIEW="$T/draft.json" CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#12 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
   assert_contains "$(cat "$GH_LOG")" "pr ready 12 --repo acme/widget" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
-# AN EMPTY ROLE IS NEVER THE OWNER. The owner is a process with no agent
-# mark at all - none of the launch's variables, set or emptied, and no
-# ancestor that carried one. An agent that empties or unsets CEL_ROLE keeps
-# its other marks or its ancestry, and is refused before any write.
-test_forge_owner_is_a_process_with_no_agent_mark() {
+# NO IDENTITY IS NO AUTHORITY. There is no owner path through cel forge: a
+# process that carries no agent role - never launched as one, or an agent
+# that shed its marks (env -u CEL_ROLE, setsid into a fresh environment) - is
+# refused every write and pointed at the forge's web UI; it still reads.
+test_forge_writes_refuse_a_process_with_no_agent_identity() {
   _fj_ws
-  local out v
-  ( cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge pr close widget#29 ) >/dev/null || { echo "the owner was refused"; rm -rf "$T"; return 1; }
-  : > "$FJ_LOG"
-  for v in 'CEL_ROLE=' 'CEL_INBOX_ME=widget-orch' 'CEL_SESSION_ID=s1' 'CEL_PRODUCT=widget' 'CEL_TEAM_MEMBER=widget-login-qa' 'CEL_INBOX_WS=alpha'; do
-    out="$(cd "$T" && env "$v" bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/forge.sh"; cmd_forge pr close widget#29' 2>&1)" \
-      && { echo "$v passed as the owner"; rm -rf "$T"; return 1; }
-    assert_contains "$out" "not the owner" || { echo "$v: $out"; rm -rf "$T"; return 1; }
+  local out c
+  for c in 'pr close widget#29' 'pr ready widget#29' 'run rerun widget 15'; do
+    # shellcheck disable=SC2086
+    out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge $c 2>&1)" && { echo "no identity: $c went through"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "web UI" || { echo "$c: $out"; rm -rf "$T"; return 1; }
+    # an agent that drops CEL_ROLE keeps nothing it can act on
+    out="$(cd "$T" && env -u CEL_ROLE CEL_INBOX_ME=widget-orch CEL_PRODUCT=widget CEL_SESSION_ID=s1 \
+      bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/forge.sh"; cmd_forge '"$c" 2>&1)" \
+      && { echo "env -u CEL_ROLE: $c went through"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "no agent role" || { echo "env -u: $c: $out"; rm -rf "$T"; return 1; }
+    # nor one that leaves its session and its environment behind
+    out="$(cd "$T" && setsid -w env -u CEL_ROLE -u CEL_INBOX_ME -u CEL_PRODUCT \
+      bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/forge.sh"; cmd_forge '"$c" 2>&1)" \
+      && { echo "setsid: $c went through"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "web UI" || { echo "setsid: $c: $out"; rm -rf "$T"; return 1; }
   done
-  # no variable at all, but descended from an agent's runtime: its environ
-  # (fixed at exec) still says CEL_ROLE
-  mkdir -p "$T/proc/$$" "$T/proc/4242"
-  printf 'HOME=/h\0' > "$T/proc/$$/environ"; printf '%s' "$$ (bash) S 4242 1 1" > "$T/proc/$$/stat"
-  printf 'CEL_ROLE=solo\0CEL_INBOX_ME=widget-orch\0' > "$T/proc/4242/environ"; printf '4242 (claude) S 1 1 1' > "$T/proc/4242/stat"
-  out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge pr close widget#29 2>&1)" && { echo "an agent's child passed as the owner"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "not the owner" || { rm -rf "$T"; return 1; }
-  assert_eq "$(grep -cE '^(POST|PATCH)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  # reads stay open to everyone
+  ( cd "$T" && cmd_forge pr view widget#31 ) >/dev/null || { echo "no identity could not read a PR"; rm -rf "$T"; return 1; }
+  ( cd "$T" && cmd_forge run list widget ) >/dev/null || { echo "no identity could not list runs"; rm -rf "$T"; return 1; }
+  ( cd "$T" && cmd_forge whoami widget ) >/dev/null || { echo "no identity could not whoami"; rm -rf "$T"; return 1; }
+  ( cd "$T" && CEL_ROLE=reviewer cmd_forge pr reviews widget#31 ) >/dev/null || { echo "a reviewer could not read reviews"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
@@ -591,14 +596,18 @@ test_forge_agent_changes_only_its_own_products_repos() {
   assert_contains "$out" "not a repo of product shop" || { rm -rf "$T"; return 1; }
   out="$(cd "$T" && CEL_ROLE=solo cmd_forge pr close widget#31 2>&1)" && { echo "closed with no product"; rm -rf "$T"; return 1; }
   assert_contains "$out" "cannot tell which product" || { rm -rf "$T"; return 1; }
+  # a product and a mailbox that disagree are no identity at all
+  out="$(cd "$T" && CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=shop-orch cmd_forge pr close widget#31 2>&1)" && { echo "closed with a contradictory identity"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "name different products" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -cE '^(POST|PATCH)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
   ( cd "$T" && CEL_ROLE=orchestrator CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 ) >/dev/null || { echo "refused its own product"; rm -rf "$T"; return 1; }
+  ( cd "$T" && CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 ) >/dev/null || { echo "refused an agreeing identity"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
 # `cel forge run rerun`: Forgejo POST /actions/jobs/<id>/rerun, GitHub
-# `gh run rerun --job`; the product's agent and the owner, never a member,
-# reviewer or core.
+# `gh run rerun --job`; the product's agent only, never a member, reviewer,
+# core or a process with no role.
 test_forge_run_rerun_on_either_forge() {
   _fj_ws
   local out r
@@ -610,7 +619,7 @@ test_forge_run_rerun_on_either_forge() {
     ( cd "$T" && CEL_ROLE=$r CEL_PRODUCT=widget cmd_forge run rerun widget 15 ) >/dev/null 2>&1 && { echo "$r reran a job"; rm -rf "$T"; return 1; }
   done
   assert_eq "$(grep -c '^POST' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
-  ( cd "$T" && STUB_FJ_WRITE=denied cmd_forge run rerun widget 15 ) >/dev/null 2>&1 && { echo "a refused rerun said yes"; rm -rf "$T"; return 1; }
+  ( cd "$T" && STUB_FJ_WRITE=denied CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge run rerun widget 15 ) >/dev/null 2>&1 && { echo "a refused rerun said yes"; rm -rf "$T"; return 1; }
   rm -rf "$T"
   _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
   ( cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge run rerun widget 128530529824 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }

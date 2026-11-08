@@ -48,7 +48,10 @@ How work ships
    `cel forge pr close <repo>#<n> [--comment-file f]` - your own product's
    repos and your account's PRs only (or a migrated one by Ghost). Run
    `cel forge` as you are: never source lib/forge.sh, call its functions, or
-   set or unset CEL_* variables on its line - the guard refuses each. Where a
+   set CEL_* variables on its line - the guard refuses each; with your role
+   or product shed, cel forge changes nothing. The owner closes, readies or
+   reruns anything else in the forge's web UI (or gh) - cel forge has no
+   owner path, so ask them rather than route around it. Where a
    `pr: none` repo is named, follow that line instead.
 5. Where the workspace declares PR review, start the reviewer right away:
    `cel run reviewer --repo <repo> --pr <n>`, then tell it by

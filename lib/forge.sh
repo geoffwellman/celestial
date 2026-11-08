@@ -902,8 +902,9 @@ _forge_forgejo_whoami() { # <wsdir> <desc>
 # web UI wants a login and its token is no agent's to read); `pr create` for
 # whoever opens PRs (a solo agent) - the guard refuses it to orchestrators and
 # core, and a reviewer never opens one; `pr close`, `pr ready` and `run
-# rerun` for the owner and the product's own agent (solo or orchestrator) on
-# its own product's repos - see _forge_cli_authorise for who is the owner.
+# rerun` only for the product's own agent (solo or orchestrator) on its own
+# product's repos - see _forge_cli_authorise. The owner changes a forge in its
+# web UI (Forgejo or GitHub) or with gh, never through cel forge.
 # There is no merge verb: merges go through `cel solo land`, which checks
 # what a merge must prove.
 #
@@ -935,58 +936,36 @@ _forge_cli_repo() { # <wsdir> <repo>
   ws_repo_names "$1" | grep -qxF -- "$2" || die "cel forge: '$2' is not a repo of workspace '$(ws_name "$1")'"
 }
 
-# THE OWNER IS A SHELL WITH NO AGENT MARK AT ALL. An empty or unset CEL_ROLE
-# is never the owner: an agent can empty its own variables (`CEL_ROLE=`,
-# `env -u`, `unset`). So the owner is a process that carries none of the
-# variables a launch gives an agent - set, even empty - and descends from no
-# process that carried one (every agent runtime is exec'd under
-# `env CEL_ROLE=...`, and /proc/<pid>/environ is fixed at exec). The proc
-# root is a test seam, honoured only under CEL_TESTING.
-_FORGE_AGENT_MARKS='CEL_ROLE CEL_INBOX_ME CEL_INBOX_WS CEL_SESSION_ID CEL_PRODUCT CEL_ROLE_FILE CEL_TEAM CEL_TEAM_ROLE CEL_TEAM_MEMBER CEL_TEAM_BRANCH CEL_AGENT_NAME CEL_REX_RECORD'
-_forge_cli_is_owner() {
-  local v pid n=0 stat proc=/proc
-  for v in $_FORGE_AGENT_MARKS; do
-    [ -z "${!v+x}" ] || return 1
-  done
-  [ -z "${CEL_TESTING:-}" ] || proc="${CEL_FORGE_PROC_DIR:-/proc}"
-  pid=$$
-  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
-    if [ -r "$proc/$pid/environ" ] \
-       && tr '\0' '\n' < "$proc/$pid/environ" 2>/dev/null | grep -qE "^(${_FORGE_AGENT_MARKS// /|})="; then
-      return 1
-    fi
-    stat="$(cat "$proc/$pid/stat" 2>/dev/null)" || break
-    stat="${stat##*) }"
-    pid="$(printf '%s' "$stat" | cut -d' ' -f2)"
-    n=$((n + 1))
-  done
-  return 0
-}
-
-# The product this agent is: its launch's CEL_PRODUCT, else its mailbox
-# (<product>-orch).
+# The product this agent is: its launch's CEL_PRODUCT and/or its mailbox
+# (<product>-orch). Fails when the two name different products; prints
+# nothing when neither names one.
 _forge_cli_agent_product() {
-  if [ -n "${CEL_PRODUCT:-}" ]; then printf '%s' "$CEL_PRODUCT"; return 0; fi
-  case "${CEL_INBOX_ME:-}" in *-orch) printf '%s' "${CEL_INBOX_ME%-orch}" ;; esac
+  local p="${CEL_PRODUCT:-}" m=""
+  case "${CEL_INBOX_ME:-}" in *-orch) m="${CEL_INBOX_ME%-orch}" ;; esac
+  [ -z "$p" ] || [ -z "$m" ] || [ "$p" = "$m" ] || return 1
+  printf '%s' "${p:-$m}"
 }
 
-# May this process change <repo> (close or ready a PR, rerun a job)? The
-# owner may. The product's own agent (CEL_ROLE solo or orchestrator) only on
-# its OWN product's repos and, for a PR, only one its workspace's account
-# authored or a migrated Forgejo PR (author Ghost, the placeholder for an
-# imported PR's author). An agent mark without such a role - a reviewer, a
-# member, core, or a role emptied away - is refused. Every agent and the
-# owner act as the one workspace account, so authorship cannot tell an
-# agent's PR from the owner's own on the same product: that is the limit.
+# May this process change <repo> (close or ready a PR, rerun a job)? ONLY A
+# POSITIVELY IDENTIFIED PRODUCT AGENT: CEL_ROLE solo or orchestrator, and a
+# product (CEL_PRODUCT or its <product>-orch mailbox, agreeing when both are
+# set) that owns <repo>; for a PR, only one its workspace's account authored
+# or a migrated Forgejo PR (author Ghost, the placeholder for an imported
+# PR's author). Anything missing or contradictory is refused. There is no
+# owner path: the absence of an agent's marks proves nothing (an agent can
+# shed them - env -u, setsid, a fresh environment), so a process with no
+# identity is refused and the owner uses the forge's web UI or gh. Every
+# agent acts as the one workspace account, so authorship cannot tell one
+# agent's PR from another's on the same product: that is the limit.
 _forge_cli_authorise() { # <wsdir> <repo> <verb> [pr-number]
   local role="${CEL_ROLE:-}" product pr author me provider
-  _forge_cli_is_owner && return 0
   case "$role" in
     solo|orchestrator) ;;
-    "") die "cel forge $3: this process carries a Celestial agent's marks but no role (CEL_ROLE unset or emptied) - it is not the owner; only the owner's shell or the product's own agent may; nothing changed" ;;
-    *) die "cel forge $3: a ${role} does not do this - the product's own agent (or the owner) does; nothing changed" ;;
+    "") die "cel forge $3: only the product's own agent (CEL_ROLE solo or orchestrator) changes a forge, and this process carries no agent role - a missing role proves nothing, so it is refused. At your own shell, use the forge's web UI (Forgejo or GitHub) or gh directly; nothing changed" ;;
+    *) die "cel forge $3: a ${role} does not do this - the product's own agent does (the owner uses the forge's web UI or gh); nothing changed" ;;
   esac
-  product="$(_forge_cli_agent_product)"
+  product="$(_forge_cli_agent_product)" \
+    || die "cel forge $3: this agent's CEL_PRODUCT ($CEL_PRODUCT) and mailbox ($CEL_INBOX_ME) name different products - nothing changed"
   [ -n "$product" ] || die "cel forge $3: cannot tell which product this agent is (no CEL_PRODUCT, no <product>-orch mailbox) - nothing changed"
   [ "$(ws_product_of_repo "$1" "$2")" = "$product" ] \
     || die "cel forge $3: $2 is not a repo of product $product - an agent changes only its own product's PRs and runs; nothing changed"

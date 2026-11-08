@@ -296,24 +296,22 @@ _guard_forge_lib() { # <command> -> 0 when it sources lib/forge.sh or calls its 
 _GUARD_FORGE_LIB_DENY='deny lib/forge.sh is cel'"'"'s own code - an agent does not source it or call its _forge_*/forge_* functions (that reaches the forge with every guard and authorship check skipped); use cel forge ... instead (repo, whoami, pr view|checks|reviews|list|create|close|ready, run list|view|logs|rerun)'
 
 # `cel forge` DECIDES WHO IS ASKING FROM THE CALLER'S ENVIRONMENT (CEL_ROLE,
-# CEL_PRODUCT, its mailbox), so a line that runs it while setting, emptying or
-# unsetting a CEL_* variable - a `VAR=` prefix, `env -u`/`--unset`, `env -i`,
-# `unset`, `export`, `declare` - is a pane dressing up as someone else: refused
-# for every role, reads included. Pass --workspace <name> instead of
-# CEL_WORKSPACE. (`cel forge` also refuses an agent whose role was emptied.)
+# CEL_PRODUCT, its mailbox), so a line that runs it while SETTING a CEL_*
+# variable - a `VAR=` prefix (empty included), `env VAR=`, `export`,
+# `declare` - is a pane dressing up as someone else: refused for every role,
+# reads included. Pass --workspace <name> instead of CEL_WORKSPACE. Shedding
+# variables (unset, env -u, env -i, setsid) is not refused here: cel forge
+# changes a forge only for a positively identified product agent, so a
+# process with no identity gains nothing.
 _guard_forge_env_tamper() { # <command> -> 0 when it does
   local re='(^|[^A-Za-z0-9_.-])cel([[:space:]]+(-C[[:space:]]+[^[:space:]]+|--workspace[= ][^[:space:]]+))*[[:space:]]+forge([[:space:]]|$)'
   [[ "$1" =~ $re ]] || return 1
   re='(^|[^A-Za-z0-9_])CEL_[A-Za-z0-9_]*='
   [[ "$1" =~ $re ]] && return 0
-  re='(^|[[:space:];&|(])(unset|export|declare|typeset|local|readonly)[[:space:]][^;&|]*CEL_'
-  [[ "$1" =~ $re ]] && return 0
-  re='(^|[[:space:];&|(])env([[:space:]]+[^[:space:]]+)*[[:space:]]+(-u[[:space:]]*|--unset[= ]?)CEL_'
-  [[ "$1" =~ $re ]] && return 0
-  re='(^|[[:space:];&|(])env([[:space:]]+-[A-Za-z]*i[A-Za-z]*|[[:space:]]+--ignore-environment|[[:space:]]+-)([[:space:]]|$)'
+  re='(^|[[:space:];&|(])(export|declare|typeset|local|readonly)[[:space:]][^;&|]*CEL_'
   [[ "$1" =~ $re ]]
 }
-_GUARD_FORGE_ENV_DENY='deny cel forge reads who is asking from its environment - a line that runs it while setting, emptying or unsetting a CEL_* variable (VAR= prefix, env -u, env -i, unset, export) is refused; run cel forge as you are, with --workspace <name> to pick a workspace'
+_GUARD_FORGE_ENV_DENY='deny cel forge reads who is asking from its environment - a line that runs it while setting a CEL_* variable (VAR= prefix, env VAR=, export, declare) is refused; run cel forge as you are, with --workspace <name> to pick a workspace'
 
 # A TEAM MEMBER'S LAUNCH TOKEN IS NOBODY'S TO READ EITHER: cel team add writes
 # <ws>/.cel/teams/<feature>/launch/<alias>.token and `cel run member` spends

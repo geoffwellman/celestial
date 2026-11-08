@@ -346,20 +346,23 @@ test_cel_forge_runs_are_everyones_and_close_ready_the_product_agents() {
   rm -rf "$T"
 }
 # `cel forge` reads who is asking from its environment, so a line that runs
-# it while setting, emptying or unsetting a CEL_* variable is refused to every
-# role - the way an agent would dress up as the owner or another product.
+# it while SETTING a CEL_* variable (even to empty) is refused to every role -
+# the way an agent would dress up as another product. Shedding marks (unset,
+# env -u, env -i) gains nothing: cel forge refuses a process with no agent
+# identity, so the guard leaves those lines to it.
 test_cel_forge_with_a_tampered_cel_environment_is_refused() {
   local role c
   for role in orchestrator root core solo other; do
-    for c in 'CEL_ROLE= cel forge pr close gizmo#3' 'env -u CEL_ROLE cel forge pr close gizmo#3' \
-             'env --unset=CEL_ROLE cel forge pr ready gizmo#3' 'unset CEL_ROLE; cel forge pr close gizmo#3' \
-             'export CEL_ROLE=; cel forge pr close gizmo#3' 'env -i PATH=/usr/bin cel forge pr close gizmo#3' \
+    for c in 'CEL_ROLE= cel forge pr close gizmo#3' 'export CEL_ROLE=; cel forge pr close gizmo#3' \
              'CEL_PRODUCT=other cel forge run rerun gizmo 15' 'CEL_INBOX_ME=x-orch cel --workspace w forge pr ready gizmo#3' \
-             'env CEL_ROLE=solo /home/u/celestial/bin/cel forge pr close gizmo#3' 'unset CEL_INBOX_ME CEL_ROLE && cel forge run list gizmo'; do
+             'env CEL_ROLE=solo /home/u/celestial/bin/cel forge pr close gizmo#3' 'declare -x CEL_PRODUCT=x; cel forge pr ready gizmo#3' \
+             'env -i PATH=/usr/bin CEL_ROLE=solo cel forge pr close gizmo#3'; do
       case "$(guard_classify "$role" "$c")" in "deny cel forge reads who is asking"*) ;; *) echo "$role allowed: $c"; return 1;; esac
     done
   done
-  for c in 'cel forge pr close gizmo#3' 'cel --workspace sandbox forge run list gizmo' 'echo CEL_ROLE=x' 'unset CEL_ROLE; cel inbox read'; do
+  for c in 'cel forge pr close gizmo#3' 'cel --workspace sandbox forge run list gizmo' 'echo CEL_ROLE=x' 'unset CEL_ROLE; cel inbox read' \
+           'env -u CEL_ROLE cel forge pr close gizmo#3' 'unset CEL_INBOX_ME CEL_ROLE && cel forge run list gizmo' \
+           'env -i PATH=/usr/bin cel forge pr close gizmo#3'; do
     case "$(guard_classify solo "$c")" in "deny cel forge reads who is asking"*) echo "refused: $c"; return 1;; esac
   done
 }
