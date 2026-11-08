@@ -270,6 +270,18 @@ test_run_pi_reviewer_resolves_sonnet_from_gateway_catalog() {
   assert_contains "$out" "--model ompgw-claude/claude-sonnet-5-5"
   _ws_gateway_clean
 }
+# review.thinking sets the reviewer's level over the workspace default, and
+# --thinking still wins over it.
+test_run_reviewer_takes_its_level_from_review_thinking() {
+  _reviewer_gateway_fixture
+  printf 'thinking: high\nreview:\n  runtime: pi\n  model: opus\n  thinking: low\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)" || { printf '%s\n' "$out" >&2; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5 --thinking low" || { _ws_gateway_clean; return 1; }
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --thinking medium --dry-run 2>&1)" || { _ws_gateway_clean; return 1; }
+  assert_contains "$out" "--thinking medium" || { _ws_gateway_clean; return 1; }
+  _ws_gateway_clean
+}
 test_run_pi_reviewer_resolves_opus_alias_to_gateway_model() {
   _reviewer_gateway_fixture
   printf 'review:\n  runtime: pi\n  model: opus\n' >> "$T/workspace.yaml"

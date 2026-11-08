@@ -101,7 +101,9 @@ test_review_policy_typos_and_wrong_shapes_fail_closed_at_both_levels() {
   for ws in "review:\n  extras:\n    - focus: security\n      paths: [a]|review: unknown key(s) extras" \
             "review: oops|review: must be a map" \
             "review:\n  - focus: security\n    paths: [a]|review: must be a map" \
-            "review:\n  model: sonnet\n  post: inbox\n  runtime: pi|"; do
+            "review:\n  model: sonnet\n  post: inbox\n  runtime: pi|" \
+            "review:\n  runtime: pi\n  model: sonnet\n  thinking: medium|" \
+            "review:\n  thinking: low\n  extras:\n    - focus: security\n      paths: [a]|review: unknown key(s) extras"; do
     printf 'name: t\n%b\nrepos:\n  - name: widget\n' "${ws%%|*}" > "$T/workspace.yaml"
     if [ -z "${ws#*|}" ]; then
       assert_eq "$(review_extra_entries "$T" widget)" '[]' || { rm -rf "$T"; return 1; }

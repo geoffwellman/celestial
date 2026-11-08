@@ -2686,9 +2686,15 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   # the named profile, then explicit flags.
   local model="" thinking
   thinking="$(ws_thinking "$wsdir")"
-  # A reviewer's model has always come from the `review:` block; a profile or
-  # an explicit --model still overrides it.
-  [ "$role" = "reviewer" ] && model="$(ws_review "$wsdir" model)"
+  # A reviewer's model has always come from the `review:` block, and so does
+  # its level when the block sets `thinking:` (over the workspace default); a
+  # profile or an explicit --model / --thinking still overrides either, and
+  # the level is clamped per runtime like any role's (profile_clamp).
+  if [ "$role" = "reviewer" ]; then
+    model="$(ws_review "$wsdir" model)"
+    local review_thinking; review_thinking="$(ws_review "$wsdir" thinking)"
+    [ -z "$review_thinking" ] || thinking="$review_thinking"
+  fi
 
   # No --profile? The workspace may still bind one to this role. That binding
   # is what makes root and the orchestrators configurable at all: neither is
