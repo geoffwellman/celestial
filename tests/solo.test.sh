@@ -701,6 +701,25 @@ test_steward_land_nudge_agrees_with_land_on_every_required_review() {
   _land widget#7 >/dev/null 2>&1 && _merged || { echo "land refused what the steward nudged"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+# A review block every key of which Celestial knows - thinking included, as
+# real workspaces set it - is policy, not a refusal: land and approvals answer.
+test_solo_land_and_approvals_accept_a_review_block_with_thinking() {
+  _solo_setup
+  printf 'review:\n  runtime: pi\n  model: sonnet\n  thinking: medium\n' >> "$T/workspace.yaml"
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  assert_eq "$( cd "$T" && cmd_solo_approvals widget#7 --json | jq -r '.[0].state')" approved || { rm -rf "$T"; return 1; }
+  local out; out="$(_land widget#7 2>&1)" || { echo "refused a review block with thinking: $out"; rm -rf "$T"; return 1; }
+  _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # ...while a typo beside it still refuses
+  _solo_setup
+  printf 'review:\n  thinking: medium\n  extras:\n    - focus: security\n      paths: [a]\n' >> "$T/workspace.yaml"
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  out="$(_land widget#7 2>&1)" && { echo "merged past a typo'd review block"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "unknown key(s) extras" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 # What a view shows is land's answer too.
 test_solo_approvals_reports_each_reviewer_by_lands_rule() {
   _solo_setup; _solo_policy

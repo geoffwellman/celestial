@@ -1025,7 +1025,9 @@ new mail arrives, so request-changes and re-review round trips do not wait for
 someone to type. `review.runtime` stays in the workspace schema for
 compatibility but no longer selects the reviewer runtime: a value other than
 `pi` is ignored, and `cel run reviewer` warns naming the field. `review.model`
-selects the requested model. A reviewer delivers one verdict per round with
+selects the requested model, and `review.thinking` (optional) the reviewer's
+reasoning level over the workspace's `thinking:` - clamped to what pi accepts,
+as for any role; a profile bound to the reviewer, or `--thinking`, still wins. A reviewer delivers one verdict per round with
 `cel solo review <repo>#<n> approved|changes --head <sha> --by <alias>`, bound
 to the exact commit it read, and mails its findings to the product agent,
 which fixes, pushes and asks for re-review; you hear about it only on approval
@@ -1080,7 +1082,7 @@ whole segment spans any number of directories (`**/*token*` matches
 `token.sh` and `a/b/api_token.ts`; `lib/auth/**` everything under
 `lib/auth/`, not `lib/auth` itself), everything else is literal. Nothing
 malformed is skipped: a bad entry, a `review:` that is not a map, a key in
-it Celestial does not know (workspace-wide `runtime`, `model`, the retired `post`,
+it Celestial does not know (workspace-wide `runtime`, `model`, `thinking`, the retired `post`,
 `extra`; on a repo only `extra` - so `extras:` is an error), and two
 `repos:` entries of one name each refuse `cel run reviewer` and `cel solo
 land` for the repos they reach, and `cel doctor` names them. With a policy, `cel run reviewer --repo r

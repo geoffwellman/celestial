@@ -638,7 +638,7 @@ whose path globs match a file the PR touches - both sides of a rename, as
 Forgejo is read page by page). The policy is read with `_yqr` from
 `workspace.yaml` alone, never through the `workspace.local.yaml` overlay,
 and nothing malformed is skipped: a bad entry, a `review:` that is not a map
-or carries a key Celestial does not know (workspace-wide `runtime`, `model`, the retired `post`,
+or carries a key Celestial does not know (workspace-wide `runtime`, `model`, `thinking`, the retired `post`,
 `extra`; per repo `extra`), or two `repos:` entries of one name fail the
 read, and `cel doctor` reports the same errors (`review_policy_problems`). A
 repo with no entry asks the forge nothing. An entry's `kind` (default and
