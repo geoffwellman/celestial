@@ -1945,6 +1945,107 @@ test_steward_raises_a_disabled_credential_once_per_change_of_state() {
   rm -rf "$T"
 }
 
+# --- a blocked rex upgrade is said once per version -------------------------
+# The block's reason names the reviewers and sessions in the way, and that list
+# changes with every PR review that starts or ends. Root hears a version once
+# when it is first blocked and once more after a day of it - never because the
+# list moved. The round itself is lib/rex.sh's (tests/rex-generation.test.sh);
+# here it is a fixture.
+_rexup_fixture() {
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  REXUP_ROUND=""; REXUP_POLICY=""
+  rex_upgrade_round() { [ -z "$REXUP_ROUND" ] || printf '%s\n' "$REXUP_ROUND"; }
+  _rex_policy_versions() { [ -z "$REXUP_POLICY" ] || printf '%s\n' "$REXUP_POLICY"; }
+}
+_rexup_blocked() { # <version> <who is in the way>
+  REXUP_ROUND="$(printf 'blocked\t%s\tthese Rex agents could not be resumed after a server restart: %s' "$1" "$2")"
+  _steward_rex_upgrade >/dev/null 2>&1
+}
+# Every word root got about a blocked rex: items and their updates.
+_rexup_alerts() {
+  jq -s '[.[] | select(.from == "steward" and .to == "root" and (.kind == "blocked" or .kind == "update")
+          and (.message | startswith("steward: rex")))] | length' "$CEL_INBOX_DIR/alpha.jsonl"
+}
+_rexup_open() { cmd_inbox open --for root --workspace alpha 2>/dev/null; }
+
+test_steward_says_a_blocked_rex_upgrade_once_however_the_reviewers_churn() {
+  _rexup_fixture
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer; widget-pr-8-review: a reviewer'
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-8-review: a reviewer'
+  _rexup_blocked 0.0.2-gbbb 'gizmo-pr-3-review: a reviewer'
+  assert_eq "$(_rexup_alerts)" 1
+  # the list still goes with the one word that is said
+  assert_contains "$(_rexup_open)" "rex 0.0.2-gbbb is available"
+  assert_contains "$(_rexup_open)" "widget-pr-7-review"
+  rm -rf "$T"
+}
+
+test_steward_says_a_new_blocked_rex_version_again() {
+  _rexup_fixture
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  _rexup_blocked 0.0.3-gccc 'widget-pr-7-review: a reviewer'
+  _rexup_blocked 0.0.3-gccc 'widget-pr-9-review: a reviewer'
+  assert_eq "$(_rexup_alerts)" 2
+  # one open item, about the new version: the old version's is taken down
+  assert_eq "$(cmd_inbox open --for root --workspace alpha --json | jq -s 'length')" 1
+  assert_contains "$(_rexup_open)" "rex 0.0.3-gccc is available"
+  rm -rf "$T"
+}
+
+test_steward_says_a_rex_upgrade_blocked_for_a_day_once_more() {
+  _rexup_fixture
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  # the block began a day and a bit ago
+  printf 'rex-upgrade-blocked 0.0.2-gbbb %s 0\n' "$(( $(date +%s) - 90000 ))" > "$T/state"
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-8-review: a reviewer'
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-9-review: a reviewer'
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  assert_eq "$(_rexup_alerts)" 2
+  assert_eq "$(jq -s '[.[] | select(.from == "steward" and (.message | contains("blocked for over a day")))] | length' "$CEL_INBOX_DIR/alpha.jsonl")" 1
+  # the day-old word is an update on the same item, with the list as it is now
+  assert_eq "$(cmd_inbox open --for root --workspace alpha --json | jq -s 'length')" 1
+  assert_contains "$(jq -rs '[.[] | select(.kind == "update")] | last | .message' "$CEL_INBOX_DIR/alpha.jsonl")" "widget-pr-8-review"
+  rm -rf "$T"
+}
+
+# The item comes down when the block clears or the version is installed. A
+# block that clears and comes back for the same version is not news; a skip
+# whose answer about the block is unknown, or apt that cannot say what is
+# installed, takes nothing down.
+test_steward_resolves_the_blocked_rex_item_when_the_block_clears_or_rex_is_installed() {
+  _rexup_fixture
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tanother Rex server change is in progress')"
+  _steward_rex_upgrade >/dev/null 2>&1
+  assert_contains "$(_rexup_open)" "rex 0.0.2-gbbb"
+  REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tnot every Rex agent went idle within 120s: alpha-orch (working)')"
+  _steward_rex_upgrade >/dev/null 2>&1
+  assert_eq "$(_rexup_open)" ""
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-8-review: a reviewer'
+  assert_eq "$(_rexup_alerts)" 1
+  assert_eq "$(_rexup_open)" ""
+  # back blocked under a new version, then installed by hand
+  _rexup_blocked 0.0.3-gccc 'widget-pr-8-review: a reviewer'
+  assert_contains "$(_rexup_open)" "rex 0.0.3-gccc"
+  REXUP_ROUND=""
+  _steward_rex_upgrade >/dev/null 2>&1
+  assert_contains "$(_rexup_open)" "rex 0.0.3-gccc"
+  REXUP_POLICY="$(printf '0.0.2-gbbb\t0.0.3-gccc\t1')"
+  _steward_rex_upgrade >/dev/null 2>&1
+  assert_contains "$(_rexup_open)" "rex 0.0.3-gccc"
+  REXUP_POLICY="$(printf '0.0.3-gccc\t0.0.3-gccc\t1')"
+  _steward_rex_upgrade >/dev/null 2>&1
+  assert_eq "$(_rexup_open)" ""
+  assert_eq "$(grep -c '^rex-upgrade-blocked ' "$T/state" || true)" 0
+  rm -rf "$T"
+}
+
 # --- stale decisions get one nudge per asker per day -------------------------
 test_cel101_steward_asks_each_asker_about_stale_decisions_once_a_day() {
   _orch_fixture; _nudge_herdr_stub

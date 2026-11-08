@@ -2024,26 +2024,83 @@ _steward_rex_generation() {
     "$rows" "the Rex server restarted"
 }
 
+# A BLOCKED UPGRADE IS SAID ONCE PER VERSION. Its reason lists the agents and
+# sessions in the way, and that list changes whenever a reviewer comes or goes:
+# keyed on the message, root heard it again every round of normal PR flow. The
+# record is "rex-upgrade-blocked <version> <first-blocked-epoch> <stage>": root
+# hears when a version is first blocked (stage 0) and once more when it has been
+# blocked for a day (stage 1, an update on the same item), and nothing in
+# between. A new version replaces an older version's open item. The record
+# outlives the item: a block that clears and comes back for the same version is
+# not news. It goes when that version, or a later one, is installed.
+_steward_rex_blocked() { # <ws> <version> <why>
+  local ver since stage now msg id
+  read -r ver since stage < <(awk '$1 == "rex-upgrade-blocked" { r = $2 " " $3 " " $4 } END { print r }' "$_STEWARD_STATE" 2>/dev/null || true) || true
+  now="$(date +%s)"
+  case "$since" in ''|*[!0-9]*) since="$now" ;; esac
+  if [ "$ver" != "$2" ]; then
+    # The older version's item says nothing true any more; the new one says it
+    # all. A mailbox that does not parse says nothing this round, and records
+    # nothing, so the next round says it.
+    id="$(_inbox_open_fp "$1" rex-upgrade-blocked steward root)" || return 0
+    _steward_state_edit "$_STEWARD_STATE" _steward_state_set rex-upgrade-blocked "$2" "$now" 0 || return 0
+    [ -z "$id" ] || cmd_inbox resolve "$id" --by steward --workspace "$1" >/dev/null 2>&1 || true
+    msg="steward: rex $2 is available, but the managed upgrade will not restart the Rex server: $3"
+  elif [ "${stage:-0}" = 0 ] && [ $((now - since)) -ge 86400 ]; then
+    _steward_state_edit "$_STEWARD_STATE" _steward_state_set rex-upgrade-blocked "$2" "$since" 1 || return 0
+    msg="steward: rex $2 has been blocked for over a day - the managed upgrade still will not restart the Rex server: $3"
+  else
+    return 0
+  fi
+  _steward_raise "$1" rex-upgrade-blocked blocked "$msg"
+}
+
+# No round output: no newer rex from its origin - or apt could not say. Only an
+# installed version at or past the blocked one takes the block down.
+_steward_rex_installed() { # <ws>
+  local ver inst
+  read -r ver _ < <(awk '$1 == "rex-upgrade-blocked" { r = $2 } END { print r }' "$_STEWARD_STATE" 2>/dev/null || true) || true
+  [ -n "$ver" ] || return 0
+  IFS=$'\t' read -r inst _ _ < <(_rex_policy_versions) || return 0
+  [ -n "$inst" ] && [ "$inst" != "(none)" ] && dpkg --compare-versions "$inst" ge "$ver" || return 0
+  _steward_clear "$1" rex-upgrade-blocked "rex $inst is installed"
+  _steward_forget rex-upgrade-blocked
+}
+
 # The managed upgrade; `cel sessions rex-upgrade` runs one round by hand.
 _steward_rex_upgrade() {
   local out status a b c rows ws
   out="$(rex_upgrade_round)" || true
-  [ -n "$out" ] || return 0
+  ws="$(_steward_rex_ws)"
+  if [ -z "$out" ]; then
+    [ -z "$ws" ] || _steward_rex_installed "$ws"
+    return 0
+  fi
   IFS=$'\t' read -r status a b c <<<"$(sed -n 1p <<<"$out")"
   rows="$(sed 1d <<<"$out")"
-  ws="$(_steward_rex_ws)"
   case "$status" in
-    waiting) c_warn "rex $a is available; the managed upgrade skipped this round: $b" ;;
+    waiting)
+      c_warn "rex $a is available; the managed upgrade skipped this round: $b"
+      # Skipped for a busy agent or launch admission, the round got past every
+      # blocking check, so the block has cleared. These two skip before the
+      # checks ran, or with their answer changed: the block is unknown.
+      case "$b" in
+        'another Rex server change is in progress'|'something changed at the last check'*) ;;
+        *) [ -z "$ws" ] || _steward_clear "$ws" rex-upgrade-blocked "the rex $a upgrade is no longer blocked: $b" ;;
+      esac ;;
     blocked)
       c_err "rex $a is available; the managed upgrade is blocked: $b"
-      [ -z "$ws" ] || _steward_raise_on_change "$ws" rex-upgrade-blocked blocked \
-        "steward: rex $a is available, but the managed upgrade will not restart the Rex server: $b" ;;
+      [ -z "$ws" ] || _steward_rex_blocked "$ws" "$a" "$b" ;;
     failed)
       # Nothing was stopped: said once per state, not every round.
       c_err "the managed rex upgrade to $a failed: $b"
-      [ -z "$ws" ] || _steward_raise_on_change "$ws" rex-upgrade-failed blocked \
-        "steward: the managed rex upgrade to $a failed and nothing was restarted: $b" ;;
+      [ -z "$ws" ] || {
+        _steward_clear "$ws" rex-upgrade-blocked "the rex $a upgrade is no longer blocked"
+        _steward_raise_on_change "$ws" rex-upgrade-failed blocked \
+          "steward: the managed rex upgrade to $a failed and nothing was restarted: $b"
+      } ;;
     upgraded)
+      _steward_forget rex-upgrade-blocked
       [ -z "$ws" ] || { _steward_clear "$ws" rex-upgrade-blocked "rex was upgraded to $b"; _steward_clear "$ws" rex-upgrade-failed "rex was upgraded to $b"; }
       _steward_rex_report "steward: upgraded rex $a -> $b while every Rex agent was idle; $c." "$rows" "rex was upgraded and its server restarted" ;;
   esac
