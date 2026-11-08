@@ -32,8 +32,37 @@
 #   forge_pr_create <wsdir> <repo> <head-branch> <base-branch> <title> <body-file>
 #       <the forge_pr_view object> of the new PR - ready for review, or a
 #       draft only where the workspace's policy.pr_open is not `ready`.
+#   forge_pr_close  <wsdir> <repo> <number> [comment-file]
+#       <the forge_pr_view object> after closing - the comment, if any, is
+#       posted first; the branch is never deleted.
+#   forge_pr_ready  <wsdir> <repo> <number>
+#       <the forge_pr_view object> once it is ready for review; a PR that is
+#       not a draft is left as it is.
 #   forge_whoami    <wsdir> <repo>
 #       {login} - the account this workspace acts as on that repo's forge.
+#   forge_run_list  <wsdir> <repo> [--branch B] [--sha SHA] [--limit N]
+#       [{id, number, workflow, title, event, branch, head_sha,
+#         state, url, created_at}, ...] newest first. `id` is the API's run
+#       id - the one every other op takes; `number` is the web UI's run
+#       number (Forgejo's /actions/runs/<number>), which is NOT an id. With
+#       --sha (a full 40-character commit) only that commit's runs, each
+#       with its `jobs` as forge_run_view gives them.
+#   forge_run_view  <wsdir> <repo> <run-id>
+#       <the run object> + {jobs: [{id, name, state, url}]}
+#   forge_run_logs  <wsdir> <repo> <job-id> [--raw]
+#       the job's log as PLAIN TEXT (the one op that prints no JSON), each
+#       line's timestamp (and on GitHub its job and step columns) removed
+#       unless --raw. On GitHub it is the job's failed steps (gh --log-failed).
+#   forge_run_rerun <wsdir> <repo> <job-id>
+#       {rerun: true, job_id} - the job runs again on the same head.
+#   forge_run_resolve <wsdir> <repo> <web-url>
+#       {run_id, job_id} (job_id null for a run's url) - the API ids behind a
+#       run's or job's web page; refused when the page cannot be matched
+#       exactly (Forgejo: by the run's and the job's own html_url).
+#   A run's or job's `state` is the check vocabulary: success | failure |
+#   cancelled | skipped | running | queued | unknown. Forgejo Actions says it
+#   in `status` and leaves `conclusion` null, so a status of `failure` IS the
+#   failure.
 #
 # GitHub is served through `gh` as the workspace's account (ws_gh), so a
 # workspace's `github.user` holds here exactly as everywhere else.
@@ -52,7 +81,11 @@
 # Where Forgejo cannot say what GitHub says, the answer is the conservative
 # one, never a guess:
 #   - `draft` is Forgejo's own `WIP:` title prefix; mergeable=false reads as
-#     `conflicting` (Forgejo also says false while it is still checking).
+#     `unknown`, never `conflicting`: Forgejo also says false while it has not
+#     (re)computed the PR - recorded live on a clean fast-forward whose head
+#     contained the base - and its API has no field that proves a conflict.
+#   - a commit status's target_url is site-relative on Forgejo Actions
+#     (`/owner/repo/actions/runs/N/jobs/M`); it is made absolute on its host.
 #   - `decision` is `approved` only for an approval of the CURRENT head that
 #     Forgejo has not marked stale or dismissed, and no reviewer's latest
 #     verdict requesting changes; Forgejo has no review_required.
@@ -71,7 +104,28 @@ forge_pr_list()    { _forge_call pr_list "$@"; }
 forge_pr_checks()  { _forge_call pr_checks "$@"; }
 forge_pr_reviews() { _forge_call pr_reviews "$@"; }
 forge_pr_merge()   { _forge_call pr_merge "$@"; }
+forge_pr_close()   { _forge_call pr_close "$@"; }
+forge_pr_ready()   { _forge_call pr_ready "$@"; }
 forge_whoami()     { _forge_call whoami "$@"; }
+forge_run_view()   { _forge_call run_view "$@"; }
+forge_run_logs()   { _forge_call run_logs "$@"; }
+forge_run_rerun()  { _forge_call run_rerun "$@"; }
+forge_run_resolve() { _forge_call run_resolve "$@"; }
+
+# With --sha every run carries its jobs: an agent finding a commit's runs
+# wants the job ids its logs and reruns take, not the web UI's numbers.
+forge_run_list() { # <wsdir> <repo> [--branch B] [--sha SHA] [--limit N]
+  local out sha="" a prev="" id view all='[]'
+  for a in "$@"; do [ "$prev" != --sha ] || sha="$a"; prev="$a"; done
+  out="$(_forge_call run_list "$@")" || return 1
+  [ -n "$sha" ] || { printf '%s\n' "$out"; return 0; }
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    view="$(forge_run_view "$1" "$2" "$id")" || return 1
+    all="$(printf '%s\n%s' "$all" "$view" | jq -sc '.[0] + [.[1]]')"
+  done < <(printf '%s' "$out" | jq -r '.[].id')
+  printf '%s\n' "$all"
+}
 
 # A PR opens ready for review unless the workspace's policy says draft
 # (policy.pr_open other than `ready`, the same rule the policy block states):
@@ -116,6 +170,40 @@ _forge_number_ok() { # <op> <number>
   return 1
 }
 
+_forge_id_ok() { # <op> <what> <id>
+  [[ "$3" =~ ^[1-9][0-9]*$ ]] && return 0
+  printf "forge %s: '%s' is not a %s id\n" "$1" "$3" "$2" >&2
+  return 1
+}
+
+# run_list's arguments, one reading for both backends: sets _RL_BRANCH,
+# _RL_SHA and _RL_LIMIT (default 20).
+_forge_run_args() { # [--branch B] [--sha SHA] [--limit N]
+  _RL_BRANCH="" _RL_SHA="" _RL_LIMIT=20
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --branch) [ $# -ge 2 ] && [ -n "$2" ] || { printf 'forge run_list: --branch needs a value\n' >&2; return 1; }
+                _RL_BRANCH="$2"; shift 2 ;;
+      --sha) [[ "${2:-}" =~ ^[0-9a-f]{40}$ ]] \
+               || { printf "forge run_list: --sha needs the full 40-character commit (got: '%s'; git rev-parse <ref>, or head_sha from cel forge pr view)\n" "${2:-}" >&2; return 1; }
+             _RL_SHA="$2"; shift 2 ;;
+      --limit) [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { printf "forge run_list: --limit needs a positive number (got: '%s')\n" "${2:-}" >&2; return 1; }
+               _RL_LIMIT="$2"; shift 2 ;;
+      *) printf 'forge run_list: unknown argument: %s\n' "$1" >&2; return 1 ;;
+    esac
+  done
+}
+
+# A job log without its per-line prefixes: GitHub's `<job>\t<step>\t` columns
+# (gh run view --log*), a byte-order mark, and the runner's RFC 3339 timestamp.
+_forge_log_strip() { # [--github] < log
+  if [ "${1:-}" = --github ]; then
+    sed -E $'s/^[^\t]*\t[^\t]*\t//; s/^\xEF\xBB\xBF//; s/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ?//'
+  else
+    sed -E $'s/^\xEF\xBB\xBF//; s/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ?//'
+  fi
+}
+
 # ---- GitHub, through gh ----------------------------------------------------
 
 _forge_gh() { # <wsdir> <gh args...>
@@ -156,7 +244,22 @@ def gh_check:
                  else "queued" end),
         conclusion: (if .status == null or .status == "COMPLETED" then $c else null end),
         url: (.detailsUrl | _s) }
-  end;'
+  end;
+def gh_state:
+  ((.status // "") | ascii_downcase) as $st | ((.conclusion // "") | ascii_downcase) as $c
+  | if $st == "completed" or ($st == "" and $c != "") then
+      ({success: "success", neutral: "success", failure: "failure", timed_out: "failure",
+        startup_failure: "failure", cancelled: "cancelled", stale: "cancelled", skipped: "skipped",
+        action_required: "queued"}[$c] // "unknown")
+    elif $st == "in_progress" then "running"
+    elif $st == "queued" or $st == "waiting" or $st == "requested" or $st == "pending" then "queued"
+    else "unknown" end;
+def gh_run:
+  if type == "object" and (.databaseId | type) == "number" then . else error("not a run") end
+  | { id: .databaseId, number: (.number // null), workflow: (.workflowName | _s), title: (.displayTitle | _s),
+      event: (.event | _s), branch: (.headBranch | _s), head_sha: (.headSha | _s), state: gh_state,
+      url: (.url | _s), created_at: (.createdAt | _s) };
+def gh_job: { id: .databaseId, name: (.name | _s), state: gh_state, url: (.url | _s) };'
 
 _forge_github_pr_view() { # <wsdir> <slug> <number>
   _forge_number_ok pr_view "${3:-}" || return 1
@@ -301,6 +404,75 @@ _forge_github_pr_create() { # <wsdir> <slug> <head> <base> <title> <body-file> <
   _forge_github_pr_view "$1" "$2" "$num"
 }
 
+# Closing never deletes the branch (no --delete-branch); gh's own report
+# goes to stderr so stdout stays the one JSON value.
+_forge_github_pr_close() { # <wsdir> <slug> <number> [comment-file]
+  _forge_number_ok pr_close "${3:-}" || return 1
+  local -a args=(pr close "$3" --repo "$2")
+  if [ -n "${4:-}" ]; then
+    [ -f "$4" ] && [ -r "$4" ] || { printf "forge pr_close: comment file '%s' is not a readable file - nothing closed\n" "$4" >&2; return 1; }
+    args+=(--comment "$(cat -- "$4")")
+  fi
+  _forge_gh "$1" "${args[@]}" >&2 || return 1
+  _forge_github_pr_view "$1" "$2" "$3"
+}
+
+_forge_github_pr_ready() { # <wsdir> <slug> <number>
+  _forge_number_ok pr_ready "${3:-}" || return 1
+  local pr
+  pr="$(_forge_github_pr_view "$1" "$2" "$3")" || return 1
+  [ "$(printf '%s' "$pr" | jq -r .draft)" = true ] || { printf '%s\n' "$pr"; return 0; }
+  _forge_gh "$1" pr ready "$3" --repo "$2" >&2 || return 1
+  _forge_github_pr_view "$1" "$2" "$3"
+}
+
+_FORGE_GH_RUN_FIELDS=databaseId,number,status,conclusion,displayTitle,headSha,headBranch,event,workflowName,createdAt,url
+
+_forge_github_run_list() { # <wsdir> <slug> [--branch B] [--sha SHA] [--limit N]
+  local wsdir="$1" slug="$2" out _RL_BRANCH _RL_SHA _RL_LIMIT
+  shift 2
+  _forge_run_args "$@" || return 1
+  local -a args=(run list --repo "$slug" --limit "$_RL_LIMIT")
+  [ -z "$_RL_BRANCH" ] || args+=(--branch "$_RL_BRANCH")
+  [ -z "$_RL_SHA" ] || args+=(--commit "$_RL_SHA")
+  out="$(_forge_gh "$wsdir" "${args[@]}" --json "$_FORGE_GH_RUN_FIELDS")" || return 1
+  printf '%s' "$out" | jq -c "$_FORGE_JQ_GH"' if type == "array" then map(gh_run) else error("not a list") end'
+}
+
+_forge_github_run_view() { # <wsdir> <slug> <run-id>
+  _forge_id_ok run_view run "${3:-}" || return 1
+  local out
+  out="$(_forge_gh "$1" run view "$3" --repo "$2" --json "$_FORGE_GH_RUN_FIELDS,jobs")" || return 1
+  printf '%s' "$out" | jq -c "$_FORGE_JQ_GH"' gh_run + {jobs: [(.jobs // [])[] | gh_job]}'
+}
+
+# gh shows a job's FAILED steps (--log-failed): the part worth reading.
+_forge_github_run_logs() { # <wsdir> <slug> <job-id> [--raw]
+  _forge_id_ok run_logs job "${3:-}" || return 1
+  local out
+  out="$(_forge_gh "$1" run view --repo "$2" --log-failed --job "$3")" || return 1
+  [ -n "$out" ] || return 0
+  if [ "${4:-}" = --raw ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" | _forge_log_strip --github; fi
+}
+
+# A rerun of one job keeps the run's head, so a review of that head stands.
+_forge_github_run_rerun() { # <wsdir> <slug> <job-id>
+  _forge_id_ok run_rerun job "${3:-}" || return 1
+  _forge_gh "$1" run rerun --repo "$2" --job "$3" >&2 || return 1
+  jq -nc --argjson j "$3" '{rerun: true, job_id: $j}'
+}
+
+# GitHub's web pages carry the API ids themselves:
+# .../actions/runs/<run-id>[/job/<job-id>].
+_forge_github_run_resolve() { # <wsdir> <slug> <url>
+  local url="${3:-}"
+  [[ "$url" =~ ^https://github\.com/([^/]+/[^/]+)/actions/runs/([0-9]+)(/job/([0-9]+))?/?([?#].*)?$ ]] \
+    || { printf "forge run_resolve: '%s' is not a GitHub run or job page - use the ids cel forge run list --sha <head> shows\n" "$url" >&2; return 1; }
+  [ "${BASH_REMATCH[1],,}" = "${2,,}" ] \
+    || { printf "forge run_resolve: '%s' is a page of %s, not %s\n" "$url" "${BASH_REMATCH[1]}" "$2" >&2; return 1; }
+  jq -nc --argjson r "${BASH_REMATCH[2]}" --arg j "${BASH_REMATCH[4]}" '{run_id: $r, job_id: (if $j == "" then null else ($j | tonumber) end)}'
+}
+
 # ---- Forgejo, over its REST API ---------------------------------------------
 
 _forge_forgejo_token_path() { # <host>
@@ -391,7 +563,9 @@ _forge_fj_pages() { # <op> <host> <url> <field> [max]
     [ "$items" != '[]' ] || break
     [ "$items" != "$prev" ] || { printf 'forge %s: %s answers every page alike - refused rather than guess where the list ends\n' "$op" "$url" >&2; return 1; }
     prev="$items"
-    all="$(jq -c --argjson p "$items" '. + $p' <<<"$all")"
+    # On stdin, never as an argument: one page of Actions runs (each with its
+    # repository and event payload) outgrows the kernel's argument limit.
+    all="$(printf '%s\n%s' "$all" "$items" | jq -sc '.[0] + .[1]')"
     [ "$max" -eq 0 ] || [ "$(jq length <<<"$all")" -lt "$max" ] || break
     page=$((page + 1))
     [ "$page" -le "${CEL_FORGE_MAX_PAGES:-100}" ] \
@@ -403,6 +577,7 @@ _forge_fj_pages() { # <op> <host> <url> <field> [max]
 _forge_fj_host() { printf '%s' "$1" | jq -r .host; }
 _forge_fj_api()  { printf '%s' "$1" | jq -r .api_url; }   # the repository's API root
 _forge_fj_root() { local a; a="$(_forge_fj_api "$1")"; printf '%s' "${a%/repos/*}"; }
+_forge_fj_web()  { local a; a="$(_forge_fj_root "$1")"; printf '%s' "${a%/api/v1}"; }   # scheme://host[:port]
 
 # Forgejo's fields in Celestial's words (see the header for what differs).
 _FORGE_JQ_FJ='
@@ -414,20 +589,29 @@ def fj_pr:
       head_sha: (.head.sha | _s), head_ref: (.head.ref | _s), base_ref: (.base.ref | _s),
       author: (.user.login | _s),
       draft: (.draft | if type == "boolean" then . else null end),
-      mergeable: (if .state != "open" or .merged == true then "unknown"
-                  elif .mergeable == false then "conflicting"
-                  elif .mergeable != true then "unknown"
+      mergeable: (if .state != "open" or .merged == true or .mergeable != true then "unknown"
                   elif (.merge_base | _s) != null and (.base.sha | _s) != null and .merge_base != .base.sha then "behind"
                   else "clean" end),
       merged_at: (.merged_at | _s), url: (.html_url | _s),
       labels: [(.labels // [])[]? | .name? | strings] };
 def fj_latest: group_by(.context // "") | map(max_by(.id // 0));
-def fj_check:
+def fj_check($web):
   ((.status // .state) | _s) as $st
   | { name: (.context | _s),
       status: (if $st == null then "queued" elif $st == "pending" then "in_progress" else "completed" end),
       conclusion: (if $st == null or $st == "pending" then null else $st end),
-      url: (.target_url | _s) };
+      url: (.target_url | _s | if type == "string" and startswith("/") then $web + . else . end) };
+def fj_state:
+  ((.conclusion // .status // "") | ascii_downcase) as $s
+  | if $s == "success" or $s == "failure" or $s == "cancelled" or $s == "skipped" or $s == "running" then $s
+    elif $s == "waiting" or $s == "blocked" or $s == "queued" or $s == "pending" then "queued"
+    else "unknown" end;
+def fj_run:
+  if type == "object" and (.id | type) == "number" then . else error("not a run") end
+  | { id, number: (.index_in_repo // null), workflow: (.workflow_id | _s), title: (.title | _s),
+      event: (.event | _s), branch: ((.prettyref // .head_branch) | _s), head_sha: ((.commit_sha // .head_sha) | _s),
+      state: fj_state, url: (.html_url | _s), created_at: ((.created // .created_at) | _s) };
+def fj_job: { id, name: (.name | _s), state: fj_state, url: (.html_url | _s) };
 def fj_review_state:
   if .dismissed == true then "dismissed"
   else ({APPROVED: "approved", REQUEST_CHANGES: "changes_requested", COMMENT: "commented",
@@ -503,8 +687,8 @@ _forge_forgejo_pr_checks() { # <wsdir> <desc> <number>
   [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { printf 'forge pr_checks: #%s reports no head commit\n' "$3" >&2; return 1; }
   statuses="$(_forge_fj_pages pr_checks "$host" "$api/commits/$head/status" statuses)" || return 1
   [ -z "$base" ] || gate="$(_forge_forgejo_base_required "$1" "$2" "$base")"
-  jq -nc --arg h "$head" --arg b "$base" --argjson s "$statuses" --argjson g "$gate" "$_FORGE_JQ_FJ"'
-    {head_sha: $h, base_ref: ($b | _s), checks: [$s | fj_latest[] | fj_check],
+  jq -nc --arg h "$head" --arg b "$base" --arg web "$(_forge_fj_web "$2")" --argjson s "$statuses" --argjson g "$gate" "$_FORGE_JQ_FJ"'
+    {head_sha: $h, base_ref: ($b | _s), checks: [$s | fj_latest[] | fj_check($web)],
      required: $g.required, protection: $g.protection}'
 }
 
@@ -592,6 +776,118 @@ _forge_forgejo_pr_create() { # <wsdir> <desc> <head> <base> <title> <body-file> 
     || { printf 'forge pr_create: Forgejo answered %s without a pull request\n' "$FJ_CODE" >&2; return 1; }
 }
 
+# A comment goes first (POST /issues/<n>/comments: a PR is an issue), so a
+# refused comment leaves the PR open; then the state alone is changed - the
+# branch stays.
+_forge_forgejo_pr_close() { # <wsdir> <desc> <number> [comment-file]
+  _forge_number_ok pr_close "${3:-}" || return 1
+  local host api payload
+  host="$(_forge_fj_host "$2")" api="$(_forge_fj_api "$2")"
+  if [ -n "${4:-}" ]; then
+    [ -f "$4" ] && [ -r "$4" ] || { printf "forge pr_close: comment file '%s' is not a readable file - nothing closed\n" "$4" >&2; return 1; }
+    payload="$(jq -nc --rawfile b "$4" '{body: $b}')" || return 1
+    _forge_fj "$host" POST "$api/issues/$3/comments" "$payload" \
+      || { _forge_fj_fail pr_close; printf 'forge pr_close: the comment was refused - #%s was not closed\n' "$3" >&2; return 1; }
+  fi
+  _forge_fj "$host" PATCH "$api/pulls/$3" '{"state":"closed"}' || { _forge_fj_fail pr_close; return 1; }
+  printf '%s' "$FJ_BODY" | jq -c "$_FORGE_JQ_FJ"' fj_pr' 2>/dev/null \
+    || { printf 'forge pr_close: Forgejo answered %s without a pull request\n' "$FJ_CODE" >&2; return 1; }
+}
+
+# Ready = the `WIP:` / `[WIP]` title prefix removed (the prefix IS Forgejo's
+# draft). A PR that is not a draft is answered as it is; one Forgejo still
+# calls a draft afterwards is a failure, not a success.
+_forge_forgejo_pr_ready() { # <wsdir> <desc> <number>
+  _forge_number_ok pr_ready "${3:-}" || return 1
+  local host api pr title payload
+  host="$(_forge_fj_host "$2")" api="$(_forge_fj_api "$2")"
+  pr="$(_forge_fj_get pr_ready "$host" "$api/pulls/$3")" || return 1
+  if [ "$(printf '%s' "$pr" | jq -r '.draft == true')" != true ]; then
+    printf '%s' "$pr" | jq -c "$_FORGE_JQ_FJ"' fj_pr'; return
+  fi
+  title="$(printf '%s' "$pr" | jq -r '.title // "" | sub("^(wip:|\\[wip\\])\\s*"; ""; "i")')"
+  [ -n "$title" ] && [ "$title" != "$(printf '%s' "$pr" | jq -r '.title // ""')" ] \
+    || { printf "forge pr_ready: Forgejo calls #%s a draft but its title has no WIP: or [WIP] prefix to remove - nothing changed\n" "$3" >&2; return 1; }
+  payload="$(jq -nc --arg t "$title" '{title: $t}')"
+  _forge_fj "$host" PATCH "$api/pulls/$3" "$payload" || { _forge_fj_fail pr_ready; return 1; }
+  pr="$(printf '%s' "$FJ_BODY" | jq -c "$_FORGE_JQ_FJ"' fj_pr' 2>/dev/null)" \
+    || { printf 'forge pr_ready: Forgejo answered %s without a pull request\n' "$FJ_CODE" >&2; return 1; }
+  [ "$(printf '%s' "$pr" | jq -r .draft)" != true ] \
+    || { printf 'forge pr_ready: #%s is still a draft after its title was changed\n' "$3" >&2; return 1; }
+  printf '%s\n' "$pr"
+}
+
+# Forgejo ignores a branch filter on actions/runs, so --branch is applied
+# here, against the run's ref (`main`, or `#<n>` for a pull request's run),
+# over every page. --sha is asked of the server (head_sha) and applied here
+# again, so a server that ignored it still answers only that commit's runs.
+_forge_forgejo_run_list() { # <wsdir> <desc> [--branch B] [--sha SHA] [--limit N]
+  local desc="$2" runs max url _RL_BRANCH _RL_SHA _RL_LIMIT
+  shift 2
+  _forge_run_args "$@" || return 1
+  max="$_RL_LIMIT"; [ -z "$_RL_BRANCH$_RL_SHA" ] || max=0
+  url="$(_forge_fj_api "$desc")/actions/runs"
+  [ -z "$_RL_SHA" ] || url="$url?head_sha=$_RL_SHA"
+  runs="$(_forge_fj_pages run_list "$(_forge_fj_host "$desc")" "$url" workflow_runs "$max")" || return 1
+  printf '%s' "$runs" | jq -c --arg b "$_RL_BRANCH" --arg s "$_RL_SHA" --argjson n "$_RL_LIMIT" "$_FORGE_JQ_FJ"'
+    [.[] | select($b == "" or .prettyref == $b or .head_branch == $b)
+         | select($s == "" or (.commit_sha // .head_sha) == $s)]
+    | unique_by(.id) | sort_by(-.id) | .[:$n] | map(fj_run)'
+}
+
+_forge_forgejo_run_view() { # <wsdir> <desc> <run-id>
+  _forge_id_ok run_view run "${3:-}" || return 1
+  local host api run jobs
+  host="$(_forge_fj_host "$2")" api="$(_forge_fj_api "$2")"
+  run="$(_forge_fj_get run_view "$host" "$api/actions/runs/$3")" || return 1
+  jobs="$(_forge_fj_get run_view "$host" "$api/actions/runs/$3/jobs")" || return 1
+  printf '%s\n%s' "$run" "$jobs" | jq -sc "$_FORGE_JQ_FJ"'
+    .[0] as $r | .[1] as $j
+    | if ($j | type) != "array" then error("jobs not a list") else . end
+    | ($r | fj_run) + {jobs: [$j[] | fj_job]}' 2>/dev/null \
+    || { printf 'forge run_view: run %s is not a run with a list of jobs\n' "$3" >&2; return 1; }
+}
+
+# A rerun of one job keeps the run's head, so a review of that head stands.
+_forge_forgejo_run_rerun() { # <wsdir> <desc> <job-id>
+  _forge_id_ok run_rerun job "${3:-}" || return 1
+  _forge_fj "$(_forge_fj_host "$2")" POST "$(_forge_fj_api "$2")/actions/jobs/$3/rerun" '{}' \
+    || { _forge_fj_fail run_rerun; return 1; }
+  jq -nc --argjson j "$3" '{rerun: true, job_id: $j}'
+}
+
+# The web UI numbers a run by its place in the repo (/actions/runs/<number>)
+# and a job by its place in the run (/jobs/<index>) - neither is an API id.
+# Mapped only by Forgejo's own html_url of the run and of the job, never by
+# arithmetic; anything that does not match exactly is refused.
+_forge_forgejo_run_resolve() { # <wsdir> <desc> <url>
+  local url="${3:-}" web path num jidx runs id jobs jid
+  web="$(printf '%s' "$2" | jq -r .web_url)"
+  path="${web#*://*/}"                       # owner/repo
+  [[ "$url" =~ ^(https?://[^/]+)?/${path}/actions/runs/([0-9]+)(/jobs/([0-9]+))?(/attempt/[0-9]+)?/?([?#].*)?$ ]] \
+    || { printf "forge run_resolve: '%s' is not a run or job page of %s - use the ids cel forge run list --sha <head> shows\n" "$url" "$web" >&2; return 1; }
+  num="${BASH_REMATCH[2]}" jidx="${BASH_REMATCH[4]}"
+  runs="$(_forge_fj_pages run_resolve "$(_forge_fj_host "$2")" "$(_forge_fj_api "$2")/actions/runs" workflow_runs)" || return 1
+  id="$(printf '%s' "$runs" | jq -r --arg u "$web/actions/runs/$num" '[.[] | select(.html_url == $u) | .id] | if length == 1 then .[0] else empty end')"
+  [ -n "$id" ] || { printf 'forge run_resolve: no single run of %s has the page %s - use cel forge run list --sha <head>\n' "$web" "$web/actions/runs/$num" >&2; return 1; }
+  if [ -z "$jidx" ]; then jq -nc --argjson r "$id" '{run_id: $r, job_id: null}'; return 0; fi
+  jobs="$(_forge_fj_get run_resolve "$(_forge_fj_host "$2")" "$(_forge_fj_api "$2")/actions/runs/$id/jobs")" || return 1
+  jid="$(printf '%s' "$jobs" | jq -r --arg u "$web/actions/runs/$num/jobs/$jidx" '
+    [.[]? | select(.html_url == $u or (.html_url // "" | startswith($u + "/"))) | .id] | if length == 1 then .[0] else empty end')"
+  [ -n "$jid" ] || { printf 'forge run_resolve: run %s has no single job with the page %s - use cel forge run view <repo> %s\n' "$id" "$web/actions/runs/$num/jobs/$jidx" "$id" >&2; return 1; }
+  jq -nc --argjson r "$id" --argjson j "$jid" '{run_id: $r, job_id: $j}'
+}
+
+# The job's log is plain text (the run-wide /logs answer is a zip archive,
+# which a shell variable cannot hold: it drops NUL bytes).
+_forge_forgejo_run_logs() { # <wsdir> <desc> <job-id> [--raw]
+  _forge_id_ok run_logs job "${3:-}" || return 1
+  _forge_fj "$(_forge_fj_host "$2")" GET "$(_forge_fj_api "$2")/actions/jobs/$3/logs" || { _forge_fj_fail run_logs; return 1; }
+  local log="${FJ_BODY%$'\n'}"
+  [ -n "$log" ] || return 0
+  if [ "${4:-}" = --raw ]; then printf '%s\n' "$log"; else printf '%s\n' "$log" | _forge_log_strip; fi
+}
+
 _forge_forgejo_whoami() { # <wsdir> <desc>
   local u login
   u="$(_forge_fj_get whoami "$(_forge_fj_host "$2")" "$(_forge_fj_root "$2")/user")" || return 1
@@ -602,16 +898,26 @@ _forge_forgejo_whoami() { # <wsdir> <desc>
 
 # ---- cel forge --------------------------------------------------------------
 # The same operations from a shell, for an agent or a person, on either
-# provider. Reads for everyone; `pr create` for whoever opens PRs (a worker,
-# a solo agent) - the guard refuses it to orchestrators and core, and a
-# reviewer never opens one. There is no merge verb: merges go through
-# `cel solo land`, which checks what a merge must prove.
+# provider. Reads for everyone (CI runs and job logs included: a Forgejo's
+# web UI wants a login and its token is no agent's to read); `pr create` for
+# whoever opens PRs (a solo agent) - the guard refuses it to orchestrators and
+# core, and a reviewer never opens one; `pr close`, `pr ready` and `run
+# rerun` for the owner and the product's own agent (solo or orchestrator) on
+# its own product's repos - see _forge_cli_authorise for who is the owner.
+# There is no merge verb: merges go through `cel solo land`, which checks
+# what a merge must prove.
 #
 #   cel forge repo   <repo>                         the descriptor (JSON)
 #   cel forge whoami <repo> [--json]
 #   cel forge pr view|checks|reviews <repo>#<n> [--json]
 #   cel forge pr list <repo> [open|closed|merged|all] [--author L|@me] [--head B] [--limit N] [--json]
 #   cel forge pr create <repo> --head <branch> --base <branch> --title <t> --body-file <f> [--json]
+#   cel forge pr close <repo>#<n> [--comment-file <f>] [--json]
+#   cel forge pr ready <repo>#<n> [--json]
+#   cel forge run list <repo> [--branch B] [--sha <head>] [--limit N] [--json]
+#   cel forge run view <repo> <run-id|run page url> [--json]      the run and its jobs
+#   cel forge run logs <repo> <job-id|job page url> [--tail N] [--raw]
+#   cel forge run rerun <repo> <job-id|job page url> [--json]
 #
 # Every verb takes --workspace <name>; without it, the workspace you stand
 # in, else the pane's own (CEL_WORKSPACE, then CEL_INBOX_WS).
@@ -629,26 +935,110 @@ _forge_cli_repo() { # <wsdir> <repo>
   ws_repo_names "$1" | grep -qxF -- "$2" || die "cel forge: '$2' is not a repo of workspace '$(ws_name "$1")'"
 }
 
+# THE OWNER IS A SHELL WITH NO AGENT MARK AT ALL. An empty or unset CEL_ROLE
+# is never the owner: an agent can empty its own variables (`CEL_ROLE=`,
+# `env -u`, `unset`). So the owner is a process that carries none of the
+# variables a launch gives an agent - set, even empty - and descends from no
+# process that carried one (every agent runtime is exec'd under
+# `env CEL_ROLE=...`, and /proc/<pid>/environ is fixed at exec). The proc
+# root is a test seam, honoured only under CEL_TESTING.
+_FORGE_AGENT_MARKS='CEL_ROLE CEL_INBOX_ME CEL_INBOX_WS CEL_SESSION_ID CEL_PRODUCT CEL_ROLE_FILE CEL_TEAM CEL_TEAM_ROLE CEL_TEAM_MEMBER CEL_TEAM_BRANCH CEL_AGENT_NAME CEL_REX_RECORD'
+_forge_cli_is_owner() {
+  local v pid n=0 stat proc=/proc
+  for v in $_FORGE_AGENT_MARKS; do
+    [ -z "${!v+x}" ] || return 1
+  done
+  [ -z "${CEL_TESTING:-}" ] || proc="${CEL_FORGE_PROC_DIR:-/proc}"
+  pid=$$
+  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
+    if [ -r "$proc/$pid/environ" ] \
+       && tr '\0' '\n' < "$proc/$pid/environ" 2>/dev/null | grep -qE "^(${_FORGE_AGENT_MARKS// /|})="; then
+      return 1
+    fi
+    stat="$(cat "$proc/$pid/stat" 2>/dev/null)" || break
+    stat="${stat##*) }"
+    pid="$(printf '%s' "$stat" | cut -d' ' -f2)"
+    n=$((n + 1))
+  done
+  return 0
+}
+
+# The product this agent is: its launch's CEL_PRODUCT, else its mailbox
+# (<product>-orch).
+_forge_cli_agent_product() {
+  if [ -n "${CEL_PRODUCT:-}" ]; then printf '%s' "$CEL_PRODUCT"; return 0; fi
+  case "${CEL_INBOX_ME:-}" in *-orch) printf '%s' "${CEL_INBOX_ME%-orch}" ;; esac
+}
+
+# May this process change <repo> (close or ready a PR, rerun a job)? The
+# owner may. The product's own agent (CEL_ROLE solo or orchestrator) only on
+# its OWN product's repos and, for a PR, only one its workspace's account
+# authored or a migrated Forgejo PR (author Ghost, the placeholder for an
+# imported PR's author). An agent mark without such a role - a reviewer, a
+# member, core, or a role emptied away - is refused. Every agent and the
+# owner act as the one workspace account, so authorship cannot tell an
+# agent's PR from the owner's own on the same product: that is the limit.
+_forge_cli_authorise() { # <wsdir> <repo> <verb> [pr-number]
+  local role="${CEL_ROLE:-}" product pr author me provider
+  _forge_cli_is_owner && return 0
+  case "$role" in
+    solo|orchestrator) ;;
+    "") die "cel forge $3: this process carries a Celestial agent's marks but no role (CEL_ROLE unset or emptied) - it is not the owner; only the owner's shell or the product's own agent may; nothing changed" ;;
+    *) die "cel forge $3: a ${role} does not do this - the product's own agent (or the owner) does; nothing changed" ;;
+  esac
+  product="$(_forge_cli_agent_product)"
+  [ -n "$product" ] || die "cel forge $3: cannot tell which product this agent is (no CEL_PRODUCT, no <product>-orch mailbox) - nothing changed"
+  [ "$(ws_product_of_repo "$1" "$2")" = "$product" ] \
+    || die "cel forge $3: $2 is not a repo of product $product - an agent changes only its own product's PRs and runs; nothing changed"
+  [ -n "${4:-}" ] || return 0
+  pr="$(forge_pr_view "$1" "$2" "$4")" || die "cel forge $3: could not read $2#$4 - nothing changed"
+  author="$(printf '%s' "$pr" | jq -r '.author // ""')"
+  me="$(forge_whoami "$1" "$2")" || die "cel forge $3: could not tell this workspace's account on $2's forge - nothing changed"
+  me="$(printf '%s' "$me" | jq -r '.login // ""')"
+  [ -n "$me" ] && [ "$author" = "$me" ] && return 0
+  provider="$(forge_repo "$1" "$2" "$1/repos/$2" | jq -r .provider)"
+  [ "$provider" = forgejo ] && [ "$author" = Ghost ] && return 0
+  die "cel forge $3: $2#$4 is ${author:-an unknown author}'s pull request, not this workspace's account (${me:-unknown}) - an agent changes only its own PRs or a migrated one (author Ghost); nothing changed"
+}
+
+# A run or job named by its web page rather than its API id: mapped by
+# forge_run_resolve (exactly, or refused). <want> is run or job. It runs in a
+# command substitution, so its refusal goes to stderr, not into the id.
+_forge_cli_run_id() { # <wsdir> <repo> <id-or-url> <want> <verb>
+  local r id
+  if [[ "$3" =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$3"; return 0; fi
+  case "$3" in
+    http://*|https://*|/*) ;;
+    *) die "cel forge run $5: '$3' is neither a $4 id nor a web page - cel forge run list $2 --sha <head> shows the ids" >&2 ;;
+  esac
+  r="$(forge_run_resolve "$1" "$2" "$3")" || die "cel forge run $5: cannot map '$3' to an API id - cel forge run list $2 --sha <head> shows the run and job ids" >&2
+  id="$(printf '%s' "$r" | jq -r --arg w "$4" 'if $w == "run" then .run_id else .job_id end // empty')"
+  [ -n "$id" ] || die "cel forge run $5: '$3' is a run's page, not a job's - cel forge run view $2 $(printf '%s' "$r" | jq -r .run_id) lists its jobs" >&2
+  printf '%s' "$id"
+}
+
 cmd_forge() {
-  local usage='usage: cel forge repo|whoami <repo> | cel forge pr view|checks|reviews <repo>#<n> | cel forge pr list <repo> [open|closed|merged|all] [--author L|@me] [--head B] [--limit N] | cel forge pr create <repo> --head <branch> --base <branch> --title <title> --body-file <file>   (each: [--json] [--workspace NAME])'
+  local usage='usage: cel forge repo|whoami <repo> | cel forge pr view|checks|reviews|ready <repo>#<n> | cel forge pr close <repo>#<n> [--comment-file f] | cel forge pr list <repo> [open|closed|merged|all] [--author L|@me] [--head B] [--limit N] | cel forge pr create <repo> --head <branch> --base <branch> --title <title> --body-file <file> | cel forge run list <repo> [--branch B] [--sha <head>] [--limit N] | cel forge run view <repo> <run-id|url> | cel forge run logs <repo> <job-id|url> [--tail N] [--raw] | cel forge run rerun <repo> <job-id|url>   (each: [--json] [--workspace NAME])'
   local verb="${1:-}" sub=""
   [ $# -eq 0 ] || shift
-  if [ "$verb" = pr ]; then sub="${1:-}"; [ $# -eq 0 ] || shift; fi
+  if [ "$verb" = pr ] || [ "$verb" = run ]; then sub="${1:-}"; [ $# -eq 0 ] || shift; fi
   case "$verb${sub:+ $sub}" in
-    repo|whoami|"pr view"|"pr checks"|"pr reviews"|"pr list"|"pr create") ;;
+    repo|whoami|"pr view"|"pr checks"|"pr reviews"|"pr list"|"pr create"|"pr close"|"pr ready"|"run list"|"run view"|"run logs"|"run rerun") ;;
     help|-h|--help|"") printf '%s\n' "$usage"; return 0 ;;
     *) die "cel forge: unknown command '$verb${sub:+ $sub}' - $usage" ;;
   esac
-  local workspace="" json=0 head="" base="" title="" bodyf="" author="" limit=""
+  local workspace="" json=0 raw=0 head="" base="" title="" bodyf="" author="" limit="" commentf="" branch="" tail="" sha=""
   local -a pos=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
-      --workspace|--head|--base|--title|--body-file|--author|--limit)
+      --raw) raw=1; shift ;;
+      --workspace|--head|--base|--title|--body-file|--author|--limit|--comment-file|--branch|--tail|--sha)
         [ $# -ge 2 ] || die "cel forge: $1 needs a value"
         case "$1" in
           --workspace) workspace="$2" ;; --head) head="$2" ;; --base) base="$2" ;; --title) title="$2" ;;
           --body-file) bodyf="$2" ;; --author) author="$2" ;; --limit) limit="$2" ;;
+          --comment-file) commentf="$2" ;; --branch) branch="$2" ;; --tail) tail="$2" ;; --sha) sha="$2" ;;
         esac
         shift 2 ;;
       -*) die "cel forge: unknown option: $1" ;;
@@ -658,8 +1048,14 @@ cmd_forge() {
   local wsdir repo num out
   wsdir="$(_forge_cli_ws "$workspace")" || exit 1
   case "$verb${sub:+ $sub}" in
-    repo|whoami|"pr list"|"pr create")
+    repo|whoami|"pr list"|"pr create"|"run list")
       repo="${pos[0]:-}"; _forge_cli_repo "$wsdir" "$repo" ;;
+    "run view"|"run logs"|"run rerun")
+      [ "${#pos[@]}" -eq 2 ] || die "cel forge run $sub: name the repo and the $(if [ "$sub" = view ]; then printf run; else printf job; fi) id: cel forge run $sub <repo> <id> (cel forge run list <repo> --sha <head> shows them)"
+      repo="${pos[0]}"
+      _forge_cli_repo "$wsdir" "$repo"
+      if [ "$sub" = view ]; then num="$(_forge_cli_run_id "$wsdir" "$repo" "${pos[1]}" run "$sub")" || exit 1
+      else num="$(_forge_cli_run_id "$wsdir" "$repo" "${pos[1]}" job "$sub")" || exit 1; fi ;;
     *)
       [ "${#pos[@]}" -eq 1 ] && [[ "${pos[0]}" == *#* ]] || die "cel forge pr $sub: name the PR as <repo>#<n>"
       repo="${pos[0]%%#*}" num="${pos[0]#*#}"
@@ -701,5 +1097,45 @@ cmd_forge() {
         || die "cel forge pr create: --head, --base, --title and --body-file are all required - $usage"
       out="$(forge_pr_create "$wsdir" "$repo" "$head" "$base" "$title" "$bodyf")" || exit 1
       if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" | jq -r '.url // "#\(.number)"'; fi ;;
+    "pr close")
+      [ -z "$commentf" ] || { [ -f "$commentf" ] && [ -r "$commentf" ]; } \
+        || die "cel forge pr close: --comment-file '$commentf' is not a readable file - nothing closed"
+      _forge_cli_authorise "$wsdir" "$repo" "pr close" "$num"
+      out="$(forge_pr_close "$wsdir" "$repo" "$num" ${commentf:+"$commentf"})" || exit 1
+      if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" | jq -r '"#\(.number) \(.state)  \(.url // "")"'; fi ;;
+    "pr ready")
+      _forge_cli_authorise "$wsdir" "$repo" "pr ready" "$num"
+      out="$(forge_pr_ready "$wsdir" "$repo" "$num")" || exit 1
+      if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" | jq -r '"#\(.number) \(.state)\(if .draft then " (draft)" else ", ready for review" end)  \(.url // "")"'; fi ;;
+    "run list")
+      local -a ra=()
+      [ -z "$branch" ] || ra+=(--branch "$branch")
+      [ -z "$sha" ] || ra+=(--sha "$sha")
+      [ -z "$limit" ] || ra+=(--limit "$limit")
+      out="$(forge_run_list "$wsdir" "$repo" "${ra[@]}")" || exit 1
+      if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" | jq -r '
+        .[] | ("run \(.id)  \(.state)  \(.workflow // "?")  \(.branch // "?")  \((.head_sha // "?")[0:12])  \(.title // "")\(if .number then "  (web #\(.number))" else "" end)"),
+              ((.jobs // [])[] | "  job \(.id)  \(.state)  \(.name // "?")")'
+        printf '%s\n' "$out" | jq -e 'length > 0' >/dev/null \
+          && printf '(ids are the API ids that run view, logs and rerun take; "web #" is the web page number%s)\n' \
+               "$(if [ -z "$sha" ]; then printf ', and --sha <head> lists each run'"'"'s job ids'; fi)"
+      fi ;;
+    "run view")
+      out="$(forge_run_view "$wsdir" "$repo" "$num")" || exit 1
+      if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" | jq -r '
+        "run \(.id) \(.state)  \(.workflow // "?") on \(.branch // "?") at \((.head_sha // "?")[0:12])  \(.title // "")\(if .number then "  (web #\(.number))" else "" end)",
+        "  \(.url // "")",
+        (.jobs[] | "  job \(.id)  \(.state)  \(.name // "?")")'; fi ;;
+    "run rerun")
+      _forge_cli_authorise "$wsdir" "$repo" "run rerun"
+      out="$(forge_run_rerun "$wsdir" "$repo" "$num")" || exit 1
+      if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf 'job %s queued again (same head; an approval of it stands)\n' "$num"; fi ;;
+    "run logs")
+      [ -z "$tail" ] || [[ "$tail" =~ ^[1-9][0-9]*$ ]] || die "cel forge run logs: --tail needs a positive number of lines (got: '$tail')"
+      local -a lo=()
+      [ "$raw" = 0 ] || lo+=(--raw)
+      out="$(forge_run_logs "$wsdir" "$repo" "$num" "${lo[@]}")" || exit 1
+      [ -n "$out" ] || { printf 'cel forge run logs: job %s has no log to show (on GitHub only failed steps are shown)\n' "$num" >&2; return 0; }
+      if [ -n "$tail" ]; then printf '%s\n' "$out" | tail -n "$tail"; else printf '%s\n' "$out"; fi ;;
   esac
 }

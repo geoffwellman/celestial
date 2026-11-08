@@ -314,8 +314,8 @@ test_solo_land_refuses_a_review_note_the_history_scan_would_reject() {
 }
 
 # ---- a Forgejo repo ----------------------------------------------------------
-# widget served by an internal Forgejo (tests/lib/forgejo-stub.sh: spec-
-# derived fixtures), its PR opened by the token's owner, `geoff`; the base's
+# widget served by an internal Forgejo (tests/lib/forgejo-stub.sh: recorded
+# fixtures), its PR opened by the token's owner, `geoff`; the base's
 # exact rule requires `ci / test (pull_request)`, green here unless a test
 # says otherwise. gh is never asked.
 _solo_forgejo() {
@@ -366,6 +366,18 @@ test_solo_land_on_forgejo_takes_ci_on_a_protected_base_and_refuses_unknown_prote
   _land widget#7 >/dev/null 2>&1 || { echo "refused a green required check"; rm -rf "$T"; return 1; }
   [ ! -f "$T/gate-ran" ] || { echo "ran the local gate although CI stood in"; rm -rf "$T"; return 1; }
   assert_contains "$(_fj_msg)" "Gate: CI (ci / test (pull_request)) on $STUB_HEAD" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# Forgejo answers mergeable:false for a PR it has not (re)computed - recorded
+# live on a clean fast-forward - so it reads `unknown`, and land does not
+# take unknown for a conflict: Forgejo's own merge is what refuses a real one.
+test_solo_land_on_forgejo_does_not_take_mergeable_false_for_a_conflict() {
+  _solo_setup; _solo_forgejo
+  export STUB_FJ_HEAD="$STUB_HEAD" STUB_FJ_MERGEABLE=false
+  _review widget#7 approved --head "$STUB_HEAD" --by widget-pr-7-review >/dev/null || { rm -rf "$T"; return 1; }
+  local out; out="$(_land widget#7 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  case "$out" in *conflict*) echo "read unknown as a conflict: $out"; rm -rf "$T"; return 1 ;; esac
+  _fj_merged || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 # Forgejo's own approval counts only for the current head; someone else's

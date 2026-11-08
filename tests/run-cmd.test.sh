@@ -2168,14 +2168,17 @@ test_run_solo_lane_first_turn_and_trust_only_where_they_apply() {
 }
 
 # ------------------------------------------------ the box agent budget, reviewers
-# A NEW reviewer is admitted against the box-wide budget; at the limit it is
-# refused before any checkout or pane exists.
-_roster_of() { # <n> -> a roster of n idle agents
-  jq -cn --argjson n "$1" '{result:{agents:[range($n) | {name:("a\(.)-orch"), pane_id:("w2:p\(.)"), cwd:"/elsewhere", agent_status:"idle"}]}}'
+# A NEW reviewer is admitted against the box-wide helper budget; at the limit
+# it is refused before any checkout or pane exists. Product agents beside it
+# are never counted.
+_roster_of() { # <n> [products] -> a roster of n idle helpers (reviewers) and that many product agents
+  jq -cn --argjson n "$1" --argjson p "${2:-0}" '{result:{agents:(
+    [range($n) | {name:("a\(.)-pr-\(.)-review"), pane_id:("w2:p\(.)"), cwd:"/elsewhere", agent_status:"idle"}]
+    + [range($p) | {name:("p\(.)-orch"), pane_id:("w3:p\(.)"), cwd:"/elsewhere", agent_status:"idle"}])}}'
 }
 test_reviewer_launch_is_refused_at_the_box_agent_budget() {
   _ws_pr_fixture
-  export ROSTER; ROSTER="$(_roster_of 8)"
+  export ROSTER; ROSTER="$(_roster_of 8 10)"
   herdr() {
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
@@ -2189,27 +2192,28 @@ test_reviewer_launch_is_refused_at_the_box_agent_budget() {
   local out rc=0
   out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" || rc=$?
   [ "$rc" != 0 ] || { echo "reviewer started over the budget: $out"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "box agent budget: 8 live agents, the limit is 8"
+  assert_contains "$out" "box agent budget: 8 helper agents live, the limit is 8"
   ! grep -q "agent start" "$HERDR_LOG" || { echo "a reviewer process started over the budget"; rm -rf "$T"; return 1; }
   [ ! -e "$(reviewer_checkout_path widget 12)" ] || { echo "a checkout was made for a refused reviewer"; rm -rf "$T"; return 1; }
-  # under the limit the same launch is admitted
-  ROSTER="$(_roster_of 7)"; : > "$HERDR_LOG"
+  # under the limit the same launch is admitted, ten product agents beside it
+  ROSTER="$(_roster_of 7 10)"; : > "$HERDR_LOG"
   (cd "$T" && cmd_run reviewer --repo widget --pr 12) >/dev/null 2>&1
   assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-review"
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
-# Product agents are counted, never blocked: over the budget they start and warn.
-test_product_agent_over_the_budget_is_warned_not_blocked() {
+# Product agents are never counted and never blocked: a full helper budget
+# says nothing to them.
+test_product_agent_is_never_held_against_the_helper_budget() {
   _ws
   cat > "$T/bin/herdr" <<SH
 #!/usr/bin/env bash
 [ "\$*" = 'agent list' ] || exit 1
-printf '%s\n' '$(_roster_of 8)'
+printf '%s\n' '$(_roster_of 8 10)'
 SH
   local out
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>&1)"
-  assert_contains "$out" "starts anyway"
+  case "$out" in *"box agent budget"*) echo "a product launch was held against the helper budget: $out"; rm -rf "$T"; return 1 ;; esac
   assert_contains "$out" "agent start widget-orch"
   rm -rf "$T"
 }

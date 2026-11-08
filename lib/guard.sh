@@ -267,6 +267,54 @@ _guard_names_forge_token() { # <command-or-path>
 }
 _GUARD_TOKEN_DENY='deny the forge API token (~/.config/cel/forge) is read by `cel forge` and the land doors only - no agent reads, copies or writes it'
 
+# NOR DOES IT CALL THE CODE BEHIND `cel forge`. lib/forge.sh's functions
+# (_forge_fj, _forge_fj_get, forge_pr_*, ...) carry the token to the forge
+# themselves, so an agent that sources the file and calls them reaches the
+# forge with every guard and authorship check of `cel forge` skipped - a
+# close or a PATCH included. Refused: sourcing it (`. .../forge.sh`,
+# `source .../forge.sh`, `source <(...forge.sh...)`) anywhere in the line; a
+# piece that calls one of its functions, also as a `bash -c` string; an
+# `eval` that names one; and a variable assigned one's name (`x=_forge_fj;
+# $x ...`). Reading the file is not this. THE LIMIT: these are the spellings
+# an agent plausibly writes, matched as text - a script file that sources the
+# library, a name built from pieces or decoded at run time still runs. It
+# is a tripwire, as the rest of this guard is, not a sandbox.
+_guard_forge_lib() { # <command> -> 0 when it sources lib/forge.sh or calls its functions
+  local seg re='(^|[^A-Za-z0-9_./-])(\.|source)[[:space:]]+[^[:space:];&|]*forge\.sh([^A-Za-z0-9_.-]|$)'
+  [[ "$1" =~ $re ]] && return 0
+  re='(^|[^A-Za-z0-9_./-])(\.|source)[[:space:]]+<\(.*forge\.sh'
+  [[ "$1" =~ $re ]] && return 0
+  re='(^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*=["'"'"']?_?forge_[A-Za-z0-9_]+'
+  [[ "$1" =~ $re ]] && return 0
+  re='(^|[^A-Za-z0-9_./-])eval[[:space:]].*(_?forge_[A-Za-z0-9_]+|forge\.sh)'
+  [[ "$1" =~ $re ]] && return 0
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    [[ "$seg" =~ ^(.*[[:space:]]-c[[:space:]]+)?_?forge_[A-Za-z0-9_]+([[:space:]]|$) ]] && return 0
+  done < <(_guard_segments "$1")
+  return 1
+}
+_GUARD_FORGE_LIB_DENY='deny lib/forge.sh is cel'"'"'s own code - an agent does not source it or call its _forge_*/forge_* functions (that reaches the forge with every guard and authorship check skipped); use cel forge ... instead (repo, whoami, pr view|checks|reviews|list|create|close|ready, run list|view|logs|rerun)'
+
+# `cel forge` DECIDES WHO IS ASKING FROM THE CALLER'S ENVIRONMENT (CEL_ROLE,
+# CEL_PRODUCT, its mailbox), so a line that runs it while setting, emptying or
+# unsetting a CEL_* variable - a `VAR=` prefix, `env -u`/`--unset`, `env -i`,
+# `unset`, `export`, `declare` - is a pane dressing up as someone else: refused
+# for every role, reads included. Pass --workspace <name> instead of
+# CEL_WORKSPACE. (`cel forge` also refuses an agent whose role was emptied.)
+_guard_forge_env_tamper() { # <command> -> 0 when it does
+  local re='(^|[^A-Za-z0-9_.-])cel([[:space:]]+(-C[[:space:]]+[^[:space:]]+|--workspace[= ][^[:space:]]+))*[[:space:]]+forge([[:space:]]|$)'
+  [[ "$1" =~ $re ]] || return 1
+  re='(^|[^A-Za-z0-9_])CEL_[A-Za-z0-9_]*='
+  [[ "$1" =~ $re ]] && return 0
+  re='(^|[[:space:];&|(])(unset|export|declare|typeset|local|readonly)[[:space:]][^;&|]*CEL_'
+  [[ "$1" =~ $re ]] && return 0
+  re='(^|[[:space:];&|(])env([[:space:]]+[^[:space:]]+)*[[:space:]]+(-u[[:space:]]*|--unset[= ]?)CEL_'
+  [[ "$1" =~ $re ]] && return 0
+  re='(^|[[:space:];&|(])env([[:space:]]+-[A-Za-z]*i[A-Za-z]*|[[:space:]]+--ignore-environment|[[:space:]]+-)([[:space:]]|$)'
+  [[ "$1" =~ $re ]]
+}
+_GUARD_FORGE_ENV_DENY='deny cel forge reads who is asking from its environment - a line that runs it while setting, emptying or unsetting a CEL_* variable (VAR= prefix, env -u, env -i, unset, export) is refused; run cel forge as you are, with --workspace <name> to pick a workspace'
+
 # A TEAM MEMBER'S LAUNCH TOKEN IS NOBODY'S TO READ EITHER: cel team add writes
 # <ws>/.cel/teams/<feature>/launch/<alias>.token and `cel run member` spends
 # it, both inside one process. An agent that could read or write one could
@@ -427,6 +475,10 @@ _guard_solo() { # <command> -> allow | deny <reason>
 _guard_core() { # <command> -> deny <reason>, or nothing
   if _guard_starts "$1" 'cel solo (land|review)' 'cel spike'; then
     printf 'deny core coordinates; the product'"'"'s own agent builds, reviews and lands - ask it: cel inbox send <product>-orch "<what you want>" --workspace <w>'
+    return 0
+  fi
+  if _guard_starts "$1" 'cel forge pr (close|ready)' 'cel forge run rerun'; then
+    printf 'deny core closes, readies and reruns nothing on a forge; the product'"'"'s own agent does - ask it: cel inbox send <product>-orch "<what you want>" --workspace <w>'
     return 0
   fi
   if _guard_starts "$1" 'cel run (reviewer|root)' 'herdr agent start' 'herdr worktree (create|open|remove)'; then
@@ -811,7 +863,7 @@ _guard_member() { # <command> -> allow | deny <reason>
     return 0
   fi
   if _guard_forge_raw_write "$cmd" || _guard_gh_api_writes "$cmd" \
-     || _guard_starts "$cmd" 'cel forge pr create' 'gh pr (create|merge|close|ready|reopen|edit|review|comment)' \
+     || _guard_starts "$cmd" 'cel forge pr (create|close|ready)' 'cel forge run rerun' 'gh pr (create|merge|close|ready|reopen|edit|review|comment)' \
           'gh issue (create|close|reopen|edit|comment|delete|transfer|lock|unlock|pin|unpin)' \
           'gh release (create|delete|edit|upload)' 'gh repo (create|delete|edit|fork|rename|archive|unarchive|sync)' \
           'gh run (rerun|cancel|delete)' 'gh workflow (run|enable|disable)'; then
@@ -839,6 +891,7 @@ _guard_member() { # <command> -> allow | deny <reason>
     || "$seg" =~ ^cel\ team\ (event|verdict|ack|status)(\ |$) \
     || "$seg" =~ ^cel\ forge\ (repo|whoami)(\ |$) \
     || "$seg" =~ ^cel\ forge\ pr\ (view|checks|reviews|list)(\ |$) \
+    || "$seg" =~ ^cel\ forge\ run\ (list|view|logs)(\ |$) \
     || "$seg" =~ ^cel\ decide\ (ask|list)(\ |$) \
     || "$seg" =~ ^cel\ learn\ list(\ |$) ]] && continue
     printf 'deny a %s team member runs only cel serve, inbox, budget, fleet, forge reads, decide ask|list and cel team event|verdict|ack|status - not: %s' "$_GM_ROLE" "$seg"
@@ -918,6 +971,8 @@ guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   # Every role, `other` included (a reviewer stands outside any workspace).
   if _guard_names_forge_token "$cmd"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
+  if _guard_forge_lib "$cmd"; then printf '%s' "$_GUARD_FORGE_LIB_DENY"; return 0; fi
+  if _guard_forge_env_tamper "$cmd"; then printf '%s' "$_GUARD_FORGE_ENV_DENY"; return 0; fi
   if _guard_cmd_reaches_launch "$cmd"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
   # cel team add's launcher is not a door any agent opens by hand - `other`
   # (a reviewer) included: a member is added, and admitted against the box
@@ -939,6 +994,12 @@ guard_classify() { # <role> <command>
   # `other` is not the plane's concern.
   case "$role" in solo) _guard_solo "$cmd"; return 0;; esac
   case "$role" in member) _guard_member "$cmd"; return 0;; esac
+  # A reviewer (CEL_ROLE=reviewer) judges a PR; closing or readying one is
+  # its product agent's.
+  if [ "$role" = other ] && [ "${CEL_ROLE:-}" = reviewer ] && _guard_starts "$cmd" 'cel forge pr (close|ready)' 'cel forge run rerun'; then
+    printf 'deny a reviewer closes, readies and reruns nothing - it reports to the product'"'"'s agent, which does'
+    return 0
+  fi
   case "$role" in other) printf allow; return 0;; esac
 
   # A forge changed by hand (curl at its API, tea): checked before the
@@ -953,6 +1014,12 @@ guard_classify() { # <role> <command>
   # solo agent opens PRs, an orchestrator reads them.
   if _guard_starts "$cmd" 'cel forge pr create'; then
     printf 'deny the product'"'"'s solo agent opens pull requests; an orchestrator reads them (cel forge pr view|checks|reviews|list)'
+    return 0
+  fi
+  # Closing and readying a PR is the product's own agent's: its orchestrator
+  # may (on its own account's PRs - cel forge checks), the workspace root may not.
+  if [ "$role" = root ] && _guard_starts "$cmd" 'cel forge pr (close|ready)' 'cel forge run rerun'; then
+    printf 'deny the workspace root closes, readies and reruns nothing on a forge; the product'"'"'s own agent does'
     return 0
   fi
   case "$cmd" in

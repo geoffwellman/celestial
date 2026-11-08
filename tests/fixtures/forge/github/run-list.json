@@ -1,0 +1,80 @@
+[
+  {
+    "conclusion": "skipped",
+    "createdAt": "2026-11-07T23:35:01Z",
+    "databaseId": 42425906115,
+    "displayTitle": "Widget change 1",
+    "event": "push",
+    "headBranch": "main",
+    "headSha": "2c2d05c1e6971f10381ce76ed268ab19fca851f6",
+    "number": 211,
+    "status": "completed",
+    "url": "https://github.com/acme/widget/actions/runs/42425906115",
+    "workflowName": "Release"
+  },
+  {
+    "conclusion": "success",
+    "createdAt": "2026-11-07T23:35:01Z",
+    "databaseId": 42425906035,
+    "displayTitle": "Widget change 2",
+    "event": "push",
+    "headBranch": "main",
+    "headSha": "2c2d05c1e6971f10381ce76ed268ab19fca851f6",
+    "number": 1688,
+    "status": "completed",
+    "url": "https://github.com/acme/widget/actions/runs/42425906035",
+    "workflowName": "CI"
+  },
+  {
+    "conclusion": "success",
+    "createdAt": "2026-11-07T23:24:32Z",
+    "databaseId": 42425113717,
+    "displayTitle": "Widget change 3",
+    "event": "pull_request",
+    "headBranch": "fix-widget-sizing",
+    "headSha": "a2e3f44d64f4db4666d5f6bf24f5b6d15f436f22",
+    "number": 1687,
+    "status": "completed",
+    "url": "https://github.com/acme/widget/actions/runs/42425113717",
+    "workflowName": "CI"
+  },
+  {
+    "conclusion": "failure",
+    "createdAt": "2026-11-07T21:13:09Z",
+    "databaseId": 42414804133,
+    "displayTitle": "Widget change 4",
+    "event": "pull_request",
+    "headBranch": "fix-widget-sizing",
+    "headSha": "347c9746c736fce998ad469ac6f89db7ffbfd2e6",
+    "number": 1666,
+    "status": "completed",
+    "url": "https://github.com/acme/widget/actions/runs/42414804133",
+    "workflowName": "CI"
+  },
+  {
+    "conclusion": "failure",
+    "createdAt": "2026-11-07T21:13:06Z",
+    "databaseId": 42414800621,
+    "displayTitle": "Widget change 5",
+    "event": "push",
+    "headBranch": "fix-widget-sizing",
+    "headSha": "347c9746c736fce998ad469ac6f89db7ffbfd2e6",
+    "number": 1665,
+    "status": "completed",
+    "url": "https://github.com/acme/widget/actions/runs/42414800621",
+    "workflowName": "CI"
+  },
+  {
+    "conclusion": "cancelled",
+    "createdAt": "2026-11-07T21:09:53Z",
+    "databaseId": 42414529809,
+    "displayTitle": "Widget change 6",
+    "event": "pull_request",
+    "headBranch": "fix-widget-sizing",
+    "headSha": "f4c1d1e7c9e86f3d68ef09fe222eb6f78ba798bf",
+    "number": 1664,
+    "status": "completed",
+    "url": "https://github.com/acme/widget/actions/runs/42414529809",
+    "workflowName": "CI"
+  }
+]

@@ -1,5 +1,5 @@
 {
- "errors": null,
- "message": "The target couldn't be found.",
- "url": "http://forgejo.internal/api/swagger"
+  "message": "The target couldn't be found.",
+  "url": "http://forgejo.internal/api/swagger",
+  "errors": []
 }

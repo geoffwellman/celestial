@@ -1,24 +1,61 @@
-Forgejo API fixtures (tests/forge.test.sh, tests/solo.test.sh, tests/run-cmd.test.sh).
+Forgejo API fixtures (tests/forge.test.sh, tests/solo.test.sh, tests/run-cmd.test.sh,
+tests/solo-visibility.test.sh), served by tests/lib/forgejo-stub.sh.
 
-ALL OF THESE ARE SPEC-DERIVED, not recorded: no API token for forgejo.internal
-existed while they were written, and the API refuses anonymous calls ("Only
-signed in user is allowed to call APIs."). Each is shaped from the server's own
-OpenAPI document - Forgejo 17.0.1 (gitea-1.22.0), http://forgejo.internal/swagger.v1.json -
-using exactly its definitions and field names:
+RECORDED answers were taken GET-only from the live server (Forgejo 17.0.1,
+gitea-1.22.0, http://forgejo.internal) through lib/forge.sh's own request
+helper (_forge_fj), so the token never left Celestial's code. Every recorded
+file is anonymised: owner/repo become geoff/gizmo, product names in any string
+become gizmo/Gizmo, emails are empty, avatar urls are /avatars/1, repository
+descriptions and original (mirror) urls are empty, runner/task UUIDs and the
+workflow network hash are zeroes, a run's event_payload is "{}", and PR, run
+and review titles and bodies are neutral text. Where a test needs a scenario
+the live server has no example of (a protected base, a stale approval, a
+second reviewer), the RECORDED SHAPE is kept and only the named scenario
+fields are overlaid on it. The host (forgejo.internal) and the login `geoff`
+are kept on purpose: they are the names the whole Forgejo test harness
+(tests/lib/forgejo-stub.sh, the workspace descriptors the tests build) already
+uses for the gizmo repo, and neither is a secret.
 
-  user.json                         User                 GET /user
-  pull.json, pulls-page1.json,
-  pulls-page2.json                  PullRequest          GET /repos/{owner}/{repo}/pulls[/{index}]
-  status.json                       CombinedStatus       GET /repos/{owner}/{repo}/commits/{ref}/status
-  protection-*.json                 BranchProtection     GET /repos/{owner}/{repo}/branch_protections/{name}
-  protections-*.json                []BranchProtection   GET /repos/{owner}/{repo}/branch_protections
-  reviews.json                      []PullReview         GET /repos/{owner}/{repo}/pulls/{index}/reviews
-  not-found.json                    APINotFound (404)    the not-found answer
-  forbidden.json, merge-conflict.json  APIError          403 / 409 answers
+  file                          recorded                             from (GET)                                  overlaid scenario fields
+  user.json                     recorded 2026-11-08, Forgejo 17.0.1  /user                                       -
+  pull.json                     recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/pulls/{n} (open PR)          id, number, title, body, draft, mergeable, merge_base, user.login, head.ref/label/sha, base.sha
+  pulls-page1.json,
+  pulls-page2.json              recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/pulls?state=all (an open,     the same fields per PR; closed PRs keep the
+                                                                     a closed and a merged PR as templates)      recorded mergeable:false
+  pull-open-mergeable-false.json recorded 2026-11-08, Forgejo 17.0.1 /repos/{o}/{r}/pulls/{n}                    none (title, body, head ref neutralised): an open
+                                                                                                                 clean fast-forward - merge_base IS base.sha - that
+                                                                                                                 Forgejo still answered mergeable:false (draft by WIP:)
+  pull-migrated.json            recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/pulls/{n}                    none (title, body, head label neutralised): a PR
+                                                                                                                 migrated from GitHub - user Ghost (id -1), merged,
+                                                                                                                 mergeable:false, head.ref refs/pull/<n>/head
+  reviews.json                  recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/pulls/{n}/reviews            id, state, commit_id, stale, official, dismissed,
+                                                                                                                 submitted_at, user.login (the live reviews are all
+                                                                                                                 migrated: Ghost, no commit)
+  reviews-migrated.json         recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/pulls/{n}/reviews            none (bodies neutralised): migrated reviews, user
+                                                                                                                 Ghost, commit_id ""
+  status.json                   recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/commits/{sha}/status         sha, state, total_count, statuses[] id/context/status/
+                                                                                                                 description/timestamps; target_url stays site-relative
+                                                                                                                 and creator null, as Forgejo Actions writes them
+  status-actions.json           recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/commits/{sha}/status         none: Actions statuses (`status` with no `state`,
+                                                                                                                 skipped/success/pending, relative target_url)
+  actions-runs.json             recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/actions/runs                 titles neutralised; six of the page's runs kept
+                                                                                                                 (running, success, cancelled, failure); `status`
+                                                                                                                 carries the state, no conclusion field
+  actions-run.json              recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/actions/runs/{id}            title neutralised
+  actions-jobs.json             recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/actions/runs/{id}/jobs       none: a bare array, `status` and no `conclusion`
+  actions-job.log               recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/actions/jobs/{id}/logs       first five and last three lines of the plain-text log
+  protections-empty.json        recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/branch_protections           none: no rule at all
+  not-found.json                recorded 2026-11-08, Forgejo 17.0.1  /repos/{o}/{r}/branch_protections/main      none: Forgejo's 404 for a missing rule
+  forbidden.json                recorded 2026-11-08, Forgejo 17.0.1  /admin/cron                                 none: a 403 for a token scope the account lacks
 
-Values (shas, ids, names, timestamps) are invented; emails are empty. Replace
-any of these with a recorded answer (token in ~/.config/cel/forge/
-forgejo.internal.token, GET only, strip emails and tokens) and move its line
-below.
+SPEC-DERIVED, not recorded - GET alone cannot produce them (the live repos
+have no branch protection rule, and a 409 is the answer to a merge, a write).
+Shaped from the server's own OpenAPI document,
+http://forgejo.internal/swagger.v1.json, using exactly its definitions and
+field names; values invented:
 
-RECORDED: none yet.
+  protection-main.json, protection-unnamed.json                 BranchProtection     GET /repos/{o}/{r}/branch_protections/{name}
+  protections-main.json, protections-glob.json,
+  protections-other.json, protections-unnamed.json,
+  protections-unreadable-glob.json                              []BranchProtection   GET /repos/{o}/{r}/branch_protections
+  merge-conflict.json                                           APIError (409)       POST /repos/{o}/{r}/pulls/{n}/merge

@@ -1,4 +1,4 @@
 {
- "message": "token does not have at least one of required scope(s): [read:repository]",
- "url": "http://forgejo.internal/api/swagger"
+  "message": "token does not have at least one of required scope(s): [read:admin]",
+  "url": "http://forgejo.internal/api/swagger"
 }

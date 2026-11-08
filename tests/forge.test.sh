@@ -4,8 +4,11 @@ source "$CEL_ROOT/lib/forge.sh"
 
 # A workspace with one repo, `widget`, whose url and per-repo forge keys a
 # test sets; `extra` is appended at the top level (a github: block).
+# CEL_FORGE_PROC_DIR (honoured under CEL_TESTING) stands in for /proc, so who
+# ran the suite - an agent's process tree, or none - never decides whether a
+# test is the owner: an empty one is a process with no agent ancestry.
 _forge_ws() { # <url-or-empty> [forge] [host] [extra-yaml]
-  T="$(mktemp -d)"
+  T="$(mktemp -d)"; mkdir -p "$T/proc"; export CEL_FORGE_PROC_DIR="$T/proc"
   printf 'name: forgetest\n%s\nrepos:\n  - name: widget\n    prefix: WG\n' "${4:-}" > "$T/workspace.yaml"
   [ -z "$1" ] || printf '    url: %s\n' "$1" >> "$T/workspace.yaml"
   [ -z "${2:-}" ] || printf '    forge: %s\n' "$2" >> "$T/workspace.yaml"
@@ -32,9 +35,18 @@ case "$1 $2" in
     case "$*" in
       *statusCheckRollup*) cat "$FX/pr-checks.json" ;;
       *reviewDecision*)    cat "$FX/pr-reviews.json" ;;
-      *)                   cat "$FX/pr-view.json" ;;
+      *)                   cat "${FX_VIEW:-$FX/pr-view.json}" ;;
     esac ;;
   "pr list") cat "$FX/pr-list.json" ;;
+  "pr close") echo "✓ Closed pull request acme/widget#12" >&2 ;;
+  "pr ready") echo "✓ Pull request acme/widget#12 is marked as \"ready for review\"" >&2 ;;
+  "run list") cat "$FX/run-list.json" ;;
+  "run rerun") echo "✓ Requested rerun of job" >&2 ;;
+  "run view")
+    case "$*" in
+      *--log-failed*) cat "$FX/job-log.txt" ;;
+      *) cat "$FX/run-view.json" ;;
+    esac ;;
   "pr merge")
     [ -z "${STUB_MERGE_FAIL:-}" ] || { echo 'GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)' >&2; exit 1; }
     echo "Squashed and merged pull request acme/widget#12" ;;
@@ -294,11 +306,11 @@ test_forge_ops_refuse_a_pr_that_is_not_a_number() {
   rm -rf "$T"
 }
 
-# ---- Forgejo operations, from spec-derived fixtures -------------------------
+# ---- Forgejo operations, from recorded fixtures -----------------------------
 # tests/lib/forgejo-stub.sh answers as Forgejo 17's API does (fixtures in
-# tests/fixtures/forge/forgejo - see PROVENANCE) for a gizmo-like repo: cloned
-# over the forgejo-ct.internal ssh host, web and API on plain-HTTP
-# forgejo.internal.
+# tests/fixtures/forge/forgejo, recorded and anonymised - see PROVENANCE) for
+# a gizmo-like repo: cloned over the forgejo-ct.internal ssh host, web and
+# API on plain-HTTP forgejo.internal.
 source "$CEL_ROOT/tests/lib/forgejo-stub.sh"
 MOVED=2222222222222222222222222222222222222222
 GIZMO='{"provider":"forgejo","host":"forgejo.internal","owner":"geoff","repo":"gizmo","ssh_host":"forgejo-ct.internal","web_url":"http://forgejo.internal/geoff/gizmo","api_url":"http://forgejo.internal/api/v1/repos/geoff/gizmo"}'
@@ -335,7 +347,9 @@ test_forgejo_whoami_and_pr_view_normalise_the_api() {
   assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/user" || { rm -rf "$T"; return 1; }
   assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
   assert_eq "$(STUB_FJ_STATE=merged forge_pr_view "$T" widget 31 | jq -c '[.state, .mergeable]')" '["merged","unknown"]' || { rm -rf "$T"; return 1; }
-  assert_eq "$(STUB_FJ_MERGEABLE=false forge_pr_view "$T" widget 31 | jq -r .mergeable)" conflicting || { rm -rf "$T"; return 1; }
+  # Forgejo's false is not proof of a conflict (it also says false before it
+  # has computed the PR): unknown, never conflicting.
+  assert_eq "$(STUB_FJ_MERGEABLE=false forge_pr_view "$T" widget 31 | jq -r .mergeable)" unknown || { rm -rf "$T"; return 1; }
   assert_eq "$(printf '{"number":4,"state":"open","labels":[{"id":7,"name":"hold"}]}' | jq -c "$_FORGE_JQ_FJ"' fj_pr | .labels')" '["hold"]' || { rm -rf "$T"; return 1; }
   _fj_no_gh || { rm -rf "$T"; return 1; }
   rm -rf "$T"
@@ -346,13 +360,13 @@ test_forgejo_whoami_and_pr_view_normalise_the_api() {
 test_forgejo_pr_list_reads_every_page_and_filters_like_github() {
   _fj_ws
   _pl() { forge_pr_list "$T" widget "$@" | jq -r 'map("\(.number):\(.state):\(.mergeable):\(.draft):\(.author)") | join(" ")'; }
-  assert_eq "$(_pl open)" "31:open:clean:false:geoff 30:open:conflicting:true:geoff 29:open:behind:false:helper-bot" || { rm -rf "$T"; return 1; }
+  assert_eq "$(_pl open)" "31:open:clean:false:geoff 30:open:unknown:true:geoff 29:open:behind:false:helper-bot" || { rm -rf "$T"; return 1; }
   assert_eq "$(_pl merged)" "27:merged:unknown:false:geoff" || { rm -rf "$T"; return 1; }
   assert_eq "$(_pl closed)" "27:merged:unknown:false:geoff 26:closed:unknown:false:geoff" || { rm -rf "$T"; return 1; }
   : > "$FJ_LOG"
   assert_eq "$(_pl all | wc -w)" 5 || { rm -rf "$T"; return 1; }
   assert_contains "$(cat "$FJ_LOG")" "pulls?state=all&limit=50&page=3" || { rm -rf "$T"; return 1; }
-  assert_eq "$(_pl all --limit 2)" "31:open:clean:false:geoff 30:open:conflicting:true:geoff" || { rm -rf "$T"; return 1; }
+  assert_eq "$(_pl all --limit 2)" "31:open:clean:false:geoff 30:open:unknown:true:geoff" || { rm -rf "$T"; return 1; }
   : > "$FJ_LOG"
   assert_eq "$(forge_pr_list "$T" widget open --author @me | jq -r 'map(.number) | join(" ")')" "31 30" || { rm -rf "$T"; return 1; }
   assert_contains "$(cat "$FJ_LOG")" "pulls?state=open&poster=geoff&limit=50&page=1" || { rm -rf "$T"; return 1; }
@@ -378,6 +392,263 @@ test_forgejo_pr_checks_reads_the_heads_latest_statuses_and_the_rule() {
   out="$(STUB_FJ_STATUSES='[{"id":50,"context":"ci / test (pull_request)","status":"failure"},{"id":51,"context":"ci / test (pull_request)","status":"success"}]' forge_pr_checks "$T" widget 31)"
   assert_eq "$(jq -r '.checks | map("\(.name)=\(.conclusion)") | join(" ")' <<<"$out")" "ci / test (pull_request)=success" || { rm -rf "$T"; return 1; }
   _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Recorded live (Forgejo 17.0.1): an open PR on a clean fast-forward - its
+# merge base IS the base's tip - answered mergeable:false until Forgejo
+# recomputed it. That shape reads `unknown`, never `conflicting`.
+test_forgejo_recorded_mergeable_false_is_unknown_never_conflicting() {
+  _fj_ws
+  local out; out="$(STUB_FJ_PULL=pull-open-mergeable-false.json forge_pr_view "$T" widget 31)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.mergeable' "$FJX/pull-open-mergeable-false.json"):$(jq -r '.merge_base == .base.sha' "$FJX/pull-open-mergeable-false.json")" "false:true" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '[.state, .draft, .mergeable]' <<<"$out")" '["open",true,"unknown"]' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Recorded live: a migrated PR's author is Forgejo's placeholder `Ghost`, a
+# closed PR says mergeable:false, and its migrated reviews carry no commit.
+test_forgejo_recorded_migrated_pr_and_reviews_normalise() {
+  _fj_ws
+  local out; out="$(STUB_FJ_PULL=pull-migrated.json STUB_FJ_STATE=merged forge_pr_view "$T" widget 29)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '[.author, .state, .mergeable, .head_ref]' <<<"$out")" '["Ghost","merged","unknown","refs/pull/29/head"]' || { rm -rf "$T"; return 1; }
+  out="$(jq -c --slurpfile r "$FJX/reviews-migrated.json" -n "$_FORGE_JQ_FJ"' $r[0] | {decision: fj_decision("x"), heads: [.[].commit_id | _s], authors: ([.[].user.login] | unique)}')"
+  assert_eq "$out" '{"decision":"none","heads":[null,null,null],"authors":["Ghost"]}' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Recorded live: the statuses Forgejo Actions writes - `status` with no
+# `state`, `skipped` among them, a site-relative target_url, no creator - read
+# as checks with absolute urls.
+test_forgejo_recorded_actions_statuses_read_as_checks() {
+  _fj_ws
+  local out
+  out="$(STUB_FJ_STATUSES="$(jq -c .statuses "$FJX/status-actions.json")" forge_pr_checks "$T" widget 31)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.checks | sort_by(.name) | map("\(.status)/\(.conclusion)") | join(" ")' <<<"$out")" \
+    "in_progress/null completed/skipped completed/success" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '[.checks[].url | startswith("http://forgejo.internal/geoff/gizmo/actions/runs/")] | all' <<<"$out")" true || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Actions runs and jobs: recorded `status` with a null `conclusion` (a run's
+# `failure` IS its failure), the branch filter applied here because Forgejo
+# ignores it, a job's plain-text log with its timestamps removed.
+test_forgejo_runs_list_view_and_logs_from_recorded_actions() {
+  _fj_ws
+  local out
+  out="$(forge_run_list "$T" widget)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r 'map("\(.id):\(.state):\(.branch)") | join(" ")' <<<"$out")" \
+    "21:running:#105 17:success:main 16:success:main 15:cancelled:main 11:failure:main 9:failure:main" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '.[] | select(.id == 9) | [.number, .workflow, .event, .head_sha[0:7], .url]' <<<"$out")" \
+    '[3,"desktop.yml","push","f77c249","http://forgejo.internal/geoff/gizmo/actions/runs/3"]' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/repos/geoff/gizmo/actions/runs?limit=50&page=1" || { rm -rf "$T"; return 1; }
+  assert_eq "$(forge_run_list "$T" widget --branch '#105' | jq -r 'map(.id) | join(" ")')" 21 || { rm -rf "$T"; return 1; }
+  assert_eq "$(forge_run_list "$T" widget --limit 2 | jq -r 'map(.id) | join(" ")')" "21 17" || { rm -rf "$T"; return 1; }
+  out="$(forge_run_view "$T" widget 9)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '[.id, .state, (.jobs | map([.id, .name, .state]))]' <<<"$out")" \
+    '[9,"failure",[[15,"build · test · headless snapshot","failure"]]]' || { rm -rf "$T"; return 1; }
+  out="$(forge_run_logs "$T" widget 15)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(printf '%s\n' "$out" | tail -n1)" "Job 'build · test · headless snapshot' failed" || { rm -rf "$T"; return 1; }
+  assert_eq "$(printf '%s\n' "$out" | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T')" 0 || { rm -rf "$T"; return 1; }
+  assert_eq "$(forge_run_logs "$T" widget 15 --raw | grep -cE '^2026-11-07T')" "$(grep -c . "$FJX/actions-job.log")" || { rm -rf "$T"; return 1; }
+  assert_fails forge_run_view "$T" widget 999 2>/dev/null || { rm -rf "$T"; return 1; }
+  assert_fails forge_run_logs "$T" widget 15abc 2>/dev/null || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -vc '^GET ' "$FJ_LOG")" 0 || { echo "a read wrote"; rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# GitHub runs through gh, the same shapes: recorded `gh run list|view` and a
+# `--log-failed` job log with its job/step columns and timestamps removed.
+test_github_runs_list_view_and_logs_from_recorded_gh() {
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  local out
+  out="$(forge_run_list "$T" widget --branch main --limit 6)" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "run list --repo acme/widget --limit 6 --branch main --json databaseId,number," || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r 'map(.state) | join(" ")' <<<"$out")" "skipped success success failure failure cancelled" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '.[0] | [.id, .number, .workflow, .branch]' <<<"$out")" '[42425906115,211,"Release","main"]' || { rm -rf "$T"; return 1; }
+  out="$(forge_run_view "$T" widget 42414804133)" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '[.state] + (.jobs | map("\(.id)=\(.state)")) | join(" ")' <<<"$out")" \
+    "failure 128530529707=success 128530529824=failure 128530530840=skipped 128532717430=failure" || { rm -rf "$T"; return 1; }
+  out="$(forge_run_logs "$T" widget 128530529824)" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "run view --repo acme/widget --log-failed --job 128530529824" || { rm -rf "$T"; return 1; }
+  assert_eq "$(printf '%s\n' "$out" | head -n1)" "##[group]Run bash tests/run.sh" || { rm -rf "$T"; return 1; }
+  assert_eq "$(printf '%s\n' "$out" | tail -n1)" "##[error]Process completed with exit code 1." || { rm -rf "$T"; return 1; }
+  assert_contains "$(forge_run_logs "$T" widget 128530529824 --raw | head -n1)" $'Regression suite\tRun regression suite\t' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The run vocabulary from every state either forge names.
+test_run_states_map_to_the_check_vocabulary() {
+  assert_eq "$(jq -nc "$_FORGE_JQ_FJ"' [{status:"failure",conclusion:null},{status:"success"},{status:"running"},{status:"waiting"},{status:"blocked"},{status:"cancelled"},{status:"skipped"},{status:"unknown"}] | map(fj_state)')" \
+    '["failure","success","running","queued","queued","cancelled","skipped","unknown"]' || return 1
+  assert_eq "$(jq -nc "$_FORGE_JQ_GH"' [{status:"completed",conclusion:"timed_out"},{status:"completed",conclusion:"neutral"},{status:"in_progress",conclusion:""},{status:"queued"},{status:"waiting"},{status:"completed",conclusion:"cancelled"},{status:"completed",conclusion:"startup_failure"}] | map(gh_state)')" \
+    '["failure","success","running","queued","queued","cancelled","failure"]' || return 1
+}
+
+# `cel forge pr close|ready` on Forgejo: the comment goes first, the state is
+# PATCHed (the branch is never deleted), ready strips the WIP prefix and is a
+# no-op on a ready PR; an agent may change only its own account's PRs or a
+# migrated one (Ghost), and reviewers, members and core may not at all.
+test_forgejo_pr_close_and_ready() {
+  _fj_ws
+  printf 'Superseded by #32.\n' > "$T/why.md"
+  local out
+  out="$(cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr close widget#31 --comment-file "$T/why.md" --json)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .state <<<"$out")" closed || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -E '^(POST|PATCH|DELETE)' "$FJ_LOG")" $'POST http://forgejo.internal/api/v1/repos/geoff/gizmo/issues/31/comments\nPATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31' || { rm -rf "$T"; return 1; }
+  assert_eq "$(sed -n 1p "$FJ_BODY_LOG" | jq -r .body)" "Superseded by #32." || { rm -rf "$T"; return 1; }
+  assert_eq "$(sed -n 2p "$FJ_BODY_LOG")" '{"state":"closed"}' || { rm -rf "$T"; return 1; }
+  # a migrated PR (author Ghost) is the agent's to close
+  : > "$FJ_LOG"
+  ( cd "$T" && STUB_FJ_PULL=pull-migrated.json CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr close widget#29 ) >/dev/null || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "PATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/29" || { rm -rf "$T"; return 1; }
+  # someone else's PR is refused by name, before any write
+  : > "$FJ_LOG"
+  out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot CEL_ROLE=orchestrator CEL_INBOX_ME=widget-orch cmd_forge pr close widget#29 2>&1)" && { echo "closed someone else's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "helper-bot's pull request" || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot STUB_FJ_TITLE='WIP: x' CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#29 2>&1)" && { echo "readied someone else's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "helper-bot's pull request" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  # ...but the owner (no CEL_ROLE) may
+  ( cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge pr close widget#29 ) >/dev/null || { rm -rf "$T"; return 1; }
+  # roles that never close or ready
+  local r
+  for r in reviewer member core; do
+    ( cd "$T" && CEL_ROLE=$r cmd_forge pr close widget#31 ) >/dev/null 2>&1 && { echo "$r closed a PR"; rm -rf "$T"; return 1; }
+    ( cd "$T" && CEL_ROLE=$r cmd_forge pr ready widget#31 ) >/dev/null 2>&1 && { echo "$r readied a PR"; rm -rf "$T"; return 1; }
+  done
+  # ready: the WIP prefix comes off the title; a ready PR is left alone
+  : > "$FJ_LOG"; : > "$FJ_BODY_LOG"
+  out="$(cd "$T" && STUB_FJ_TITLE='WIP: Session audio' CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#31 --json)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .draft <<<"$out")" false || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$FJ_BODY_LOG")" '{"title":"Session audio"}' || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  ( cd "$T" && STUB_FJ_TITLE='[WIP] Session audio' cmd_forge pr ready widget#31 ) >/dev/null || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "PATCH" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  out="$(cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr ready widget#31 --json)" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .draft <<<"$out")" false || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^PATCH' "$FJ_LOG")" 0 || { echo "readied a ready PR"; rm -rf "$T"; return 1; }
+  # a refused comment closes nothing
+  : > "$FJ_LOG"
+  ( cd "$T" && STUB_FJ_WRITE=denied cmd_forge pr close widget#31 --comment-file "$T/why.md" ) >/dev/null 2>&1 && { echo "closed after a refused comment"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^PATCH' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The same verbs on GitHub: gh pr close (no --delete-branch) and gh pr ready,
+# a no-op on a PR that is not a draft.
+test_github_pr_close_and_ready() {
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  printf 'Superseded.\n' > "$T/why.md"
+  ( cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge pr close widget#12 --comment-file "$T/why.md" ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$(grep '^pr close' "$GH_LOG")" "pr close 12 --repo acme/widget --comment Superseded." || { rm -rf "$T"; return 1; }
+  assert_fails grep -q -- '--delete-branch' "$GH_LOG" || { rm -rf "$T"; return 1; }
+  ( cd "$T" && cmd_forge pr ready widget#12 ) >/dev/null 2>&1 || { rm -rf "$T"; return 1; }
+  assert_fails grep -q '^pr ready' "$GH_LOG" || { rm -rf "$T"; return 1; }
+  # a draft is made ready
+  jq '.isDraft = true' "$FX/pr-view.json" > "$T/draft.json"
+  ( cd "$T" && FX_VIEW="$T/draft.json" cmd_forge pr ready widget#12 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "pr ready 12 --repo acme/widget" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# AN EMPTY ROLE IS NEVER THE OWNER. The owner is a process with no agent
+# mark at all - none of the launch's variables, set or emptied, and no
+# ancestor that carried one. An agent that empties or unsets CEL_ROLE keeps
+# its other marks or its ancestry, and is refused before any write.
+test_forge_owner_is_a_process_with_no_agent_mark() {
+  _fj_ws
+  local out v
+  ( cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge pr close widget#29 ) >/dev/null || { echo "the owner was refused"; rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  for v in 'CEL_ROLE=' 'CEL_INBOX_ME=widget-orch' 'CEL_SESSION_ID=s1' 'CEL_PRODUCT=widget' 'CEL_TEAM_MEMBER=widget-login-qa' 'CEL_INBOX_WS=alpha'; do
+    out="$(cd "$T" && env "$v" bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/forge.sh"; cmd_forge pr close widget#29' 2>&1)" \
+      && { echo "$v passed as the owner"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "not the owner" || { echo "$v: $out"; rm -rf "$T"; return 1; }
+  done
+  # no variable at all, but descended from an agent's runtime: its environ
+  # (fixed at exec) still says CEL_ROLE
+  mkdir -p "$T/proc/$$" "$T/proc/4242"
+  printf 'HOME=/h\0' > "$T/proc/$$/environ"; printf '%s' "$$ (bash) S 4242 1 1" > "$T/proc/$$/stat"
+  printf 'CEL_ROLE=solo\0CEL_INBOX_ME=widget-orch\0' > "$T/proc/4242/environ"; printf '4242 (claude) S 1 1 1' > "$T/proc/4242/stat"
+  out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot cmd_forge pr close widget#29 2>&1)" && { echo "an agent's child passed as the owner"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not the owner" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A product's agent changes only its own product's repos, however the
+# workspace account authored the PR.
+test_forge_agent_changes_only_its_own_products_repos() {
+  _fj_ws $'products:\n  - name: shop\n    repos: [web]\n  - name: tools\n    repos: [widget]'
+  local out
+  out="$(cd "$T" && CEL_ROLE=solo CEL_PRODUCT=shop cmd_forge pr close widget#31 2>&1)" && { echo "closed another product's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "widget is not a repo of product shop" || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && CEL_ROLE=orchestrator CEL_INBOX_ME=shop-orch cmd_forge run rerun widget 15 2>&1)" && { echo "reran another product's job"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not a repo of product shop" || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && CEL_ROLE=solo cmd_forge pr close widget#31 2>&1)" && { echo "closed with no product"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cannot tell which product" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  ( cd "$T" && CEL_ROLE=orchestrator CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 ) >/dev/null || { echo "refused its own product"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# `cel forge run rerun`: Forgejo POST /actions/jobs/<id>/rerun, GitHub
+# `gh run rerun --job`; the product's agent and the owner, never a member,
+# reviewer or core.
+test_forge_run_rerun_on_either_forge() {
+  _fj_ws
+  local out r
+  out="$(cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge run rerun widget 15 --json)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  _json_eq "$out" '{"rerun":true,"job_id":15}' || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -E '^(POST|PATCH)' "$FJ_LOG")" "POST http://forgejo.internal/api/v1/repos/geoff/gizmo/actions/jobs/15/rerun" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  for r in member reviewer core; do
+    ( cd "$T" && CEL_ROLE=$r CEL_PRODUCT=widget cmd_forge run rerun widget 15 ) >/dev/null 2>&1 && { echo "$r reran a job"; rm -rf "$T"; return 1; }
+  done
+  assert_eq "$(grep -c '^POST' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  ( cd "$T" && STUB_FJ_WRITE=denied cmd_forge run rerun widget 15 ) >/dev/null 2>&1 && { echo "a refused rerun said yes"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  ( cd "$T" && CEL_ROLE=solo CEL_PRODUCT=widget cmd_forge run rerun widget 128530529824 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "run rerun --repo acme/widget --job 128530529824" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Runs by commit, with their job ids; a web page mapped to API ids only by
+# Forgejo's own html_url (the UI's run 3 is API run 9, its job 0 is job 15),
+# anything else refused with the --sha hint.
+test_forge_runs_by_sha_and_by_web_page() {
+  _fj_ws
+  local out sha=f77c249f8ef63638458ca239ebdced36f545f90a
+  out="$(forge_run_list "$T" widget --sha "$sha")" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c 'map([.id, .number, (.jobs | map(.id))])' <<<"$out")" '[[9,3,[15]]]' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "actions/runs?head_sha=$sha&limit=50&page=1" || { rm -rf "$T"; return 1; }
+  assert_fails forge_run_list "$T" widget --sha f77c249 2>/dev/null || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_forge run list widget --sha "$sha")" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "run 9  failure  desktop.yml  main" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "(web #3)" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "  job 15  failure  build · test · headless snapshot" || { rm -rf "$T"; return 1; }
+  _json_eq "$(forge_run_resolve "$T" widget http://forgejo.internal/geoff/gizmo/actions/runs/3/jobs/0)" '{"run_id":9,"job_id":15}' || { rm -rf "$T"; return 1; }
+  _json_eq "$(forge_run_resolve "$T" widget /geoff/gizmo/actions/runs/3)" '{"run_id":9,"job_id":null}' || { rm -rf "$T"; return 1; }
+  assert_eq "$(cd "$T" && cmd_forge run logs widget http://forgejo.internal/geoff/gizmo/actions/runs/3/jobs/0/attempt/1 --tail 1)" "Job 'build · test · headless snapshot' failed" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cd "$T" && cmd_forge run view widget http://forgejo.internal/geoff/gizmo/actions/runs/3)" "run 9 failure" || { rm -rf "$T"; return 1; }
+  for out in http://forgejo.internal/geoff/gizmo/actions/runs/99 http://forgejo.internal/geoff/gizmo/actions/runs/3/jobs/4 \
+             http://forgejo.internal/geoff/other/actions/runs/3 'task 52'; do
+    ( cd "$T" && cmd_forge run logs widget "$out" ) >/dev/null 2>"$T/err" && { echo "mapped $out"; rm -rf "$T"; return 1; }
+    assert_contains "$(cat "$T/err")" "--sha <head>" || { echo "$out: $(cat "$T/err")"; rm -rf "$T"; return 1; }
+  done
+  ( cd "$T" && cmd_forge run logs widget http://forgejo.internal/geoff/gizmo/actions/runs/3 ) >/dev/null 2>"$T/err" && { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/err")" "a run's page, not a job's" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  forge_run_list "$T" widget --sha 2c2d05c1e6971f10381ce76ed268ab19fca851f6 >/dev/null || { rm -rf "$T"; return 1; }
+  assert_contains "$(grep '^run list' "$GH_LOG")" "--commit 2c2d05c1e6971f10381ce76ed268ab19fca851f6" || { rm -rf "$T"; return 1; }
+  _json_eq "$(forge_run_resolve "$T" widget https://github.com/acme/widget/actions/runs/42414804133/job/128530529824)" '{"run_id":42414804133,"job_id":128530529824}' || { rm -rf "$T"; return 1; }
+  assert_fails forge_run_resolve "$T" widget https://github.com/other/repo/actions/runs/1 2>/dev/null || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 

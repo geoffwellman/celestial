@@ -279,6 +279,90 @@ test_no_agent_reads_or_writes_the_forge_token() {
   # the plane's own files are not the token
   assert_eq "$(guard_classify orchestrator 'cat lib/forge.sh tests/fixtures/forge/forgejo/pull.json')" allow
 }
+# lib/forge.sh is cel's own code: sourcing it and calling its functions
+# reaches the forge with the token and none of `cel forge`'s checks (a
+# product agent closed PRs that way). Refused to every role however it is
+# spelled - `.` or `source`, any path, inside `bash -c`, a `$(...)` - while
+# reading the file and `cel forge` itself stay open.
+test_no_agent_sources_lib_forge_or_calls_its_functions() {
+  local role c
+  local -a calls=(
+    "bash --noprofile --norc -c 'export CEL_ROOT=/w/celestial; . \$CEL_ROOT/lib/common.sh; . \$CEL_ROOT/lib/workspace.sh; . \$CEL_ROOT/lib/forge.sh; _forge_fj forgejo.internal PATCH http://forgejo.internal/api/v1/repos/o/r/pulls/3 {}'"
+    'source /home/u/celestial/lib/forge.sh && forge_pr_view /w gizmo 3'
+    '. lib/forge.sh' 'source "$CEL_ROOT/lib/forge.sh"'
+    "bash -c '_forge_fj_get x forgejo.internal http://forgejo.internal/api/v1/user'"
+    "bash --norc -c '_forge_forgejo_pr_merge /w {} 3 abc'"
+    'd=$(forge_repo /home/u/ws/sandbox gizmo); echo $d'
+    '_forge_fj forgejo.internal GET http://forgejo.internal/api/v1/user'
+    'x=_forge_fj; $x forgejo.internal PATCH http://forgejo.internal/api/v1/repos/o/r/pulls/3 {}'
+    "f='forge_pr_close'; \$f /w gizmo 3"
+    'eval "_forge_fj forgejo.internal GET http://forgejo.internal/api/v1/user"'
+    'eval "$(cat lib/forge.sh)"; forge_whoami /w gizmo'
+    'source <(cat /home/u/celestial/lib/forge.sh)'
+  )
+  for role in orchestrator root core solo other; do
+    for c in "${calls[@]}"; do
+      case "$(guard_classify "$role" "$c")" in "deny lib/forge.sh is cel"*"use cel forge"*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+    for c in 'cat lib/forge.sh' 'grep -n _forge_fj lib/forge.sh' 'sed -n 1,40p lib/forge.sh' 'bash -n lib/forge.sh' \
+             'bash tests/run.sh forge.test.sh' 'cel forge pr view gizmo#3' 'cel forge run logs gizmo 15 --tail 50'; do
+      case "$(guard_classify "$role" "$c")" in "deny lib/forge.sh"*) echo "$role refused: $c"; return 1;; esac
+    done
+  done
+}
+# `cel forge run list|view|logs` reads CI: every role, read-only members too.
+# `pr close|ready` and `run rerun` change the forge: the product's own agent
+# (solo, orchestrator) and the owner; never core, root, a member or a
+# reviewer.
+test_cel_forge_runs_are_everyones_and_close_ready_the_product_agents() {
+  local role c
+  for role in orchestrator root core solo other; do
+    for c in 'cel forge run list gizmo --branch main' 'cel forge run list gizmo --sha 0123456789abcdef0123456789abcdef01234567' \
+             'cel forge run view gizmo 9 --json' 'cel forge run logs gizmo 15 --tail 80'; do
+      assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused: $c"; return 1; }
+    done
+  done
+  for role in solo orchestrator other; do
+    for c in 'cel forge pr close gizmo#3 --comment-file why.md' 'cel forge pr ready gizmo#3' 'cel forge run rerun gizmo 15'; do
+      assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused: $c"; return 1; }
+    done
+  done
+  for role in core root; do
+    for c in 'cel forge pr close gizmo#3' 'cel --workspace sandbox forge pr ready gizmo#3' 'cel forge run rerun gizmo 15'; do
+      case "$(guard_classify "$role" "$c")" in deny*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+  done
+  for c in 'cel forge pr close gizmo#3' 'cel forge pr ready gizmo#3' 'cel forge run rerun gizmo 15'; do
+    case "$(CEL_ROLE=reviewer guard_classify other "$c")" in deny*) ;; *) echo "a reviewer allowed: $c"; return 1;; esac
+  done
+  _team_ws
+  local r
+  for r in qa platform; do
+    assert_eq "$(ROLE=$r _ro guard_classify member 'cel forge run logs widget 15 --tail 40')" allow || { echo "$r refused run logs"; rm -rf "$T"; return 1; }
+    for c in 'cel forge pr close widget#3' 'cel forge pr ready widget#3' 'cel forge run rerun widget 15'; do
+      _deny "$(ROLE=$r _ro guard_classify member "$c")" "$r: $c" || { rm -rf "$T"; return 1; }
+    done
+  done
+  rm -rf "$T"
+}
+# `cel forge` reads who is asking from its environment, so a line that runs
+# it while setting, emptying or unsetting a CEL_* variable is refused to every
+# role - the way an agent would dress up as the owner or another product.
+test_cel_forge_with_a_tampered_cel_environment_is_refused() {
+  local role c
+  for role in orchestrator root core solo other; do
+    for c in 'CEL_ROLE= cel forge pr close gizmo#3' 'env -u CEL_ROLE cel forge pr close gizmo#3' \
+             'env --unset=CEL_ROLE cel forge pr ready gizmo#3' 'unset CEL_ROLE; cel forge pr close gizmo#3' \
+             'export CEL_ROLE=; cel forge pr close gizmo#3' 'env -i PATH=/usr/bin cel forge pr close gizmo#3' \
+             'CEL_PRODUCT=other cel forge run rerun gizmo 15' 'CEL_INBOX_ME=x-orch cel --workspace w forge pr ready gizmo#3' \
+             'env CEL_ROLE=solo /home/u/celestial/bin/cel forge pr close gizmo#3' 'unset CEL_INBOX_ME CEL_ROLE && cel forge run list gizmo'; do
+      case "$(guard_classify "$role" "$c")" in "deny cel forge reads who is asking"*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+  done
+  for c in 'cel forge pr close gizmo#3' 'cel --workspace sandbox forge run list gizmo' 'echo CEL_ROLE=x' 'unset CEL_ROLE; cel inbox read'; do
+    case "$(guard_classify solo "$c")" in "deny cel forge reads who is asking"*) echo "refused: $c"; return 1;; esac
+  done
+}
 # ...and the hook enforces it where it runs: a reviewer pane outside any
 # workspace (otherwise untouched) included, the native Read tool included.
 test_hook_refuses_the_forge_token_to_every_pane() {
