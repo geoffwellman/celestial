@@ -483,7 +483,7 @@ _team_launch_refused_locked() { # <dir> <alias> <by> <reason>
 }
 
 # The launcher, as one function a test replaces.
-_team_cel() { "$CEL_ROOT/bin/cel" "$@"; }
+_team_cel() { PATH="${_TEAM_CALLER_PATH:-$PATH}" "$CEL_ROOT/bin/cel" "$@"; }
 
 # The box budget (lib/budget.sh). Absent = refused: an unknown budget admits
 # nobody.
@@ -1120,7 +1120,18 @@ cel team - a feature team under the product's lead (its solo/orchestrator agent)
 EOS
 }
 
+# Every verb runs on cel_tool_path (lib/common.sh), not the caller's PATH:
+# the jq and yq whose answers say who leads, who is a member and which
+# product a team is, are the box's, whatever directory the caller put first.
+# The launcher alone gets the caller's PATH back (_TEAM_CALLER_PATH): the
+# member it starts runs the runtimes the agent's own PATH finds.
 cmd_team() {
+  local tp
+  tp="$(cel_tool_path)"
+  _TEAM_CALLER_PATH="$PATH"
+  PATH="$tp" _cmd_team "$@"
+}
+_cmd_team() {
   local sub="${1:-help}"; shift 2>/dev/null || true
   # Every verb that writes acts only as the identity this agent was launched
   # with (lib/identity.sh).

@@ -60,6 +60,54 @@ cel_under_suite() {
   return 1
 }
 
+# THE BINARIES A TRUST DECISION RUNS ARE NOT THE CALLER'S TO CHOOSE. PATH is
+# the caller's: an agent that puts a directory of its own first hands cel a
+# `curl` that is piped the Forgejo token, a `gh` run with GH_TOKEN, a `jq`
+# or `yq` whose answer decides who may write. So cel forge and cel team run
+# on cel_tool_path instead, and the token's own binaries are resolved by
+# cel_tool_bin:
+#   - the system directories ($_CEL_SYSTEM_PATH) - root-owned, nothing an
+#     agent writes;
+#   - then this user's ~/.local/bin, where `cel setup` installs what the
+#     distribution does not ship (yq, herdr, sometimes gh) - its home taken
+#     from /etc/passwd, not $HOME, which the caller sets. A binary there is
+#     the user's own file and cannot be told from one an agent planted by
+#     overwriting it; that is the least-bad rule left: a prepended PATH or a
+#     moved HOME no longer chooses, a write over the installed file still
+#     would (and the guard is the tripwire for that).
+# `--system` takes the system directories only: curl and jq, which every
+# supported box has there, are never taken from a home directory.
+# Under this checkout's own suite (cel_under_suite) tests stub tools on PATH
+# or as shell functions, so the caller's PATH stands and cel_tool_bin answers
+# the bare name (found as it always was) - unless the test sets
+# CEL_TOOL_PATH_REAL to prove the production rule.
+_CEL_SYSTEM_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+cel_passwd_home() { # this user's home, from /etc/passwd by EUID
+  local name pw uid gid gecos home shell
+  { while IFS=: read -r name pw uid gid gecos home shell; do
+      if [ "$uid" = "$EUID" ] && [[ "$home" == /?* ]]; then printf '%s' "$home"; return 0; fi
+    done < /etc/passwd; } 2>/dev/null
+  return 1
+}
+_cel_tools_from_caller() { [ -z "${CEL_TOOL_PATH_REAL:-}" ] && cel_under_suite; }
+cel_tool_path() { # -> the PATH a trust decision runs on
+  local home
+  if _cel_tools_from_caller; then printf '%s' "$PATH"; return 0; fi
+  if home="$(cel_passwd_home)"; then printf '%s:%s/.local/bin' "$_CEL_SYSTEM_PATH" "$home"
+  else printf '%s' "$_CEL_SYSTEM_PATH"; fi
+}
+cel_tool_bin() { # <name> [--system] -> its absolute path on cel_tool_path, else fails
+  local d dirs
+  if _cel_tools_from_caller; then printf '%s' "$1"; return 0; fi
+  dirs="$_CEL_SYSTEM_PATH"
+  [ "${2:-}" = --system ] || dirs="$(cel_tool_path)"
+  local IFS=:
+  for d in $dirs; do
+    if [ -f "$d/$1" ] && [ -x "$d/$1" ]; then printf '%s' "$d/$1"; return 0; fi
+  done
+  return 1
+}
+
 # The owner's Hermes desktop starts per-profile SSH servers, not previews or
 # abandoned fixtures. Match executable ownership plus an actual argv option;
 # code/prompt text mentioning the option is not evidence. Never open its token.

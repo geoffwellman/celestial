@@ -491,8 +491,22 @@ the guard these are tripwires matched as text, not a sandbox: a script file
 that sources the library, or a name assembled at run time, still runs -
 which is why `cel forge` checks who is asking itself.
 
+The binaries that see a token or decide a write are not the caller's to
+choose. Every forge operation (`cel forge`, and the library under `cel solo
+land`, the reviewer's PR facts and the steward) and every `cel team` verb runs
+on `cel_tool_path` (lib/common.sh): the system directories, then this user's
+`~/.local/bin` (its home read from `/etc/passwd`, not `$HOME`), never the
+caller's `PATH`. The Forgejo token goes only to the system's `curl`, and `jq`
+must be the system's; both refuse to run otherwise. `ws_gh` resolves `gh` the
+same way (system, then `~/.local/bin`): a `gh` or `yq` installed only under the
+home directory cannot be told from one planted over it, so that is the
+least-bad rule - a prepended `PATH` or a moved `HOME` no longer chooses the
+binary, a write over the installed file still would. Under the suite tests
+stub tools on `PATH`; `CEL_TOOL_PATH_REAL=1` runs the production rule.
+
 - **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
-  `CEL_FORGE_GH` is its test seam.
+  `CEL_FORGE_GH` is its test seam, honoured (as `CEL_WS_GH_BIN`, `GH` and
+  `CEL_AFK_GH` are) only under the suite.
 - **Forgejo** is served over its REST API with curl, as the account whose
   token is in `${XDG_CONFIG_HOME:-~/.config}/cel/forge/<host>.token` (mode
   600, owned by the user; the host as the descriptor names it, e.g.
@@ -500,7 +514,8 @@ which is why `cel forge` checks who is asking itself.
   others, is refused by name before any request. The token is read only for
   a request to that exact host and reaches curl as a config line on its
   stdin - never in argv, a file or a log - and curl follows no redirect.
-  `CEL_FORGE_CURL` is its test seam, honoured only under `CEL_TESTING`; on
+  `CEL_FORGE_CURL` is its test seam, honoured only under `CEL_TESTING` inside
+  the suite; on
   a plain-http repo every operation says on stderr that the token is sent
   unencrypted. List endpoints are read page by page
   until a page comes back empty (a short page proves nothing: the server
