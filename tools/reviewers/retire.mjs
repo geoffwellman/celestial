@@ -43,8 +43,8 @@ function jsonFile(filename, privateMode = false) {
   const evidence = ownedFile(filename, MAX_NATIVE, privateMode);
   return { ...evidence, value: JSON.parse(evidence.bytes.toString('utf8')) };
 }
-function command(bin, args, { json = true, cwd } = {}) {
-  const result = spawnSync(bin, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000, maxBuffer: 2 * 1024 * 1024 });
+function command(bin, args, { json = true, cwd, env } = {}) {
+  const result = spawnSync(bin, args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000, maxBuffer: 2 * 1024 * 1024 });
   requireProof(!result.error && result.status === 0, 'command_failed');
   return json ? JSON.parse(result.stdout) : result.stdout;
 }
@@ -587,16 +587,33 @@ function clearSettledRequest(receipt, nonce) {
   if (saved.value.nonce === nonce && saved.value.phase === 'exit') fs.unlinkSync(filename);
 }
 
+// The gh this retirement runs with the workspace's token is the one the bash
+// side resolved (lib/reviewer-retirement.sh, cel_gh_bin: the box's gh, a test
+// stub only under the suite) and passed as an argument, and so is the PATH it
+// runs on (cel_tool_path): gh starts git and a pager through PATH, and a git
+// planted first on the caller's PATH would be handed GH_TOKEN in its
+// environment. No environment variable here names either.
+export function githubBinary(ghBin) {
+  requireProof(typeof ghBin === 'string' && ghBin !== '', 'github_binary_unavailable');
+  return ghBin;
+}
+export function githubEnv(toolPath, token, base = process.env) {
+  requireProof(typeof toolPath === 'string' && toolPath !== '', 'github_tool_path_unavailable');
+  const env = { ...base, PATH: toolPath, GH_PAGER: 'cat', PAGER: 'cat' };
+  if (token) env.GH_TOKEN = token;
+  return env;
+}
+
 export async function retire(options) {
-  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, declared = [], githubUser = '', repodir = '' } = options;
+  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, declared = [], githubUser = '', repodir = '', ghBin = '', toolPath = '' } = options;
   let proofPath;
   const rex = (args, opts) => command(process.env.CEL_REX_BIN || 'rex', ['--autostart=false', ...args], opts);
   const gh = () => {
-    const bin = process.env.CEL_WS_GH_BIN || 'gh';
+    const bin = githubBinary(ghBin);
     let token;
-    if (githubUser) token = command(bin, ['auth', 'token', '--user', githubUser], { json: false }).trim();
+    if (githubUser) token = command(bin, ['auth', 'token', '--user', githubUser], { json: false, env: githubEnv(toolPath) }).trim();
     requireProof(!githubUser || token, 'github_account_unavailable');
-    const result = spawnSync(bin, ['pr', 'view', number, '--repo', slug, '--json', 'state,headRefOid,headRefName'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000, maxBuffer: 1048576, env: token ? { ...process.env, GH_TOKEN: token } : process.env });
+    const result = spawnSync(bin, ['pr', 'view', number, '--repo', slug, '--json', 'state,headRefOid,headRefName'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000, maxBuffer: 1048576, env: githubEnv(toolPath, token) });
     requireProof(!result.error && result.status === 0, 'github_unavailable');
     const value = JSON.parse(result.stdout);
     requireProof(['OPEN', 'MERGED', 'CLOSED'].includes(value.state) && /^[a-f0-9]{40}$/.test(value.headRefOid) && typeof value.headRefName === 'string' && value.headRefName, 'unknown_remote_pr');
@@ -814,8 +831,8 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
   if (process.argv[2] === '--checkout-preserved') {
     process.exitCode = checkoutPreserved(process.argv[3], process.argv[4]) ? 0 : 1;
   } else {
-    const [repo, pr, pane, agent, dry, receipt, wsname, slug, helpers = '', githubUser = '', repodir = ''] = process.argv.slice(2);
-    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir });
+    const [repo, pr, pane, agent, dry, receipt, wsname, slug, helpers = '', githubUser = '', repodir = '', ghBin = '', toolPath = ''] = process.argv.slice(2);
+    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir, ghBin, toolPath });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exitCode = result.status === 'retired' || (dry === '1' && result.status === 'eligible') ? 0 : result.status === 'protected' ? 3 : 2;
   }

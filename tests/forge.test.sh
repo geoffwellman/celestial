@@ -320,6 +320,139 @@ _fj_ws() { # [extra-yaml]
   _forge_gh_stub; _forgejo_stub "$T"
 }
 _fj_no_gh() { assert_eq "$(cat "$GH_LOG")" "" || { echo "a Forgejo repo reached gh"; return 1; }; }
+# A workspace whose one Forgejo repo is served at a closed local port, with a
+# token for it in the fixture's config: a real curl is refused at once and
+# nothing leaves the box. Call after _fj_ws (its XDG_CONFIG_HOME).
+_closed_port_ws() { # <dir>
+  mkdir -p "$1"
+  printf 'name: closed\nrepos:\n  - name: widget\n    url: git@127.0.0.1:geoff/gizmo.git\n    forge: forgejo\n    host: http://127.0.0.1:9\n' > "$1/workspace.yaml"
+  printf '%s\n' "$FJ_TOKEN" > "$XDG_CONFIG_HOME/cel/forge/127.0.0.1:9.token"
+  chmod 600 "$XDG_CONFIG_HOME/cel/forge/127.0.0.1:9.token"
+}
+# A planted <name> in <dir>: records that it ran, and what reached its stdin.
+_fake_tool() { # <dir> <name> <log>
+  mkdir -p "$1"
+  printf '#!/usr/bin/env bash\n{ echo "called: $*"; cat; } >> %q\nexit 0\n' "$3" > "$1/$2"
+  chmod +x "$1/$2"
+}
+
+# THE TOKEN'S BINARIES ARE THE BOX'S (cel_tool_path, lib/common.sh). Under
+# the suite tests stub tools on PATH; CEL_TOOL_PATH_REAL=1 runs the
+# production rule: a curl first on the caller's PATH is never handed the
+# token - the system curl is - and a jq first on PATH cannot turn someone
+# else's PR into this account's.
+test_forge_token_and_authorisation_never_use_the_callers_path() {
+  _fj_ws
+  _closed_port_ws "$T/closed"
+  local out pc="$T/pathbin"
+  _fake_tool "$pc" curl "$T/fake-curl.log"
+  out="$(cd "$T/closed" && unset CEL_FORGE_CURL; CEL_TOOL_PATH_REAL=1 PATH="$pc:$PATH" cmd_forge whoami widget 2>&1)" \
+    && { echo "a closed port answered: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "curl exit" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/fake-curl.log" ] || { echo "the curl first on PATH was handed the token: $(cat "$T/fake-curl.log")"; rm -rf "$T"; return 1; }
+  # the same through the library a caller like cel solo land uses
+  out="$(unset CEL_FORGE_CURL; CEL_TOOL_PATH_REAL=1 PATH="$pc:$PATH" forge_pr_view "$T/closed" widget 31 2>&1)" \
+    && { echo "a closed port answered: $out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/fake-curl.log" ] || { echo "forge_pr_view handed the token to the curl first on PATH"; rm -rf "$T"; return 1; }
+  # a jq first on PATH that answers this account for any PR's author
+  mkdir -p "$T/jqbin"
+  printf '#!/usr/bin/env bash\ncase "$*" in *".author // \\"\\""*) echo called >> %q; cat >/dev/null; echo geoff; exit 0 ;; esac\nexec %q "$@"\n' \
+    "$T/fake-jq.log" "$(type -P jq)" > "$T/jqbin/jq"
+  chmod +x "$T/jqbin/jq"
+  # under the suite's own rule the fake would decide (proving it would flip it)
+  ( cd "$T" && STUB_FJ_LOGIN=helper-bot CEL_ROLE=solo CEL_PRODUCT=widget PATH="$T/jqbin:$PATH" cmd_forge pr close widget#29 ) >/dev/null 2>&1 \
+    || { echo "fixture: the planted jq did not flip the authorisation"; rm -rf "$T"; return 1; }
+  [ -s "$T/fake-jq.log" ] || { echo "fixture: the planted jq never ran"; rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"; rm -f "$T/fake-jq.log"
+  out="$(cd "$T" && STUB_FJ_LOGIN=helper-bot CEL_ROLE=solo CEL_PRODUCT=widget CEL_TOOL_PATH_REAL=1 PATH="$T/jqbin:$PATH" cmd_forge pr close widget#29 2>&1)" \
+    && { echo "a jq first on PATH authorised closing someone else's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "helper-bot's pull request" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/fake-jq.log" ] || { echo "the jq first on PATH was run"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Which binaries that rule picks: the system's, then the user's ~/.local/bin
+# (its home from /etc/passwd, not $HOME); --system takes the system's only.
+# Under the suite without CEL_TOOL_PATH_REAL, the tests' PATH stubs stand.
+test_cel_tool_bin_resolves_from_the_box_never_the_callers_path() {
+  local T; T="$(mktemp -d)"
+  _fake_tool "$T/bin" jq "$T/log"; _fake_tool "$T/bin" gh "$T/log"
+  assert_eq "$(PATH="$T/bin:$PATH" cel_tool_bin jq)" jq || { rm -rf "$T"; return 1; }
+  local j g
+  j="$(CEL_TOOL_PATH_REAL=1 PATH="$T/bin:$PATH" HOME="$T" cel_tool_bin jq --system)" || { echo "no system jq"; rm -rf "$T"; return 1; }
+  case "$j" in /usr/local/sbin/*|/usr/local/bin/*|/usr/sbin/*|/usr/bin/*|/sbin/*|/bin/*) ;; *) echo "jq resolved to $j"; rm -rf "$T"; return 1 ;; esac
+  g="$(CEL_TOOL_PATH_REAL=1 PATH="$T/bin:$PATH" HOME="$T" cel_tool_bin gh)" || g=""
+  case "$g" in "$T"/*) echo "gh resolved to the caller's $g"; rm -rf "$T"; return 1 ;; esac
+  assert_eq "$(CEL_TOOL_PATH_REAL=1 PATH="$T/bin" cel_tool_bin no-such-tool-anywhere || echo refused)" refused || { rm -rf "$T"; return 1; }
+  case ":$(CEL_TOOL_PATH_REAL=1 PATH="$T/bin:$PATH" HOME="$T" cel_tool_path):" in *":$T/"*) echo "the caller's directory is on the tool path"; rm -rf "$T"; return 1 ;; esac
+  rm -rf "$T"
+}
+
+# EVERY gh IS THE BOX'S (cel_gh_bin), with a workspace's token or without.
+# Outside the suite - a process the runner did not start (detached, then
+# reparented away from it) - neither a gh first on PATH nor a stub named by
+# CEL_WS_GH_BIN, CEL_FORGE_GH or CEL_AFK_GH ever runs: ws_gh, cel forge's
+# gh, afk's, release's and gc's all run the system gh (or refuse, on a box
+# with none). Under the suite those stubs stand, as every other test shows.
+test_gh_outside_the_suite_is_never_a_planted_or_named_stub() {
+  local T o; T="$(mktemp -d)"; o="$T/out"
+  mkdir -p "$T/ws"; printf 'name: ghws\nrepos:\n  - name: widget\n    url: git@github.com:acme/widget.git\n' > "$T/ws/workspace.yaml"
+  _fake_tool "$T/pathbin" gh "$T/path-gh.log"; _fake_tool "$T/stub" gh "$T/stub-gh.log"
+  # shellcheck disable=SC2016  # expanded by the detached shell
+  OUT_T="$T" setsid -f bash -c '
+    while p="$(cut -d" " -f4 /proc/$$/stat)"; [ "$(cat "/proc/$p/comm" 2>/dev/null)" = setsid ]; do sleep 0.05; done
+    export PATH="$OUT_T/pathbin:$PATH" CEL_TESTING=1
+    export CEL_WS_GH_BIN="$OUT_T/stub/gh" CEL_FORGE_GH="$OUT_T/stub/gh" CEL_AFK_GH="$OUT_T/stub/gh"
+    cd "$OUT_T"
+    . "$CEL_ROOT/lib/common.sh"
+    if cel_under_suite; then echo under; else echo outside; fi
+    for call in "ws_gh $OUT_T/ws --version" "_forge_gh $OUT_T/ws --version" "_afk_ws_gh \"\" --version" \
+                "_release_gh \"\" --version" "_gc_gh $OUT_T --version"; do
+      bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/workspace.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; . \"\$CEL_ROOT/lib/afk.sh\"; . \"\$CEL_ROOT/lib/release.sh\"; . \"\$CEL_ROOT/lib/gc.sh\"; $call" 2>&1 \
+        | grep -E -m1 "^gh version|no gh in the system" || echo "NOTHING: $call"
+    done
+    echo finished
+  ' > "$o" 2>&1 < /dev/null
+  local i=0
+  until grep -q '^finished' "$o" 2>/dev/null || [ "$i" -ge 400 ]; do sleep 0.05; i=$((i + 1)); done
+  local out; out="$(cat "$o")"
+  assert_contains "$out" outside || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/path-gh.log" ] || { echo "a gh first on PATH ran: $(cat "$T/path-gh.log")"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/stub-gh.log" ] || { echo "a stub gh named by the environment ran: $(cat "$T/stub-gh.log")"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^gh version|no gh in the system' <<<"$out")" 5 || { echo "$out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# gh STARTS git AND A PAGER THROUGH PATH, and they inherit GH_TOKEN. So the
+# token-carrying gh runs on the tool path (cel_gh_run): a git planted first
+# on the caller's PATH never runs inside a ws_gh call that starts one, and
+# the pager is cat. The gh here is a stub (honoured under the suite) that
+# does what gh does - asks git - with the production rule for everything
+# else (CEL_TOOL_PATH_REAL).
+test_ws_gh_runs_gh_and_its_children_on_the_tool_path() {
+  local T; T="$(mktemp -d)"
+  mkdir -p "$T/ws" "$T/stub" "$T/planted"
+  printf 'name: ghws\ngithub:\n  user: acct-b\nrepos:\n  - name: widget\n    url: git@github.com:acme/widget.git\n' > "$T/ws/workspace.yaml"
+  cat > "$T/stub/gh" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in "auth token") echo synthetic-gh-token; exit 0 ;; esac
+printf 'pager=%s\n' "${GH_PAGER:-unset}"
+git --version >/dev/null 2>&1 && echo "git ran"
+SH
+  printf '#!/usr/bin/env bash\necho "planted git ran with GH_TOKEN=${GH_TOKEN:-unset}" >> %q\necho "git version 0"\n' "$T/planted-git.log" > "$T/planted/git"
+  chmod +x "$T/stub/gh" "$T/planted/git"
+  local out
+  out="$(CEL_TOOL_PATH_REAL=1 CEL_WS_GH_BIN="$T/stub/gh" PATH="$T/planted:$PATH" GH_PAGER=less ws_gh "$T/ws" pr create 2>&1)" \
+    || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "git ran" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "pager=cat" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/planted-git.log" ] || { echo "the git first on PATH ran inside ws_gh: $(cat "$T/planted-git.log")"; rm -rf "$T"; return 1; }
+  # the plain (no workspace token) calls run the same way
+  out="$(. "$CEL_ROOT/lib/afk.sh"; CEL_TOOL_PATH_REAL=1 CEL_AFK_GH="$T/stub/gh" PATH="$T/planted:$PATH" _afk_ws_gh "" pr view 1 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/planted-git.log" ] || { echo "the git first on PATH ran inside afk's gh"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 
 test_forge_repo_describes_an_internal_forgejo_on_plain_http() {
   _forge_ws git@forgejo-ct.internal:geoff/gizmo.git forgejo http://forgejo.internal
@@ -640,11 +773,12 @@ test_forge_writes_check_the_launch_whatever_the_environment_says() {
   cel_under_suite || { echo "this test is not under the suite"; rm -rf "$T"; return 1; }
   # OUTSIDE the suite - a process the runner did not start (detached, then
   # reparented away from it) - exporting CEL_TESTING, a proc tree that vouches
-  # for tools and a stub curl changes nothing: the seams are not honoured
+  # for tools, a stub curl and a fake curl first on PATH changes nothing: the
+  # seams are not honoured and the token goes to the system curl alone (here
+  # at a closed local port, so nothing leaves the box)
   local P="$T/fake-proc" pc="$T/pathbin" o="$T/outside"
-  mkdir -p "$pc"
-  printf '#!/usr/bin/env bash\ncat >/dev/null\necho "$*" >> %q\nprintf "%%s\\n%%s" %q 200\n' "$T/path-curl.log" '{"login":"path-curl"}' > "$pc/curl"
-  chmod +x "$pc/curl"
+  _closed_port_ws "$T/closed"
+  _fake_tool "$pc" curl "$T/path-curl.log"
   # shellcheck disable=SC2016  # expanded by the detached shell
   OUT_P="$P" OUT_T="$T" OUT_PC="$pc" setsid -f bash -c '
     while p="$(cut -d" " -f4 /proc/$$/stat)"; [ "$(cat "/proc/$p/comm" 2>/dev/null)" = setsid ]; do sleep 0.05; done
@@ -656,16 +790,19 @@ test_forge_writes_check_the_launch_whatever_the_environment_says() {
     cd "$OUT_T"
     CEL_TESTING=1 CEL_PROC_DIR="$OUT_P" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch \
       bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; cmd_forge pr close widget#31" && echo closed
-    CEL_TESTING=1 PATH="$OUT_PC:$PATH" bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; forge_whoami \"\$OUT_T\" widget"
+    CEL_TESTING=1 PATH="$OUT_PC:$PATH" bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; forge_whoami \"\$OUT_T/closed\" widget" && echo answered
+    echo finished
   ' > "$o" 2>&1 < /dev/null
   local i=0
-  until grep -q 'login' "$o" 2>/dev/null || [ "$i" -ge 200 ]; do sleep 0.05; i=$((i + 1)); done
+  until grep -q '^finished' "$o" 2>/dev/null || [ "$i" -ge 300 ]; do sleep 0.05; i=$((i + 1)); done
   out="$(cat "$o")"
   assert_contains "$out" outside || { echo "$out"; rm -rf "$T"; return 1; }
-  case "$out" in *under*|*closed*) echo "outside the suite the seams were honoured: $out"; rm -rf "$T"; return 1 ;; esac
+  case "$out" in *under*|*closed$'\n'*|*answered*) echo "outside the suite the seams were honoured: $out"; rm -rf "$T"; return 1 ;; esac
   assert_contains "$out" "launch" || { echo "$out"; rm -rf "$T"; return 1; }
-  # the token went to the curl on PATH, never to CEL_FORGE_CURL's stub
-  assert_contains "$out" '{"login":"path-curl"}' || { echo "$out"; rm -rf "$T"; return 1; }
+  # the system curl was refused at the closed port; neither the curl first on
+  # PATH nor CEL_FORGE_CURL's stub ever saw the token
+  assert_contains "$out" "curl exit" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/path-curl.log" ] || { echo "the curl first on PATH was handed the token: $(cat "$T/path-curl.log")"; rm -rf "$T"; return 1; }
   assert_eq "$(cat "$FJ_LOG")" "" || { echo "the stub named by CEL_FORGE_CURL ran outside the suite"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }

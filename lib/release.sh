@@ -104,10 +104,13 @@ _release_check_value() { # <wsdir> <repo> <slug> <value>
 }
 
 # Every release call acts for the workspace that owns the repo: ws_gh gives it
-# that workspace's `github.user`, or plain `gh` without one.
+# that workspace's `github.user`, or plain `gh` without one - the box's gh
+# either way (cel_gh_bin), never one the caller's PATH offers.
 _release_gh() { # <wsdir-or-empty> <gh args...>
-  local w="$1"; shift
-  if [ -n "$w" ]; then ws_gh "$w" "$@"; else gh "$@"; fi
+  local w="$1" bin; shift
+  if [ -n "$w" ]; then ws_gh "$w" "$@"; return; fi
+  bin="$(cel_gh_bin)" || return 1
+  cel_gh_run "$bin" "$@"
 }
 
 # THE REFUSAL THIS FILE EXISTS FOR. `gh` answers who you are on that repo, so

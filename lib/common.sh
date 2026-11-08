@@ -18,8 +18,9 @@ die()    { c_err "$*"; exit 1; }
 
 # IS THIS PROCESS UNDER ITS OWN CHECKOUT'S TEST SUITE? The test seams that
 # redirect what cel trusts - CEL_PROC_DIR (whose /proc an identity is proven
-# from) and CEL_FORGE_CURL (which binary the forge token goes to) - are
-# honoured only then, and the environment alone never says so: an agent can
+# from), CEL_FORGE_CURL (which binary the forge token goes to) and the gh
+# stubs (CEL_WS_GH_BIN, fed from CEL_FORGE_GH, GH or CEL_AFK_GH: cel_gh_bin) -
+# are honoured only then, and the environment alone never says so: an agent can
 # export anything (`X=CEL_TESTING; export $X=1` included) but cannot change
 # which processes are its ancestors. So the answer is read from the kernel:
 # some ancestor is the same bash as this shell (its /proc/<pid>/exe) running,
@@ -33,7 +34,7 @@ die()    { c_err "$*"; exit 1; }
 # checkout's tests/run.sh, not only for its tests. Any agent code the suite
 # runs - a test file, or a tool a test calls that a PATH put first - can
 # point CEL_PROC_DIR at a tree that vouches for a forged identity, or
-# CEL_FORGE_CURL at a binary that then receives the forge token. That is
+# CEL_FORGE_CURL or a gh stub at a binary that then receives a token. That is
 # accepted: agents run as the owner's Unix user, so they can read the token
 # file and call the forge API directly anyway; nothing in-process stops a
 # determined one. What this does stop is the easy route - an exported
@@ -58,6 +59,80 @@ cel_under_suite() {
     n=$((n + 1))
   done
   return 1
+}
+
+# THE BINARIES A TRUST DECISION RUNS ARE NOT THE CALLER'S TO CHOOSE. PATH is
+# the caller's: an agent that puts a directory of its own first hands cel a
+# `curl` that is piped the Forgejo token, a `gh` run with GH_TOKEN, a `jq`
+# or `yq` whose answer decides who may write. So cel forge and cel team run
+# on cel_tool_path instead, and the token's own binaries are resolved by
+# cel_tool_bin:
+#   - the system directories ($_CEL_SYSTEM_PATH) - where root installs the
+#     distribution's packages; normally root-owned, though /usr/local/bin
+#     is user-writable on some boxes (Homebrew, a chown), and then a binary
+#     there is no better than one in the home directory;
+#   - then this user's ~/.local/bin, where `cel setup` installs what the
+#     distribution does not ship (yq, herdr, sometimes gh) - its home taken
+#     from /etc/passwd, not $HOME, which the caller sets. A binary there is
+#     the user's own file and cannot be told from one an agent planted by
+#     overwriting it; that is the least-bad rule left: a prepended PATH or a
+#     moved HOME no longer chooses, a write over the installed file still
+#     would (and the guard is the tripwire for that).
+# `--system` takes the system directories only: curl and jq, which every
+# supported box has there, are never taken from a home directory.
+# Under this checkout's own suite (cel_under_suite) tests stub tools on PATH
+# or as shell functions, so the caller's PATH stands and cel_tool_bin answers
+# the bare name (found as it always was) - unless the test sets
+# CEL_TOOL_PATH_REAL to prove the production rule.
+_CEL_SYSTEM_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+cel_passwd_home() { # this user's home, from /etc/passwd by EUID
+  local name pw uid gid gecos home shell
+  { while IFS=: read -r name pw uid gid gecos home shell; do
+      if [ "$uid" = "$EUID" ] && [[ "$home" == /?* ]]; then printf '%s' "$home"; return 0; fi
+    done < /etc/passwd; } 2>/dev/null
+  return 1
+}
+_cel_tools_from_caller() { [ -z "${CEL_TOOL_PATH_REAL:-}" ] && cel_under_suite; }
+cel_tool_path() { # -> the PATH a trust decision runs on
+  local home
+  if _cel_tools_from_caller; then printf '%s' "$PATH"; return 0; fi
+  if home="$(cel_passwd_home)"; then printf '%s:%s/.local/bin' "$_CEL_SYSTEM_PATH" "$home"
+  else printf '%s' "$_CEL_SYSTEM_PATH"; fi
+}
+cel_tool_bin() { # <name> [--system] -> its absolute path on cel_tool_path, else fails
+  local d dirs
+  if _cel_tools_from_caller; then printf '%s' "$1"; return 0; fi
+  dirs="$_CEL_SYSTEM_PATH"
+  [ "${2:-}" = --system ] || dirs="$(cel_tool_path)"
+  local IFS=:
+  for d in $dirs; do
+    if [ -f "$d/$1" ] && [ -x "$d/$1" ]; then printf '%s' "$d/$1"; return 0; fi
+  done
+  return 1
+}
+# THE gh THIS PROCESS RUNS. Every gh call - with a workspace's token
+# (ws_gh) or with the box's own login (afk, release, gc) - runs this binary:
+# cel_tool_bin gh, never the caller's PATH. A stub a caller names (the
+# tests' CEL_WS_GH_BIN, CEL_FORGE_GH, GH, CEL_AFK_GH, passed in here) is
+# honoured only under this checkout's own suite (cel_under_suite); anywhere
+# else it names nothing. Fails, saying so, when the box has no gh there.
+cel_gh_bin() { # [stub] -> the gh to run
+  if [ -n "${1:-}" ] && [ "$1" != gh ] && cel_under_suite; then printf '%s' "$1"; return 0; fi
+  cel_tool_bin gh && return 0
+  printf 'cel: no gh in the system directories or ~/.local/bin - cel runs no gh found elsewhere on PATH\n' >&2
+  return 1
+}
+# AND IT RUNS ON THE TOOL PATH. gh starts git (remote and branch resolution,
+# pr create and merge) and a pager through PATH, and they inherit its
+# environment - GH_TOKEN included - so a git planted first on the caller's
+# PATH would be handed the token. Every gh call goes through here: PATH is
+# cel_tool_path, and the pager is cat (never one the caller names). Other
+# caller variables (GH_CONFIG_DIR, GH_EDITOR, BROWSER, ...) still reach gh;
+# the environment is not scrubbed.
+cel_gh_run() { # <gh> <args...>
+  local bin="$1" tp; shift
+  tp="$(cel_tool_path)"
+  PATH="$tp" GH_PAGER=cat PAGER=cat "$bin" "$@"
 }
 
 # The owner's Hermes desktop starts per-profile SSH servers, not previews or

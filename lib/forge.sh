@@ -66,7 +66,7 @@
 #
 # GitHub is served through `gh` as the workspace's account (ws_gh), so a
 # workspace's `github.user` holds here exactly as everywhere else.
-# CEL_FORGE_GH names the gh binary - the one stub seam for tests.
+# CEL_FORGE_GH names a stub gh for tests, honoured only under the suite.
 #
 # Forgejo is served over its REST API (/api/v1) with curl, as the account
 # whose token sits in ${XDG_CONFIG_HOME:-~/.config}/cel/forge/<host>.token
@@ -74,12 +74,13 @@
 # for a request to that exact host and travels on curl's stdin as a config
 # line - never in argv, a log or an error. A repo declared on plain http://
 # says so on stderr for every request that sends its token: it crosses the
-# network unencrypted. CEL_FORGE_CURL names the curl binary - that backend's one
-# stub seam, honoured only under CEL_TESTING inside this checkout's own suite
-# (cel_under_suite, lib/common.sh: the process's ancestry, which no exported
-# variable changes), so a stray or forged variable cannot hand the token to
-# another binary. The token's
-# directory follows XDG_CONFIG_HOME, the standard per-user config root.
+# network unencrypted. The token goes only to the system's curl (cel_tool_bin
+# --system), never one the caller's PATH or a home directory offers.
+# CEL_FORGE_CURL names a stub curl - that backend's one seam, honoured only
+# under CEL_TESTING inside this checkout's own suite (cel_under_suite,
+# lib/common.sh: the process's ancestry, which no exported variable changes),
+# so a stray or forged variable cannot hand the token to another binary. The
+# token's directory follows XDG_CONFIG_HOME, the standard per-user config root.
 # Where Forgejo cannot say what GitHub says, the answer is the conservative
 # one, never a guess:
 #   - `draft` is Forgejo's own `WIP:` title prefix; mergeable=false reads as
@@ -149,8 +150,23 @@ forge_pr_create() { # <wsdir> <repo> <head> <base> <title> <body-file>
 # Resolve the repo, then hand the operation to its provider's backend with
 # the provider's own address: `owner/name` for GitHub, the whole descriptor
 # for Forgejo (its host and API root vary per repo). The workspace's clone
-# supplies the origin when the repo declares no url.
+# supplies the origin when the repo declares no url. Every operation runs on
+# cel_tool_path (lib/common.sh) whoever called it - cel forge, cel solo
+# land, the reviewer's PR facts, the steward - so the binaries that see a
+# token or decide what it is sent to are the box's, never the caller's PATH.
 _forge_call() { # <op> <wsdir> <repo> [args...]
+  local tp
+  tp="$(cel_tool_path)"
+  _forge_tools_ok || return 1
+  PATH="$tp" _forge_call_on_tools "$@"
+}
+# jq decides what every answer says, so it must be the system's.
+_forge_tools_ok() {
+  cel_tool_bin jq --system >/dev/null && return 0
+  printf 'forge: no jq in the system directories (%s) - cel forge runs only the system jq, never one found elsewhere on PATH; install jq from the distribution\n' "$_CEL_SYSTEM_PATH" >&2
+  return 1
+}
+_forge_call_on_tools() { # <op> <wsdir> <repo> [args...]
   local op="$1"
   [ $# -ge 3 ] || { printf 'forge %s: usage: forge_%s <wsdir> <repo> ...\n' "$op" "$op" >&2; return 1; }
   local wsdir="$2" repo="$3" desc provider
@@ -210,8 +226,10 @@ _forge_log_strip() { # [--github] < log
 
 # ---- GitHub, through gh ----------------------------------------------------
 
+# gh as the workspace's account (ws_gh, which resolves the binary itself);
+# CEL_FORGE_GH is the tests' stub, which ws_gh honours only under the suite.
 _forge_gh() { # <wsdir> <gh args...>
-  CEL_WS_GH_BIN="${CEL_FORGE_GH:-gh}" ws_gh "$@"
+  CEL_WS_GH_BIN="${CEL_FORGE_GH:-}" ws_gh "$@"
 }
 
 _FORGE_GH_PR_FIELDS=number,state,headRefOid,headRefName,baseRefName,author,isDraft,mergeable,mergeStateStatus,mergedAt,url,labels
@@ -528,8 +546,17 @@ _forge_fj() { # <host> <METHOD> <url> [json-body]
     printf '%s' "$4" > "$bodyf"
     args+=(--header 'Content-Type: application/json' --data-binary "@$bodyf")
   fi
-  local curl=curl
-  if [ -n "${CEL_TESTING:-}" ] && [ -n "${CEL_FORGE_CURL:-}" ] && cel_under_suite; then curl="$CEL_FORGE_CURL"; fi
+  # The token goes to the system's curl and nothing else: not one found on
+  # the caller's PATH, not one in a home directory.
+  local curl
+  if [ -n "${CEL_TESTING:-}" ] && [ -n "${CEL_FORGE_CURL:-}" ] && cel_under_suite; then curl="$CEL_FORGE_CURL"
+  else
+    curl="$(cel_tool_bin curl --system)" || {
+      printf 'forge: no curl in the system directories (%s) - the token is sent only through the system curl; install curl from the distribution\n' "$_CEL_SYSTEM_PATH" >&2
+      [ -z "$bodyf" ] || rm -f -- "$bodyf"
+      return 1
+    }
+  fi
   out="$(printf 'header = "Authorization: token %s"\n' "$tok" | "$curl" "${args[@]}" "$url")" || rc=$?
   [ -z "$bodyf" ] || rm -f -- "$bodyf"
   [ "$rc" -eq 0 ] || { printf 'forge: %s failed (curl exit %s)\n' "$FJ_REQ" "$rc" >&2; return 1; }
@@ -1004,7 +1031,17 @@ _forge_cli_run_id() { # <wsdir> <repo> <id-or-url> <want> <verb>
   printf '%s' "$id"
 }
 
+# Every verb runs on cel_tool_path (lib/common.sh), not the caller's PATH:
+# the token's binaries and the jq and yq whose answers authorise a write are
+# the box's, whatever directory the caller put first. A temporary PATH also
+# empties bash's command hash, so nothing found earlier on the old one runs.
 cmd_forge() {
+  local tp
+  tp="$(cel_tool_path)"
+  _forge_tools_ok || exit 1
+  PATH="$tp" _cmd_forge "$@"
+}
+_cmd_forge() {
   local usage='usage: cel forge repo|whoami <repo> | cel forge pr view|checks|reviews|ready <repo>#<n> | cel forge pr close <repo>#<n> [--comment-file f] | cel forge pr list <repo> [open|closed|merged|all] [--author L|@me] [--head B] [--limit N] | cel forge pr create <repo> --head <branch> --base <branch> --title <title> --body-file <file> | cel forge run list <repo> [--branch B] [--sha <head>] [--limit N] | cel forge run view <repo> <run-id|url> | cel forge run logs <repo> <job-id|url> [--tail N] [--raw] | cel forge run rerun <repo> <job-id|url>   (each: [--json] [--workspace NAME])'
   local verb="${1:-}" sub=""
   [ $# -eq 0 ] || shift
