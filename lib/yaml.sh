@@ -11,14 +11,20 @@
 # substitutions share $$, so "$out.tmp.$$" is one file for concurrent first
 # reads: one rename wins and the rest fail. mktemp beside the entry keeps the
 # rename on one filesystem, so it stays atomic. A rename that loses to another
-# reader is still a read, when the entry that won is valid JSON.
-_yaml_cache_put() { # <out> <converter...> - converter's stdout becomes <out>
-  local out="$1" tmp; shift
+# reader is still a read when the key is the content hash and the entry that
+# won is valid JSON: it is the parse of the same text. A `nohash-` key is one
+# name for every content, so there the entry standing could be an older
+# text's - a lost rename fails the read instead.
+# mktemp makes entries 0600 where a redirect used the umask. The cache is
+# per user ($XDG_CACHE_HOME, or a private mktemp -d from cel run), never
+# shared, so owner-only is the right mode.
+_yaml_cache_put() { # <out> <fresh> <converter...> - converter's stdout becomes <out>
+  local out="$1" fresh="$2" tmp; shift 2
   tmp="$(mktemp "$out.tmp.XXXXXX" 2>/dev/null)" || return 1
   if ! "$@" > "$tmp" 2>/dev/null; then rm -f "$tmp"; return 1; fi
   mv -f "$tmp" "$out" 2>/dev/null && return 0
   rm -f "$tmp"
-  [ -s "$out" ] && jq -e . "$out" >/dev/null 2>&1
+  [ -z "$fresh" ] && [ -s "$out" ] && jq -e . "$out" >/dev/null 2>&1
 }
 _yaml_json() { # <file> -> path of the cached JSON
   local f="$1" dir key sum fresh=""
@@ -37,7 +43,7 @@ _yaml_json() { # <file> -> path of the cached JSON
   local out="$dir/$key.json"
   if [ -n "$fresh" ] || [ ! -s "$out" ]; then
     mkdir -p "$dir"
-    _yaml_cache_put "$out" yq -c . "$f" || return 1
+    _yaml_cache_put "$out" "$fresh" yq -c . "$f" || return 1
   fi
   printf '%s' "$out"
 }
@@ -83,13 +89,14 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
   # without a content hash is merged afresh on every read. The merge program
   # itself is part of the identity too (`v2`: me:), so a box updated to a new
   # merge never serves a result the old one wrote for the same two files.
-  local dir key out
+  local dir key out fresh=""
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
   key="merged-v2-$(basename "$basej" .json)-$(basename "$localj" .json)"
   out="$dir/$key.json"
-  if [ ! -s "$out" ] || [[ "$key" == *nohash-* ]]; then
+  [[ "$key" == *nohash-* ]] && fresh=1
+  if [ ! -s "$out" ] || [ -n "$fresh" ]; then
     mkdir -p "$dir"
-    _yaml_cache_put "$out" jq -s '
+    _yaml_cache_put "$out" "$fresh" jq -s '
       .[0] as $b | .[1] as $l |
       ($l.role_profiles // {}) as $lrp |
       ($l.products // []) as $lprod |

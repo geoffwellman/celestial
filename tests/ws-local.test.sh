@@ -101,6 +101,43 @@ test_yaml_cache_lost_rename_with_a_valid_entry_is_success() {
   rm -rf "$T"
 }
 
+# WITHOUT A CONTENT HASH THE SHORTCUT IS OFF. A `nohash-` key is one name for
+# every text, so a valid entry standing after a lost rename may be an older
+# text's parse: md5sum is hidden from PATH, the file changes between reads,
+# and every read is the new text or a failure - never the old entry.
+test_yaml_cache_without_md5sum_never_serves_an_older_entry_on_a_lost_rename() {
+  local T; T="$(mktemp -d)"
+  local CEL_YAML_CACHE="$T/cache" OLD_PATH="$PATH" d x
+  mkdir -p "$T/bin"
+  for d in ${PATH//:/ }; do
+    for x in "$d"/*; do
+      [ -x "$x" ] && [ "${x##*/}" != md5sum ] && [ ! -e "$T/bin/${x##*/}" ] && ln -s "$x" "$T/bin/${x##*/}"
+    done
+  done
+  PATH="$T/bin"
+  if command -v md5sum >/dev/null; then PATH="$OLD_PATH"; printf 'md5sum still on PATH\n' >&2; return 1; fi
+  printf 'name: aaaa\n' > "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" aaaa
+  printf 'name: bbbb\n' > "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" bbbb
+  printf 'name: cccc\n' > "$T/w.yaml"
+  mv() { return 1; }
+  local out rc=0; out="$(_yqr -r .name "$T/w.yaml" 2>/dev/null)" || rc=$?
+  mkdir -p "$T/ws"; printf 'name: ws\nenv: {A: base}\n' > "$T/ws/workspace.yaml"
+  printf 'env: {A: one}\n' > "$T/ws/workspace.local.yaml"
+  unset -f mv
+  assert_eq "$(_yqr_ws -r .env.A "$T/ws")" one
+  printf 'env: {A: two}\n' > "$T/ws/workspace.local.yaml"
+  mv() { return 1; }
+  local merged; merged="$(_yqr_ws -r .env.A "$T/ws" 2>/dev/null)" || true
+  unset -f mv
+  PATH="$OLD_PATH"
+  [ "$rc" -ne 0 ] || { printf 'lost rename served [%s] for cccc\n' "$out" >&2; rm -rf "$T"; return 1; }
+  [ "$merged" != one ] || { printf 'lost merge rename served the older local env\n' >&2; rm -rf "$T"; return 1; }
+  assert_eq "$(find "$T/cache" -name '*tmp*' | wc -l)" 0
+  rm -rf "$T"
+}
+
 # --- 1: every routing read goes through the merge ---------------------------
 # A reader that asks workspace.yaml for role_profiles/worker_profiles directly
 # silently ignores the local override - the person whose login can't reach the
