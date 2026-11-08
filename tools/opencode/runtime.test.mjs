@@ -346,6 +346,24 @@ test('the override is decided by the shared guard: no member override, no forge 
   } finally { await f.cleanup(); await rm(temp, { recursive: true, force: true }); }
 });
 
+// OpenCode hands the shared classifier the command text as it is, newlines
+// included, and gets the claude and omp adapters' verdict: a command led by a
+// newline is a command; a heredoc or quoted body is data.
+test('a newline separates commands in the shared guard, and heredoc and quoted bodies stay data', async () => {
+  const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async (bin, args) => {
+    assert.equal(bin, 'bash');
+    return (await execute(bin, args, { env: { ...process.env, CEL_ROOT: repo, CEL_ROLE: 'solo' } })).stdout;
+  } } });
+  try {
+    await f.emit(created());
+    for (const command of ['true\ngh pr merge 3', "bash -c $'true\\ngh pr merge 3'", 'bash <<EOF\ngh pr merge 3\nEOF']) {
+      await assert.rejects(f.shell(command), /cel solo land/, command);
+    }
+    await f.shell("cat > f <<'EOF'\ngh pr merge 3\nEOF");
+    await f.shell('git commit -m "line1\ngh pr merge 3"');
+  } finally { await f.cleanup(); }
+});
+
 test('a classifier that reports its own error (exit 2) allows as before, except a verdict-shaped command; other classifier failures still refuse', async () => {
   let failure;
   const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async () => { throw failure; } } });

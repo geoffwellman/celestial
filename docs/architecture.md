@@ -537,7 +537,7 @@ API, and tea's `approve|lgtm|reject|review` (and any prefix of them, such as
 `tea pr r`) or `tea api` writing there. Paths are read percent-decoded,
 case-folded and without a `#fragment`; wrappers are stripped with their
 options (`env -u X`, `/usr/bin/env`, `xargs -n1`, `xargs -I{}`, `sudo -u`);
-a line with a newline is read both as separate commands and joined. No role
+a path split by a newline inside a quoted string is read joined as well. No role
 sets, imports or deletes a `gh alias` either, since an alias hides what a
 later `gh` command runs. An agent's verdict is recorded with `cel solo
 review` and reported by inbox - the reviewer role and the rendered policy
@@ -551,6 +551,24 @@ verdict, a `gh alias` write or a team member. An adapter whose classifier
 cannot run fails open for everyone but a member, except for a shell command
 that looks like a verdict (the same `VERDICT_SHAPED` text in each adapter),
 which it refuses.
+
+The guard reads a command line as bash does (`_guard_lines` in
+lib/guard.sh), whichever adapter hands it in - all three pass the tool
+call's text as it is, newlines included. A newline ends a command, like `;`,
+`&&`, `||`, `|` and `&`, so a command on a later line is held to every rule
+the first line is. What bash runs nothing from is data: a heredoc body
+(`<<EOF`, `<<-EOF`, `<<'EOF'`; an unquoted one's `$(...)` and backquotes
+excepted), a newline inside a quoted string, a comment. A heredoc fed to a
+shell (`bash <<EOF`, `cat <<EOF | sh`) and a string that is code for one
+(`bash -c`, `sh -c`, `$'...\n...'` given to either, eval, ssh) are commands
+again. A line it cannot end cleanly (an open quote or heredoc) is read the
+cautious way, every newline a separator. The orchestrator-class roles
+(orchestrator, root, core) are judged one command at a time and the line
+takes the strictest verdict, so a sanctioned command (`cel ...`, `gh pr
+comment|review ...`) allows itself and never what is chained or written
+after it. The name tripwires (the forge token, lib/forge.sh, a `CEL_*`
+variable, the suite's environment, a team launch token) still read every
+character, heredoc bodies included.
 
 The binaries that see a token or decide a write are not the caller's to
 choose. Every forge operation (`cel forge`, and the library under `cel solo

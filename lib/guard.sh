@@ -82,8 +82,9 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
   c="${c#"${c%%[![:space:]]*}"}"
   # Reaching into another checkout is never this checkout's state.
   case "$c" in *" -C "*|*--git-dir*|*--work-tree*|*.herdr/worktrees*) return 1;; esac
-  # The verb has to BE the command: in a chain, half of it goes unexamined.
-  case "$c" in *"&"*|*"|"*|*";"*|*'`'*|*'$('*|*">"*|*"<"*) return 1;; esac
+  # The verb has to BE the command: in a chain, half of it goes unexamined
+  # (and a newline is a chain: bash runs the next line as its own command).
+  case "$c" in *"&"*|*"|"*|*";"*|*'`'*|*'$('*|*">"*|*"<"*|*$'\n'*) return 1;; esac
   local -a t
   read -r -a t <<<"$c"
   local n=${#t[@]}
@@ -131,15 +132,217 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
   return 1
 }
 
+# THE COMMANDS A LINE RUNS, READ AS BASH READS THEM: one command per output
+# line. Every adapter - the claude hook, omp/pi and OpenCode (both through
+# guard-classify.sh) - hands the classifier the tool call's command text as
+# it is, newlines included, so a newline ends a command here as it does in
+# bash, and so do `;`, `&`, `|`, `&&`, `||`, `(`, `)`, `$(...)` and
+# backquotes (a redirection's `&`, as in 2>&1 or &>, does not). What bash
+# runs no command from is DATA, kept out of the commands:
+# - a heredoc body (<<EOF, <<-EOF, <<'EOF') is dropped, except for the
+#   $(...) and backquotes an unquoted one expands - unless the line that
+#   opens it feeds it to a shell (bash, sh, eval, source, ., ssh: `bash
+#   <<EOF`, `cat <<EOF | sh`), when its lines are commands;
+# - a newline inside a quoted string ('...', "...", $'...' and its \n,
+#   \x0a, \012 or \cj) is a space (with <join>, nothing: a path split across
+#   lines) - unless the string is code for a shell (`bash -c`, `sh -c`, `su
+#   -c`, `flock -c`, eval, ssh, watch), when it and the string's own `;`, `&`,
+#   `|`, `(` and `)` end a command;
+# - a comment is dropped, and a backslash before a newline joins the lines.
+# A line this reading does not end cleanly - a quote, an expansion or a
+# heredoc left open, a heredoc opened inside a heredoc - is read the cautious
+# way instead: every newline and separator ends a command and nothing is data.
+read -r -d '' _GUARD_LINES_AWK <<'AWK' || :
+# A heredoc body that is data is quiet: only the commands its $(...) and
+# backquotes run are written out.
+function emit(x) { if (!qt[d]) { out = out x; cur[cl[d]] = cur[cl[d]] x } }
+function brk() { out = out "\n"; cur[cl[d]] = ""; ws = 1 }
+function push(t, code) {
+  d++; st[d] = t; cf[d] = code; pc[d] = 0
+  if (t == "T" || t == "C" || t == "B" || t == "A") { cl[d] = d; cur[d] = ""; qt[d] = 0 } else { cl[d] = cl[d - 1]; qt[d] = t == "H" || qt[d - 1] }
+}
+function pop() { if (d > 0) d--; else bad = 1 }
+# Does the command so far hand its next quoted word to a shell as code?
+function iscode(x) {
+  gsub(/[\047"\\]/, "", x)
+  if (x ~ /(^|[^A-Za-z0-9_.-])(ba|z|da|k|mk|a)?sh([ \t].*)?[ \t]-[A-Za-z]*c/) return 1
+  if (x ~ /(^|[^A-Za-z0-9_.-])(su|flock|script)([ \t].*)?[ \t](-[A-Za-z]*c|--command)/) return 1
+  return x ~ /(^|[^A-Za-z0-9_.-])(eval|ssh|watch)([ \t]|$)/
+}
+# Does the line that opens a heredoc feed it to a shell?
+function hdcode(x) {
+  gsub(/[\047"\\]/, "", x)
+  if (x ~ /(^|[^A-Za-z0-9_.-])((ba|z|da|k|mk|a)?sh|eval|source|ssh)([^A-Za-z0-9_.-]|$)/) return 1
+  return x ~ /(^|[;&|(`])[ \t]*\.[ \t]/
+}
+function num(h, base,   i, v) {
+  v = 0
+  for (i = 1; i <= length(h); i++) v = v * base + index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
+  return v
+}
+# The length of the $'...' escape at x[i] when it is a newline, else 0.
+function escnl(x, i,   r) {
+  r = substr(x, i + 1, 9)
+  if (r ~ /^n/) return 2
+  if (r ~ /^c[jJ]/) return 3
+  if (match(r, /^x[0-9A-Fa-f][0-9A-Fa-f]?/) || match(r, /^u[0-9A-Fa-f][0-9A-Fa-f]?[0-9A-Fa-f]?[0-9A-Fa-f]?/) \
+      || match(r, /^U[0-9A-Fa-f][0-9A-Fa-f]?[0-9A-Fa-f]?[0-9A-Fa-f]?[0-9A-Fa-f]?[0-9A-Fa-f]?[0-9A-Fa-f]?[0-9A-Fa-f]?/))
+    return num(substr(r, 2, RLENGTH - 1), 16) == 10 ? RLENGTH + 1 : 0
+  if (match(r, /^[0-7][0-7]?[0-7]?/)) return num(substr(r, 1, RLENGTH), 8) == 10 ? RLENGTH + 1 : 0
+  return 0
+}
+# A heredoc operator at x[i] (`<<` or `<<-`, then its word): the index of its
+# last character, with HW its delimiter, HQ whether it is quoted, HS `<<-`.
+function heredoc(x, i,   j, m, c, w, q, k) {
+  m = length(x); j = i + 2; HS = 0
+  if (substr(x, j, 1) == "-") { HS = 1; j++ }
+  while (j <= m && substr(x, j, 1) ~ /[ \t]/) j++
+  w = ""; q = 0
+  while (j <= m) {
+    c = substr(x, j, 1)
+    if (c ~ /[ \t;&|()<>]/) break
+    if (c == "\047" || c == "\"") {
+      k = index(substr(x, j + 1), c); if (!k) return 0
+      q = 1; w = w substr(x, j + 1, k - 1); j += k + 1; continue
+    }
+    if (c == "\\") { q = 1; w = w substr(x, j + 1, 1); j += 2; continue }
+    w = w c; j++
+  }
+  if (w == "" && !q) return 0
+  HW = w; HQ = q
+  return j - 1
+}
+function hstart() {
+  hmode = hcode ? "code" : hq[hk] ? "skip" : "expand"
+  if (hmode == "expand") push("H", 0)
+  hdp = d
+}
+{ s = NR > 1 ? s "\n" $0 : $0 }
+END {
+  nl = split(s, L, "\n")
+  d = 0; st[0] = "T"; cf[0] = 0; pc[0] = 0; cl[0] = 0; cur[0] = ""; ws = 1; out = ""
+  nh = 0; hact = 0; bad = 0; lstart = 1
+  for (li = 1; li <= nl; li++) {
+    line = L[li]; m = length(line); cont = 0
+    if (hact) {
+      b = line; if (hs[hk]) sub(/^\t+/, "", b)
+      if (b == hd[hk] && d == hdp) {
+        if (hmode == "expand") pop()
+        brk()
+        if (++hk > nh) { hact = 0; nh = 0; lstart = li + 1 } else hstart()
+        continue
+      }
+      if (hmode == "skip") continue
+    }
+    for (ci = 1; ci <= m; ci++) {
+      c = substr(line, ci, 1); nx = substr(line, ci + 1, 1); pv = ci > 1 ? substr(line, ci - 1, 1) : ""; t = st[d]
+      # quoted text: a separator in one handed to a shell as code ends a command
+      if (t == "S" || t == "Q" || t == "D") {
+        if (cf[d] && (c == ";" || c == "|" || c == "(" || c == ")" || (c == "&" && nx != ">" && pv != ">" && pv != "<"))) { brk(); continue }
+      }
+      if (t == "S") { if (c == "\047") pop(); emit(c); continue }
+      if (t == "Q") {
+        if (c == "\047") { pop(); emit(c); continue }
+        if (c == "\\") {
+          k = escnl(line, ci)
+          if (k) { if (cf[d]) brk(); else emit(J); ci += k - 1; continue }
+          emit(c nx); ci++; continue
+        }
+        emit(c); continue
+      }
+      if (c == "\\") {
+        if (ci == m && li < nl && t != "P") { cont = 1; break }
+        emit(c nx); ci++; ws = 0; continue
+      }
+      # expansions open in commands, double quotes, heredoc bodies and ${...}
+      if (c == "$" && nx == "(" && substr(line, ci + 2, 1) == "(") { emit("$(("); push("A", 0); ci += 2; continue }
+      if (c == "$" && nx == "(") { emit("$("); push("C", 0); brk(); ci++; continue }
+      if (c == "$" && nx == "{") { emit("${"); push("P", 0); ci++; ws = 0; continue }
+      if (c == "`") {
+        if (t == "B") { brk(); pop(); emit(c); ws = 0 } else { emit(c); push("B", 0); brk() }
+        continue
+      }
+      if (t == "D" || t == "H") {
+        if (c == "\"" && t == "D") pop()
+        emit(c); continue
+      }
+      if (t == "P") {
+        if (c == "}") pop()
+        else if (c == "\"") push("D", 0)
+        else if (c == "\047" && st[d - 1] != "D" && st[d - 1] != "H") push("S", 0)
+        emit(c); continue
+      }
+      if (t == "A") {
+        if (c == "(") pc[d]++
+        else if (c == ")") {
+          if (pc[d] > 0) pc[d]--
+          else if (nx == ")") { emit("))"); pop(); ci++; ws = 0; continue }
+        }
+        emit(c); continue
+      }
+      # a command: T (the line), C ($(...)), B (`...`)
+      if (c == "\047") { push("S", iscode(cur[cl[d]])); emit(c); ws = 0; continue }
+      if (c == "$" && nx == "\047") { push("Q", iscode(cur[cl[d]])); emit("$\047"); ci++; ws = 0; continue }
+      if (c == "\"") { push("D", iscode(cur[cl[d]])); emit(c); ws = 0; continue }
+      if (c == "#" && ws) break
+      if (c == "(" && nx == "(" && ws) { emit("(("); push("A", 0); ci++; continue }
+      if (c == "<" && nx == "<") {
+        if (substr(line, ci + 2, 1) == "<") { emit("<<<"); ci += 2; ws = 1; continue }
+        k = heredoc(line, ci)
+        if (k) {
+          if (hact) bad = 1
+          nh++; hd[nh] = HW; hq[nh] = HQ; hs[nh] = HS
+          emit(substr(line, ci, k - ci + 1)); ci = k; ws = 0; continue
+        }
+        emit("<<"); ci++; ws = 1; continue
+      }
+      if (c == "&" && (nx == ">" || pv == ">" || pv == "<")) { emit(c); ws = 1; continue }
+      if (c == ";" || c == "&" || c == "|") { brk(); continue }
+      if (c == "(") { pc[d]++; brk(); continue }
+      if (c == ")") {
+        if (t == "C" && pc[d] == 0) { brk(); pop(); emit(c); ws = 0; continue }
+        if (pc[d] > 0) pc[d]--
+        brk(); continue
+      }
+      emit(c); ws = (c == " " || c == "\t" || c == "<" || c == ">")
+    }
+    if (li == nl || cont) continue
+    # the end of a line
+    t = st[d]
+    if (t == "S" || t == "Q" || t == "D" || t == "H" || t == "P") { if (cf[d]) brk(); else emit(J); continue }
+    if (t == "A") { emit(" "); continue }
+    brk()
+    if (nh > 0 && !hact) {
+      opener = L[lstart]; for (k = lstart + 1; k <= li; k++) opener = opener " " L[k]
+      hcode = hdcode(opener); hact = 1; hk = 1; hstart()
+    } else if (!hact) lstart = li + 1
+  }
+  # not ended cleanly: every newline and separator ends a command
+  if (bad || d != 0 || hact) {
+    gsub(/\\\n/, "", s)
+    gsub(/[;&|()`\n]+|\$\(/, "\n", s)
+    out = s
+  }
+  printf "%s", out
+}
+AWK
+_guard_lines() { # <command> [join] -> the commands it runs, one per line
+  printf '%s' "$1" | LC_ALL=C awk -v J="${2- }" "$_GUARD_LINES_AWK"
+}
+
 # THE COMMANDS A SHELL LINE WOULD RUN, one per line, each reduced to the verb
 # that would execute. A substring test on the raw text is evaded by spacing,
 # quotes, global options before the verb or a chain (`cd x && ...`), and
 # refuses `grep "cel solo land"`. So the line is split where a new command
-# starts (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped,
+# starts (a newline, `;`, `&`, `|`, `(`, `)`, `$(`, backtick - inside quotes
+# too, which errs towards deny: guard_classify hands it _guard_lines' reading,
+# where a heredoc or quoted body is data already), quotes are dropped,
 # whitespace is collapsed, and from the front of each piece go: env
-# assignments, wrappers given by name or by path (bash/sh -c, env, command,
-# exec, nohup, time, xargs, sudo/doas, nice/ionice, stdbuf, setsid, timeout
-# N) together with their options and the values of the ones that take one
+# assignments, the keywords a script puts in front of a command (if, then,
+# else, elif, do, while, until, !, {, }), wrappers given by name or by path
+# (bash/sh -c, env, command, exec, nohup, time, xargs, sudo/doas,
+# nice/ionice, stdbuf, setsid, timeout N) together with their options and
+# the values of the ones that take one
 # (`env -u X`, `xargs -n 1`, `xargs -I {}`, `sudo -u root`), a path in front
 # of cel/gh/herdr/tea/curl, and the global options between a tool and its
 # verb (`-C`/`--workspace` for cel, `-R`/`--repo` for gh). The rules then
@@ -149,11 +352,12 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 # command (`c=cel; $c solo land`) or a script file still runs. What this
 # stops is the plausible mistake, spelled any of the ways an agent writes it.
 _guard_segments() { # <command> -> one normalised command per line
-  printf '%s' "$1" | tr '\t\r\n' '   ' \
+  printf '%s' "$1" | tr '\t\r' '  ' \
     | sed -E 's/\$\(/;/g; s/[`();|&]+/\n/g' \
     | sed -E "s/[\"']//g; s/ +/ /g; s/^ //; s/ $//" \
     | sed -E ':a
         s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
+        s#^(if|then|else|elif|do|while|until|!|\{|\})( |$)##; ta
         s#^[^ ]*/(bash|sh|env|command|exec|nohup|time|xargs|sudo|doas|nice|ionice|stdbuf|setsid|timeout)( |$)#\1\2#; ta
         s#^(bash|sh|command|nohup|setsid)( (-o [^ ]+|-[^ ]+))* ##; ta
         s#^env( (-[uC] [^ ]+|--(unset|chdir) [^ ]+|-[^ ]+))* ##; ta
@@ -294,8 +498,9 @@ _guard_tea_words() { # <segment> -> one word per line
 #   tea's own alias table (cmd/pulls/*.go) has only lgtm and a, but its CLI
 #   library can match commands by prefix.
 # A path is read percent-decoded, case-folded, with doubled slashes squeezed
-# and a `#fragment` ignored; a line with a newline in it is read both as
-# separate commands and with the newline removed (a path split across lines).
+# and a `#fragment` ignored. The line is read as bash reads it (_guard_lines:
+# a newline ends a command, a heredoc body is data), and once more with the
+# newlines inside its quoted strings removed (a path split across lines).
 # A comment is not a verdict. Quotes are dropped by _guard_segments, so a
 # comment body that itself spells `-a` after `gh pr review` is refused too:
 # the guard errs towards deny.
@@ -313,6 +518,14 @@ _guard_tea_verdict_word() { # <word>
   return 1
 }
 _guard_forge_verdict() { # <command> -> 0 when a piece posts a forge review verdict
+  local s j
+  s="$(_guard_lines "$1")"
+  _guard_forge_verdict_decoded "$s" && return 0
+  [[ "$1" == *[$'\n\r']* ]] || return 1
+  j="$(_guard_lines "${1//$'\r'/}" "")"
+  [ "$j" != "$s" ] && _guard_forge_verdict_decoded "$j"
+}
+_guard_forge_verdict_decoded() { # <commands> -> as written, then %XX-decoded
   local s="$1" h
   _guard_forge_verdict_in "$s" && return 0
   # %XX decoded: `pulls/5/%72eviews` is the same path to the forge
@@ -320,13 +533,7 @@ _guard_forge_verdict() { # <command> -> 0 when a piece posts a forge review verd
     printf -v h "\\x${BASH_REMATCH[1]}"
     s="${s//"${BASH_REMATCH[0]}"/"$h"}"
   done
-  [ "$s" = "$1" ] || ! _guard_forge_verdict_in "$s" || return 0
-  case "$s" in
-    *[$'\n\r']*)
-      _guard_forge_verdict_in "${s//[$'\n\r']/;}" && return 0
-      _guard_forge_verdict_in "${s//[$'\n\r']/}" && return 0 ;;
-  esac
-  return 1
+  [ "$s" != "$1" ] && _guard_forge_verdict_in "$s"
 }
 _guard_forge_verdict_in() { # <command>
   local seg w c i j n v graphql
@@ -407,13 +614,18 @@ _GUARD_GH_ALIAS_DENY='deny no agent sets, imports or deletes a gh alias - an ali
 
 # THE HUMAN'S ONE-OFF: `CEL_GUARD_ALLOW_ONCE=1 <command>`, spelled exactly,
 # lets that one call skip the rules. Every runtime adapter asks this, through
-# guard-classify.sh or directly, so they agree on it. A team member has none
-# (nobody stands over its pane to approve one), and it never covers a forge
-# review verdict: a person gives that on the forge themselves.
+# guard-classify.sh or directly, so they agree on it. It has to lead a
+# command: on a line of its own (`CEL_GUARD_ALLOW_ONCE=1` then a newline) it
+# sets a variable and leads nothing. A team member has none (nobody stands
+# over its pane to approve one), and it never covers a forge review verdict:
+# a person gives that on the forge themselves.
 guard_override_honoured() { # <role> <command> -> 0 when the one-off lets the call through
-  [[ "$2" =~ ^CEL_GUARD_ALLOW_ONCE=1([[:space:]]|$) ]] || return 1
+  [[ "$2" =~ ^CEL_GUARD_ALLOW_ONCE=1[[:space:]] ]] || return 1
   if [ "$1" = member ] || [ "${CEL_ROLE:-}" = member ]; then return 1; fi
-  if _guard_forge_verdict "$2" || _guard_gh_alias_write "$2"; then return 1; fi
+  local lines first
+  lines="$(_guard_lines "$2")"; first="${lines%%$'\n'*}"
+  [[ "$first" =~ ^CEL_GUARD_ALLOW_ONCE=1[[:space:]]+[^[:space:]] ]] || return 1
+  if _guard_forge_verdict "$2" || _guard_gh_alias_write "$lines"; then return 1; fi
   return 0
 }
 
@@ -1197,16 +1409,22 @@ _guard_rex_writes() { # <command> -> 0 when a piece runs a non-read rex command
 }
 
 guard_classify() { # <role> <command>
-  local role="$1" cmd="$2"
+  local role="$1" raw="$2" cmd
+  # The commands the line runs, one per line, as bash reads it (_guard_lines):
+  # every rule that looks for a COMMAND reads this. The tripwires that look
+  # for a NAME anywhere in the text - the forge token, lib/forge.sh, a CEL_*
+  # variable, the suite's environment, a team launch token - read every
+  # character of it, heredoc bodies included.
+  cmd="$(_guard_lines "$raw")"
   # Every role, `other` included (a reviewer stands outside any workspace).
-  if _guard_names_forge_token "$cmd"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
-  if _guard_forge_verdict "$cmd"; then printf '%s' "$_GUARD_FORGE_VERDICT_DENY"; return 0; fi
+  if _guard_names_forge_token "$raw"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
+  if _guard_forge_verdict "$raw"; then printf '%s' "$_GUARD_FORGE_VERDICT_DENY"; return 0; fi
   if _guard_gh_alias_write "$cmd"; then printf '%s' "$_GUARD_GH_ALIAS_DENY"; return 0; fi
-  if _guard_forge_lib "$cmd"; then printf '%s' "$_GUARD_FORGE_LIB_DENY"; return 0; fi
-  if _guard_cel_env_tamper "$cmd"; then printf '%s' "$_GUARD_CEL_ENV_DENY"; return 0; fi
-  if _guard_suite_tamper "$cmd"; then printf '%s' "$_GUARD_SUITE_TAMPER_DENY"; return 0; fi
+  if _guard_forge_lib "$raw"; then printf '%s' "$_GUARD_FORGE_LIB_DENY"; return 0; fi
+  if _guard_cel_env_tamper "$raw"; then printf '%s' "$_GUARD_CEL_ENV_DENY"; return 0; fi
+  if _guard_suite_tamper "$raw"; then printf '%s' "$_GUARD_SUITE_TAMPER_DENY"; return 0; fi
   if _guard_gateway_rotate "$cmd"; then printf '%s' "$_GUARD_GATEWAY_ROTATE_DENY"; return 0; fi
-  if _guard_cmd_reaches_launch "$cmd"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
+  if _guard_cmd_reaches_launch "$raw"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
   # cel team add's launcher is not a door any agent opens by hand - `other`
   # (a reviewer) included: a member is added, and admitted against the box
   # budget, by `cel team add`.
@@ -1235,16 +1453,13 @@ guard_classify() { # <role> <command>
   fi
   case "$role" in other) printf allow; return 0;; esac
 
-  # A forge changed by hand (curl at its API, tea): checked before the
-  # sanctioned paths below, so `cel ...; curl -XPOST ...` is not waved through
-  # on the strength of its first half.
+  # A forge changed by hand (curl at its API, tea), anywhere in the line.
   if _guard_forge_raw_write "$cmd"; then
     printf 'deny orchestrators do not change forge state directly - the product'"'"'s solo agent opens PRs and lands them (cel solo land)'
     return 0
   fi
-  # The sanctioned write paths. These are the mechanism; refusing them would
-  # refuse the orchestrator's actual job. Opening a PR is not among them: the
-  # solo agent opens PRs, an orchestrator reads them.
+  # Opening a PR is not an orchestrator's: the solo agent opens PRs, an
+  # orchestrator reads them.
   if _guard_starts "$cmd" 'cel forge pr create'; then
     printf 'deny the product'"'"'s solo agent opens pull requests; an orchestrator reads them (cel forge pr view|checks|reviews|list)'
     return 0
@@ -1255,31 +1470,49 @@ guard_classify() { # <role> <command>
     printf 'deny the workspace root closes, readies and reruns nothing on a forge; the product'"'"'s own agent does'
     return 0
   fi
-  case "$cmd" in
-    cel-linear\ *|*\ cel-linear\ *|*/cel-linear\ *) printf allow; return 0;;
-    cel\ *|*\ cel\ *|*/bin/cel\ *)                  printf allow; return 0;;
-    *gh\ pr\ comment*|*gh\ pr\ review*|*gh\ issue\ comment*|*gh\ pr\ checks*) printf allow; return 0;;
-  esac
-
-  # The orchestrator's own checkout state: see _guard_orch_owns_checkout above.
-  # Root is untouched - its rules below already allow git in its config repo
-  # and deny anything reaching into repos/ or a herdr worktree.
+  # The orchestrator's own checkout state: see _guard_orch_owns_checkout above
+  # (one command, never a chain). Root is untouched - its rules below already
+  # allow git in its config repo and deny anything reaching into repos/ or a
+  # herdr worktree.
   if [ "$role" = orchestrator ] && _guard_orch_owns_checkout "$cmd"; then
     printf allow; return 0
   fi
+  # THE REST IS JUDGED ONE COMMAND AT A TIME, and the line's verdict is the
+  # strictest of its commands': a sanctioned command allows itself, never the
+  # commands chained or written after it (`cel fleet; gh pr merge 3`).
+  local seg v
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    [[ "$seg" == *[![:space:]]* ]] || continue
+    v="$(_guard_orch_command "$role" "$seg" "$cmd")"
+    [ "$v" = allow ] || { printf '%s' "$v"; return 0; }
+  done <<<"$cmd"
+  printf allow
+}
+
+# ONE COMMAND of an orchestrator-class line (orchestrator, root, core).
+_guard_orch_command() { # <role> <command> <the whole line> -> allow | deny <reason>
+  local role="$1" cmd="$2" line="$3" head=""
+  # The sanctioned commands. These are the mechanism; refusing them would
+  # refuse the orchestrator's actual job - and one allows only itself.
+  case "$cmd" in *cel*|*gh*) IFS= read -r head < <(_guard_segments "$cmd") || : ;; esac
+  case "$head" in
+    cel|cel\ *|cel-linear|cel-linear\ *) printf allow; return 0;;
+    gh\ pr\ comment|gh\ pr\ comment\ *|gh\ pr\ review|gh\ pr\ review\ *|gh\ issue\ comment|gh\ issue\ comment\ *|gh\ pr\ checks|gh\ pr\ checks\ *)
+      printf allow; return 0;;
+  esac
 
   # Repository mutation. An ORCHESTRATOR's cwd is a product checkout, so any
   # git write from it is a product write - denied, in its own checkout or a
   # herdr worktree alike. ROOT's cwd is the workspace directory, which is
   # itself a small git repo of config (workspace.yaml, layouts, notes) that
   # root and the owner legitimately commit to; so for root a git write is
-  # denied only when the command reaches INTO a product checkout (repos/) or a
-  # herdr worktree.
+  # denied only when the line reaches INTO a product checkout (repos/, also by
+  # an earlier cd) or a herdr worktree.
   if _guard_git_writes "$cmd"; then
     local product=1
     if [ "$role" = root ]; then
       product=0
-      case "$cmd" in *repos/*|*.herdr/worktrees*|*\ -C\ *) product=1;; esac
+      case "$line" in *repos/*|*.herdr/worktrees*|*\ -C\ *) product=1;; esac
     fi
     if [ "$product" -eq 1 ]; then
       printf 'deny orchestrators do not write to repositories - the product'"'"'s solo agent builds it, opens the PR and lands it (cel solo land)'

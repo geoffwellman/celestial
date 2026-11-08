@@ -1088,3 +1088,101 @@ test_omp_adapter_fails_closed_on_a_verdict_shaped_command() {
   assert_eq "$(jq -r .block <<<"$out")" true || { rm -rf "$R"; return 1; }
   rm -rf "$R"
 }
+
+# --- a newline is a command separator, as bash reads it -----------------------
+# Every adapter (claude hook, omp/pi, OpenCode via guard-classify.sh) hands the
+# classifier the tool call's command text as it is, newlines included; the
+# guard reads a newline the way bash does. A command led by a newline is a
+# command: one probe per class of rule, the `$'..\n..'` forms bash -c runs as
+# well, and the keywords a multi-line script puts in front of a command.
+test_a_command_after_a_newline_is_a_command() {
+  local c
+  for c in $'true\ngh pr merge 3' $'echo ok\n  gh -R a/b pr merge 5' "bash -c \$'true\\ngh pr merge 3'" \
+           "bash -c \$'true\\x0agh pr merge 3'" $'bash -c "true\ngh pr merge 3"' $'sh -c \'true\ngh pr merge 3\'' \
+           $'bash <<EOF\ngh pr merge 3\nEOF' $'cat <<EOF | bash\ngh pr merge 3\nEOF' \
+           $'if true\nthen gh pr merge 3\nfi' $'git status # don\'t\ngh pr merge 3' $'true \\\n&& gh pr merge 3' \
+           $'cat > f <<EOF\nx\nEOF\ngh pr merge 3' $'cat > f <<EOF\n$(gh pr merge 3)\nEOF' \
+           $'true\ncurl -XPOST http://forgejo.internal/api/v1/repos/o/r/pulls/3/merge' $'true\ncel run core' \
+           $'true\ncel solo review widget#7 approved --head x --by me'; do
+    _deny "$(guard_classify solo "$c")" "solo: $c" || return 1
+  done
+  _deny "$(guard_classify core $'true\ncel solo land widget#7')" 'core lands' || return 1
+  for c in $'git checkout main\ngit commit -m x' $'git checkout main\ngit reset --hard origin/x' \
+           $'gh pr edit 12 --add-label x\ngh pr merge 12' $'true\nrm repos/widget/x.ts'; do
+    _deny "$(guard_classify orchestrator "$c")" "orchestrator: $c" || return 1
+  done
+  _team_ws
+  for c in $'git status\ngit push origin main' $'true\nrm ../../team.json' $'true\ngh pr merge 3' \
+           $'true\ncel run member --team login --member x' $'rex ls\nrex kill S'; do
+    _deny "$(_builder guard_classify member "$c")" "builder: $c" || { rm -rf "$T"; return 1; }
+  done
+  for c in $'ls\ngit commit -m x' $'ls\nrm team.json' $'ls\necho x > events.jsonl'; do
+    _deny "$(_ro guard_classify member "$c")" "qa: $c" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+  # the one-off covers a command it leads, not one on the line after it
+  ! guard_override_honoured solo $'CEL_GUARD_ALLOW_ONCE=1\ngh pr merge 3' || { echo "override led only a newline"; return 1; }
+  _deny "$(guard_classify solo $'CEL_GUARD_ALLOW_ONCE=1\ngh pr merge 3')" 'override line' || return 1
+  guard_override_honoured solo $'CEL_GUARD_ALLOW_ONCE=1 git commit -m x\ngit push' || { echo "override refused its own line"; return 1; }
+}
+# ...but a line inside a heredoc, a quoted string or a comment is data, not a
+# command: none of these runs what its body spells.
+test_heredoc_and_quoted_bodies_are_data() {
+  local c
+  for c in $'cat > f <<\'EOF\'\ngh pr merge 3\nEOF' $'cat > f <<EOF\ngh pr merge 3\ncel run core\nEOF' \
+           $'cat > f <<-EOF\n\tgh pr merge 3\n\tEOF' $'cat > f <<"EOF"\ndon\'t gh pr merge 3\nEOF\necho done' \
+           $'git commit -m "line1\ngh pr merge 3"' $'git commit -m \'line1\ngh pr merge 3\'' \
+           "git commit -m \$'line1\\ngh pr merge 3'" $'git commit -F - <<\'EOF\'\nfix\n\ngh pr merge 3\nEOF' \
+           $'git commit -m "$(cat <<\'EOF\'\nfix: x\n\ngh pr merge 3\nEOF\n)"' $'git status # ; gh pr merge 3' \
+           $'cat > f <<\'EOF\'\ngh pr review 5 --approve\nEOF' $'git commit -m "x\ngh pr review 5 -a"'; do
+    assert_eq "$(guard_classify solo "$c")" allow || { echo "solo refused: $c"; return 1; }
+  done
+  for c in $'cat > .cel/notes.md <<\'EOF\'\ngh pr merge 3\ngit push origin main\nrm repos/widget/x.ts\nEOF' \
+           $'cel inbox send root "done\ngit push origin main"' $'cel inbox send root "$(cat <<\'EOF\'\nmerged; gh pr merge 3\nEOF\n)"'; do
+    assert_eq "$(guard_classify orchestrator "$c")" allow || { echo "orchestrator refused: $c"; return 1; }
+  done
+  _team_ws
+  assert_eq "$(_builder guard_classify member $'cat > notes.txt <<\'EOF\'\ngit push origin main\nrm ../../team.json\nEOF')" allow \
+    || { echo "builder refused a heredoc"; rm -rf "$T"; return 1; }
+  assert_eq "$(_ro guard_classify member $'cat > artifacts/qa/r.md <<\'EOF\'\ngit commit -m x\nrm team.json\nEOF')" allow \
+    || { echo "qa refused a heredoc"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A LINE IS JUDGED COMMAND BY COMMAND, and its verdict is the strictest of
+# them: a sanctioned command (`cel ...`, `gh pr comment|review ...`) allows
+# itself, never the commands chained or written after it.
+test_each_command_in_a_line_is_judged_on_its_own() {
+  local role push c
+  for role in orchestrator root core; do
+    push='git push origin main'; [ "$role" != root ] || push='git -C repos/widget push origin main'
+    for c in "$push && cel fleet" "cel fleet && $push" 'cel fleet; gh pr merge 3' 'gh pr comment 3 -b x; gh pr merge 3' \
+             "$push"$'\ncel fleet' $'cel fleet\n'"$push" $'cel fleet\ngh pr merge 3' $'gh pr comment 3 -b x\ngh pr merge 3' \
+             'bash -c "cel fleet; gh pr merge 3"' 'cel inbox send x "$(gh pr merge 3)"'; do
+      _deny "$(guard_classify "$role" "$c")" "$role: $c" || return 1
+    done
+    for c in 'cd /x && cel fleet' 'cel inbox send root "status; git push later"' 'gh pr comment 3 --body "a; gh pr merge 3"' \
+             'cel fleet | jq .' 'cel-linear state WG-1 "In Progress" && cel fleet' 'timeout 30 /home/x/bin/cel fleet'; do
+      assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused: $c"; return 1; }
+    done
+  done
+}
+# The three adapters hand the classifier the same text and get the same
+# verdict: the claude hook (JSON on stdin), omp/pi (its extension) and
+# OpenCode's guard-classify.sh (argv, tools/opencode/runtime.mjs).
+test_every_adapter_reads_a_newline_as_a_separator() {
+  _gws
+  CEL_ROLE=solo _hook "$T/repos/widget" Bash '{"command":"true\ngh pr merge 3"}' \
+    && { echo "claude hook allowed a newline-led merge"; rm -rf "$T"; return 1; }
+  assert_contains "$HOOK_ERR" "cel solo land" || { rm -rf "$T"; return 1; }
+  CEL_ROLE=solo _hook "$T/repos/widget" Bash '{"command":"cat > f <<'"'"'EOF'"'"'\ngh pr merge 3\nEOF"}' \
+    || { echo "claude hook refused a heredoc: $HOOK_ERR"; rm -rf "$T"; return 1; }
+  local out
+  out="$(CEL_ROLE=solo _omp_guard "$T/repos/widget" $'true\ngh pr merge 3')"
+  assert_eq "$(jq -r .block <<<"$out")" true || { echo "omp allowed a newline-led merge"; rm -rf "$T"; return 1; }
+  assert_eq "$(CEL_ROLE=solo _omp_guard "$T/repos/widget" $'cat > f <<\'EOF\'\ngh pr merge 3\nEOF')" null || { rm -rf "$T"; return 1; }
+  out="$(CEL_ROLE=solo bash "$CEL_ROOT/tools/hooks/guard-classify.sh" command "$T/repos/widget" $'true\ngh pr merge 3')"
+  _deny "$out" 'guard-classify.sh: newline-led merge' || { rm -rf "$T"; return 1; }
+  out="$(bash "$CEL_ROOT/tools/hooks/guard-classify.sh" command "$T/repos/widget" $'cel fleet\ngh pr merge 3')"
+  _deny "$out" 'guard-classify.sh: orchestrator merge after cel' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
