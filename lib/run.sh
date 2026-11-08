@@ -1085,6 +1085,8 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
   local -a GATEWAY_ENV=()
   _run_profile_gateway_setup "$runtime" core "$((1 - dry))" "$((1 - dry))"
   local envprefix dry_envprefix prefix_required=0
+  # The line a restart types or scripts is built for its pane's host.
+  _run_restart_backend "$RESTART_PANE" || true
   envprefix="$(_run_launch_env core "$cwd" "$AGENT_ROLE_FILE" root "$runtime")"
   dry_envprefix="$envprefix"
   if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
@@ -1096,11 +1098,11 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
   local label=celestial/core
   if [ -n "$RESTART_PANE" ]; then
     _run_restart_in_place core "$RESTART_PANE" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" "$dry" core "$runtime" "$cwd"
-    return 0
+    return $?
   fi
   if [ "${session_backend:-herdr}" = rex ]; then
     if [ "$dry" = 1 ]; then
-      printf 'rex new core --cwd %s --shell=none -- <private launch script: %s %s>\n' "$cwd" "$runtime" "$(_run_dry_agent_args)"
+      printf 'rex new core --cwd %s --shell=none -- <private launch script: %s%s>\n' "$cwd" "$(_rex_launch_line "$runtime" "$dry_envprefix" "$runtime" run)" "$(_run_dry_agent_args)"
     else
       _rex_launch core "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}"
     fi
@@ -1398,19 +1400,49 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   return 0
 }
 
+# A RESTART KEEPS ITS PANE'S HOST. The backend a launch names (flag, else
+# CEL_SESSION_BACKEND, else the workspace's session_backend, else herdr)
+# applies to new sessions only, so a restart's line is built for the host of
+# the pane it replaces. The two hosts' lines differ: a Herdr pane is typed the
+# OpenCode launcher in its env prefix (_run_launch_env), a Rex script adds its
+# own (_rex_launch_line). A Rex agent restarted from a workspace defaulting to
+# Herdr once got both - `node launch.mjs -- node launch.mjs -- opencode ...`,
+# refused by the outer launcher (unsupported_argument) after the agent was
+# already stopped. Sets the caller's session_backend; 0 when it changed.
+_run_restart_backend() { # <restart-pane>
+  local host
+  case "$1" in '') return 1 ;; rex/*) host=rex ;; *) host=herdr ;; esac
+  [ "${session_backend:-herdr}" != "$host" ] || return 1
+  session_backend="$host"
+}
+
 # RESTART IN PLACE: exit the agent in its pane, leaving the pane and its
 # shell, and start the current launch line there under the same name.
+# A Rex agent is stopped only once its relaunch line has passed its own
+# launcher's admission (rex_launch_check): a line that would be refused leaves
+# the agent running. A relaunch that still dies takes its terminal with it
+# (rex_launch_settle), and the restart says so and how to bring it back.
 _run_restart_in_place() { # <role> <pane> <label> <envprefix> <dry-envprefix> <prefix-required> <dry-run> <agent-name> <runtime> <cwd>
   local role="$1" pane="$2" label="$3" envprefix="$4" dry_envprefix="$5" prefix_required="$6"
   local dry_run="$7" agent_name="$8" runtime="$9" cwd="${10}"
   case "$pane" in rex/*)
     if [ "$dry_run" = 1 ]; then
-      printf 'rex block close <owned terminal>; rex new %s -- %s %s\n' "$agent_name" "$runtime" "$(_run_dry_agent_args)"
+      printf 'rex block close <owned terminal>; rex new %s --cwd %s --shell=none -- <private launch script: %s%s>\n' \
+        "$agent_name" "$cwd" "$(_rex_launch_line "$runtime" "$dry_envprefix" "$runtime" run)" "$(_run_dry_agent_args)"
       return 0
     fi
+    local back="cel $(jq -r 'join(" ")' <<<"${_REX_RELAUNCH:-[]}")" src=0
+    rex_launch_check "$agent_name" "$runtime" "$cwd" "$envprefix" "${AGENT_ARGS[@]}" \
+      || die "cel run $role --restart: the relaunch line of $agent_name was refused by its launcher - $agent_name was NOT stopped and still runs in $pane"
     rex_agent_stop "$pane" || die "cel run: could not stop Rex terminal $pane"
-    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}"
-    return $? ;;
+    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || return $?
+    rex_launch_settle "$agent_name" "$runtime" || src=$?
+    case "$src" in
+      0) return 0 ;;
+      1) c_err "cel run $role --restart: $agent_name was stopped and its relaunch exited during startup; its Rex terminal was closed and nothing of $agent_name is running. Bring it back with: $back" ;;
+      *) c_err "cel run $role --restart: $agent_name was stopped and its relaunch exited during startup, and its Rex terminal $_REX_PANE could not be closed - close it (rex ls), then bring $agent_name back with: $back" ;;
+    esac
+    return 1 ;;
   esac
   if [ "$dry_run" -eq 1 ]; then
     printf 'herdr pane send-keys %s esc ctrl+c ctrl+c\n' "$pane"
@@ -2699,6 +2731,11 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       "or name and adopt it: cel ws up $(ws_name "$wsdir")" "$wsdir"
     resume_session="$RESUME_SESSION"; restart_pane="$RESTART_PANE"
   fi
+  # The line a restart types or scripts is built for its pane's host.
+  if _run_restart_backend "$restart_pane"; then
+    envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
+    dry_envprefix="$envprefix"
+  fi
   local _REX_RELAUNCH=""
   [ "$role" != root ] && [ "$role" != orchestrator ] || _REX_RELAUNCH="$(_run_rex_relaunch)"
   # A Claude lane: trusted folder and, for a fresh session, a first turn (see
@@ -2774,12 +2811,14 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     esac
     if [ "$dry_run" = 1 ]; then
       [ -z "$_REX_HOST" ] || host_session="$(_rex_host_session "$_REX_HOST" "$wsdir")" || host_session=""
+      # The exact line the private script runs, secret words masked.
+      local dry_line; dry_line="$(_rex_launch_line "$runtime" "$dry_envprefix" "$runtime" run)"
       if [ -n "$host_session" ]; then
-        printf 'rex window new -s %s %s --cwd %s --shell=none --focus=false -- <private launch script: %s %s>\n' \
-          "$host_session" "$agent_name" "$cwd" "$runtime" "$(_run_dry_agent_args)"
+        printf 'rex window new -s %s %s --cwd %s --shell=none --focus=false -- <private launch script: %s%s>\n' \
+          "$host_session" "$agent_name" "$cwd" "$dry_line" "$(_run_dry_agent_args)"
       else
         [ -z "$_REX_HOST" ] || printf '(%s has no provable live Rex session: %s opens in a session of its own)\n' "$_REX_HOST" "$agent_name"
-        printf 'rex new %s --cwd %s --shell=none -- <private launch script: %s %s>\n' "$agent_name" "$cwd" "$runtime" "$(_run_dry_agent_args)"
+        printf 'rex new %s --cwd %s --shell=none -- <private launch script: %s%s>\n' "$agent_name" "$cwd" "$dry_line" "$(_run_dry_agent_args)"
       fi
       return 0
     fi

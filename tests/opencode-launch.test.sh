@@ -82,8 +82,98 @@ _ocl_down() {
     [ -f "$f" ] && _rex_live "$f" || continue
     p="$(jq -r .pid "$f")"; [ "$p" = "$$" ] || kill "$p" 2>/dev/null || true
   done
-  unset CEL_REX_STATE CEL_REX_BIN CEL_PROC_ROOT CEL_MANIFEST CEL_MANIFEST_CACHE CEL_ORCH_SESSIONS OPENCODE_DB CEL_OPENCODE_AGENT CEL_OPENCODE_CONFIG_FILE AGENT_ROLE_FILE
+  if [ -n "${FAKE_REX_DIR:-}" ]; then
+    for p in $(jq -r '.pids[]?' "$FAKE_REX_DIR/state.json" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
+  fi
+  unset CEL_REX_STATE CEL_REX_BIN CEL_PROC_ROOT CEL_MANIFEST CEL_MANIFEST_CACHE CEL_ORCH_SESSIONS OPENCODE_DB CEL_OPENCODE_AGENT CEL_OPENCODE_CONFIG_FILE AGENT_ROLE_FILE FAKE_REX_DIR
   _gwc_teardown
+}
+
+_ocl_wait_file() { local i; for ((i=0;i<100;i++)); do [ -f "$1" ] && return 0; sleep 0.1; done; return 1; }
+
+# --restart OF A LIVE REX AGENT, AS THE OWNER TYPES IT: no --session-backend,
+# in a workspace that names none (Herdr by default) - the incident's line.
+# The stateful fake Rex (sessions > windows > blocks, real processes), the real
+# launcher and the native fixture. widget-orch is left idle on ses_SavedNative.
+_ocl_rex_live() {
+  export FAKE_REX_DIR="$T/fake-rex" CEL_REX_BIN="$CEL_ROOT/tests/lib/fake-rex"
+  _run_sessions_record "$T/repos/widget" ses_SavedNative
+  local out tmp
+  out="$(cd "$T" && cmd_run solo --product widget --session-backend rex 2>&1)" || { echo "$out"; return 1; }
+  _ocl_wait_file "$CEL_REX_STATE/received-argv" || { echo "$out"; echo 'the first launch never reached its TUI'; return 1; }
+  tmp="$(mktemp "$CEL_REX_STATE/.idle.XXXXXX")"
+  jq '.agent_status = "idle"' "$CEL_REX_STATE/widget-orch.json" > "$tmp" && mv "$tmp" "$CEL_REX_STATE/widget-orch.json"
+  rm -f "$CEL_REX_STATE/received-argv"
+}
+# The first launch's claim (taken for no pane) has done its job once the agent
+# is live; a restart of that pane past the claim window is the owner's case.
+_ocl_restart() { ( unset CEL_SESSION_BACKEND; export CEL_SESSION_CLAIM_SECS=0; cd "$T" && cmd_run solo --product widget --restart "$@" 2>&1 ); }
+_ocl_rex_sessions_with_terminals() {
+  jq '[.sessions[] | select([.windows[].layers[].blocks[]] | length > 0)] | length' "$FAKE_REX_DIR/state.json"
+}
+
+test_opencode_rex_restart_relaunches_through_one_guarded_launcher() {
+  _ocl_setup
+  _ocl_rex_live || { _ocl_down; return 1; }
+  local old new out
+  old="$(jq -r .pid "$CEL_REX_STATE/widget-orch.json")"
+  out="$(_ocl_restart)" || { echo "$out"; _ocl_down; return 1; }
+  _ocl_wait_file "$CEL_REX_STATE/received-argv" || { echo "$out"; echo 'the relaunch never reached its TUI'; _ocl_down; return 1; }
+  assert_contains "$(cat "$CEL_REX_STATE/received-argv")" ses_SavedNative
+  ! kill -0 "$old" 2>/dev/null || { echo 'the old runtime survived its restart'; _ocl_down; return 1; }
+  _rex_live "$CEL_REX_STATE/widget-orch.json" || { echo 'the relaunched runtime is not live'; _ocl_down; return 1; }
+  new="$(jq -r .pid "$CEL_REX_STATE/widget-orch.json")"
+  [ "$new" != "$old" ] || { _ocl_down; return 1; }
+  # The runtime the private script exec'd: one guarded launcher, then the
+  # native executable and the argv the launcher admits.
+  local -a argv; mapfile -d '' -t argv < "/proc/$new/cmdline"
+  assert_eq "${argv[*]:1}" "$CEL_ROOT/tools/opencode/launch.mjs -- $T/bin/opencode --standalone --auto --session ses_SavedNative"
+  _ocl_down
+}
+
+test_opencode_rex_restart_dry_run_prints_the_line_the_restart_runs() {
+  _ocl_setup
+  _ocl_rex_live || { _ocl_down; return 1; }
+  local out launcher
+  out="$(_ocl_restart --dry-run)" || { echo "$out"; _ocl_down; return 1; }
+  launcher="$(opencode_launch_command)"
+  assert_contains "$out" "${launcher}opencode --standalone --auto --session ses_SavedNative>"
+  local rest="${out#*"$launcher"}"
+  case "$rest" in *launch.mjs*) echo "a second launcher in the restart line: $out"; _ocl_down; return 1 ;; esac
+  _ocl_down
+}
+
+test_opencode_rex_restart_refused_relaunch_never_stops_the_agent() {
+  _ocl_setup
+  _ocl_rex_live || { _ocl_down; return 1; }
+  local old out rc=0
+  old="$(jq -r .pid "$CEL_REX_STATE/widget-orch.json")"
+  # A relaunch line with an argument the launcher refuses (here a --model).
+  out="$(_run_retry_overlay_args() { [ "$1" != opencode ] || AGENT_ARGS=(--model ompgw-codex/gpt-6.1-sol "${AGENT_ARGS[@]}"); }
+    _ocl_restart)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a refused relaunch reported success: $out"; _ocl_down; return 1; }
+  assert_contains "$out" 'reason=unsupported_argument'
+  assert_contains "$out" 'was NOT stopped'
+  _rex_live "$CEL_REX_STATE/widget-orch.json" || { echo 'the agent was stopped for a refused relaunch'; _ocl_down; return 1; }
+  assert_eq "$(jq -r .pid "$CEL_REX_STATE/widget-orch.json")" "$old"
+  ! grep -q '^block close' "$FAKE_REX_DIR/calls" || { echo 'its terminal was closed'; _ocl_down; return 1; }
+  assert_eq "$(jq '.sessions | length' "$FAKE_REX_DIR/state.json")" 1
+  _ocl_down
+}
+
+test_opencode_rex_restart_failed_relaunch_leaves_no_dead_terminal() {
+  _ocl_setup
+  _ocl_rex_live || { _ocl_down; return 1; }
+  local out rc=0
+  # Admissible argv, but the native server dies: the launcher refuses after
+  # the old agent was stopped (server_exited).
+  out="$(export CEL_FIXTURE_SERVE=exit; _ocl_restart)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a failed relaunch reported success: $out"; _ocl_down; return 1; }
+  assert_contains "$out" 'its Rex terminal was closed'
+  assert_contains "$out" 'Bring it back with: cel run solo --product widget --workspace alpha --session-backend rex'
+  assert_eq "$(_ocl_rex_sessions_with_terminals)" 0
+  [ ! -e "$CEL_REX_STATE/widget-orch.json" ] || { echo 'a dead receipt was left behind'; _ocl_down; return 1; }
+  _ocl_down
 }
 
 test_opencode_parent_launch_owns_affinity_and_tracks_title_rewritten_native_holder() {
