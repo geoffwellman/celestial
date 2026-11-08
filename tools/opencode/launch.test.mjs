@@ -12,7 +12,9 @@ const launcher = fileURLToPath(new URL('./launch.mjs', import.meta.url));
 const plugin = fileURLToPath(new URL('./plugin', import.meta.url));
 const fixture = new URL('../../tests/lib/opencode-runtime-fixture.mjs', import.meta.url).href;
 
-async function run(options = {}, args = ['--standalone', '--auto'], interrupt = false, catalog) {
+// `check`: launch.mjs --check. `nested`: the native executable handed over is
+// a second `node launch.mjs --` - the line a Rex restart once built.
+async function run(options = {}, args = ['--standalone', '--auto'], interrupt = false, catalog, { check = false, nested = false } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-launch-test-'));
   const executable = path.join(dir, 'native-fixture');
   const events = path.join(dir, 'events.jsonl');
@@ -24,7 +26,8 @@ async function run(options = {}, args = ['--standalone', '--auto'], interrupt = 
   // An allowlisted env prevents this fixture from inheriting credentials or a
   // Rex receipt. It implements no provider endpoint and can never infer.
   const env = { PATH: process.env.PATH, HOME: dir, OPENCODE_CONFIG_CONTENT: JSON.stringify(config), CEL_OPENCODE_AGENT: 'cel-orchestrator', CEL_ROLE_FILE: roleFile, CEL_FIXTURE_EVENTS: events, CEL_FIXTURE_TUI_EXIT: '1', ...options };
-  const child = spawn(process.execPath, [launcher, '--', executable, ...args], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const native = nested ? [process.execPath, launcher, '--', executable] : [executable];
+  const child = spawn(process.execPath, [launcher, ...(check ? ['--check'] : []), '--', ...native, ...args], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   child.stdout.on('data', text => { output += text; });
@@ -127,6 +130,36 @@ test('native server, model and agent override flags refuse before native startup
     assert.notEqual(result.code, 0);
     assert.equal(result.rows.length, 0);
     assert.equal(reasonOf(result), reason, result.output);
+  }
+});
+
+// A restart proves its relaunch line with --check before stopping the agent
+// the line replaces: the same config, location and argv admission, nothing
+// native started.
+test('--check admits the canonical resume line without starting a native process', async () => {
+  const result = await run({}, ['--standalone', '--auto', '--session', 'ses_SavedNative'], false, undefined, { check: true });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.output, '');
+});
+
+test('--check refuses what launch refuses, before native startup', async () => {
+  for (const [args, reason] of [[['--model', 'other/model'], 'unsupported_argument'], [['--session', 'ses_one', '--session', 'ses_two'], 'session_argument']]) {
+    const result = await run({}, args, false, undefined, { check: true });
+    assert.notEqual(result.code, 0);
+    assert.equal(result.rows.length, 0);
+    assert.equal(reasonOf(result), reason, result.output);
+  }
+  const unscoped = await run({ CEL_OPENCODE_AGENT: 'cel-other' }, ['--standalone', '--auto'], false, undefined, { check: true });
+  assert.equal(reasonOf(unscoped), 'config_contract', unscoped.output);
+});
+
+test('a second launcher in the line is refused as unsupported_argument, in check and launch alike', async () => {
+  for (const check of [true, false]) {
+    const result = await run({}, ['--standalone', '--auto', '--session', 'ses_SavedNative'], false, undefined, { check, nested: true });
+    assert.notEqual(result.code, 0);
+    assert.equal(result.rows.length, 0);
+    assert.equal(reasonOf(result), 'unsupported_argument', result.output);
   }
 });
 

@@ -130,22 +130,21 @@ _rex_host_session() { # <host-agent> <wsdir> -> its session id
   printf '%s' "$s"
 }
 
-# Callers name the product agent whose session a reviewer or member joins in
-# _REX_HOST (and a member's feature in _REX_TEAM); without one the agent opens
-# a session of its own.
-_rex_launch() { # name runtime cwd label envprefix args...
-  local name="$1" rt="$2" cwd="$3" label="$4" prefix="$5"; shift 5
-  # Capture only an explicit native resume argument, never cast an archived
-  # conversation from another runtime into native identity.
-  local native="" a previous="" native_flag="" native_requested=0
+# THE NATIVE SESSION A LAUNCH NAMES, proven before anything is created: an
+# explicit native resume argument only, never an archived conversation from
+# another runtime cast into native identity. Sets _REX_NATIVE.
+_rex_launch_native() { # runtime cwd args...
+  local rt="$1" cwd="$2"; shift 2
+  local a previous="" native_flag="" native_requested=0
+  _REX_NATIVE=""
   case "$rt" in claude) native_flag=--resume ;; opencode) native_flag=--session ;; esac
   if [ -n "$native_flag" ]; then
     for a in "$@"; do
-      if [ "$previous" = "$native_flag" ]; then native="$a"; fi
-      case "$a" in "$native_flag") native_requested=1 ;; "$native_flag"=*) native="${a#*=}"; native_requested=1 ;; esac
+      if [ "$previous" = "$native_flag" ]; then _REX_NATIVE="$a"; fi
+      case "$a" in "$native_flag") native_requested=1 ;; "$native_flag"=*) _REX_NATIVE="${a#*=}"; native_requested=1 ;; esac
       previous="$a"
     done
-    [ -z "$native" ] || rex_native_session_valid "$rt" "$native" \
+    [ -z "$_REX_NATIVE" ] || rex_native_session_valid "$rt" "$_REX_NATIVE" \
       || die "cel run: $rt native resume must name its exact native session identity"
   fi
   if [ "$rt" = opencode ] && [ "$native_requested" = 1 ]; then
@@ -155,9 +154,67 @@ _rex_launch() { # name runtime cwd label envprefix args...
       || die 'cel run: OpenCode native resume requires the prepared scoped agent/config'
     opencode_validate_config "${CEL_OPENCODE_AGENT#cel-}" "$AGENT_ROLE_FILE" "$CEL_OPENCODE_CONFIG_FILE" \
       || die 'cel run: OpenCode native resume scope is not canonical'
-    opencode_validate_session "$native" "$cwd" "$CEL_OPENCODE_AGENT" "${wsdir:-}" \
+    opencode_validate_session "$_REX_NATIVE" "$cwd" "$CEL_OPENCODE_AGENT" "${wsdir:-}" \
       || die 'cel run: refusing to publish an absent, mismatched, or unmigrated OpenCode native v2 root'
   fi
+}
+
+# The private launch script's environment: the workspace's declared env and
+# env.local, not the Rex server's possibly stale login environment, then the
+# launch identity pinned again.
+_rex_launch_env() { # name cwd
+  local name="$1" cwd="$2"
+  printf 'export PATH=%q CEL_ROOT=%q\n' "$PATH" "$CEL_ROOT"
+  if [ -f "${wsdir:-$cwd}/workspace.yaml" ]; then ws_env_exports "${wsdir:-$cwd}"; fi
+  printf 'cd %q\nexport CEL_ROOT=%q\n' "$cwd" "$CEL_ROOT"
+  printf 'export CEL_REX_STATE=%q\n' "$(_rex_state)"
+  printf 'export CEL_SESSION_BACKEND=rex CEL_AGENT_NAME=%q CEL_REX_RECORD=%q\n' "$name" "$(_rex_file "$name")"
+}
+
+# THE LINE THE PRIVATE LAUNCH SCRIPT RUNS: the shared prefix, its runtime
+# exec'd only AFTER any GitHub account guard ahead of `env` (keeping that
+# guard's exit behavior), the OpenCode launcher, the executable, its argv. A
+# dry run prints this (secret words masked) and a restart checks it before it
+# stops anything, so neither can show or admit a line other than the one that
+# runs. Mode `check` asks the OpenCode launcher to admit it and start nothing.
+_rex_launch_line() { # runtime prefix executable run|check args...
+  local rt="$1" prefix="$2" bin="$3" mode="$4"; shift 4
+  printf '%s ' "${prefix/env CEL_ROLE=/exec env CEL_ROLE=}"
+  if [ "$rt" = opencode ]; then
+    if [ "$mode" = check ]; then opencode_launch_command check; else opencode_launch_command; fi
+  fi
+  printf '%q ' "$bin" "$@"
+}
+
+# NOTHING IS STOPPED FOR A LINE THAT WILL BE REFUSED. Before a restart stops
+# a live agent, its relaunch's own script - the same environment, the same
+# line - runs with the OpenCode launcher in --check mode: config, location
+# and argv are admitted or refused exactly as the real launch would, and
+# nothing native starts. Its refusal prints here, in the caller's terminal.
+# Other runtimes have no launcher admission to ask.
+rex_launch_check() { # name runtime cwd prefix args...
+  local name="$1" rt="$2" cwd="$3" prefix="$4" bin d script rc=0; shift 4
+  [ "$rt" = opencode ] || return 0
+  _rex_launch_native "$rt" "$cwd" "$@"
+  bin="$(command -v "$(agent_get "$rt" bin)")" || die "cel run: executable for $rt is unavailable"
+  d="$(_rex_state)"; mkdir -p "$d"; chmod 700 "$d"
+  # A private file, as the real script: env.local values never ride an argv.
+  script="$(mktemp "$d/.check.XXXXXX")" || return 1
+  chmod 700 "$script"
+  { _rex_launch_env "$name" "$cwd"; _rex_launch_line "$rt" "$prefix" "$bin" check "$@"; printf '\n'; } > "$script"
+  ( _rex_close_leases; exec /bin/bash "$script" ) </dev/null >&2 || rc=$?
+  rm -f -- "$script"
+  return "$rc"
+}
+
+# Callers name the product agent whose session a reviewer or member joins in
+# _REX_HOST (and a member's feature in _REX_TEAM); without one the agent opens
+# a session of its own.
+_rex_launch() { # name runtime cwd label envprefix args...
+  local name="$1" rt="$2" cwd="$3" label="$4" prefix="$5"; shift 5
+  local _REX_NATIVE native
+  _rex_launch_native "$rt" "$cwd" "$@"
+  native="$_REX_NATIVE"
   local d file script resp session block pid start bin window="" host="${_REX_HOST:-}" host_session=""
   d="$(_rex_state)"; mkdir -p "$d"; chmod 700 "$d"
   file="$(_rex_file "$name")"
@@ -177,21 +234,8 @@ _rex_launch() { # name runtime cwd label envprefix args...
     # Wait for the parent to publish the identity before runtime hooks fire.
     printf 'for ((i=0;i<100;i++)); do [ -f %q ] && break; sleep 0.1; done\n' "$file"
     printf '[ -f %q ] || exit 1\n' "$file"
-    printf 'export PATH=%q CEL_ROOT=%q\n' "$PATH" "$CEL_ROOT"
-    # Load this workspace's declared env and env.local, not the Rex server's
-    # possibly stale login environment. Pin launch identity again afterwards.
-    if [ -f "${wsdir:-$cwd}/workspace.yaml" ]; then ws_env_exports "${wsdir:-$cwd}"; fi
-    printf 'cd %q\nexport CEL_ROOT=%q\n' "$cwd" "$CEL_ROOT"
-    printf 'export CEL_REX_STATE=%q\n' "$d"
-    printf 'export CEL_SESSION_BACKEND=rex CEL_AGENT_NAME=%q CEL_REX_RECORD=%q\n' "$name" "$file"
-    # The shared prefix may have a GitHub account guard before `env`.
-    # Exec the runtime only AFTER that guard, retaining its exit behavior.
-    if [ "$rt" = opencode ]; then
-      printf '%s %s%q ' "${prefix/env CEL_ROLE=/exec env CEL_ROLE=}" "$(opencode_launch_command)" "$bin"
-    else
-      printf '%s %q ' "${prefix/env CEL_ROLE=/exec env CEL_ROLE=}" "$bin"
-    fi
-    printf '%q ' "$@"; printf '\n'
+    _rex_launch_env "$name" "$cwd"
+    _rex_launch_line "$rt" "$prefix" "$bin" run "$@"; printf '\n'
   } > "$script"
   printf '%s\n' "$script" > "$file.pending"; chmod 600 "$file.pending"
   if [ -n "$host" ]; then
@@ -260,6 +304,55 @@ rex_agent_stop() { # pane id, stop only an exact owned terminal
     return 1
   done
   return 1
+}
+
+# A RELAUNCH IS UP ONCE ITS RUNTIME HAS CLEARED ITS OWN ADMISSION, not when
+# Rex has opened a terminal for it. The private script starts the runtime only
+# after its receipt is published, so every refusal comes after _rex_launch
+# returns: an OpenCode launcher refuses after starting its private server
+# (server_exited, guard_inactive, models_not_admitted ...) within its own
+# deadlines (15s to readiness, 15s to model admission). So it is waited for -
+# its TUI started, or the runtime gone. Other runtimes have no admission to
+# wait for: alive after a second is up. A runtime gone takes its terminal with
+# it (_rex_launch_reap): --keep-open would otherwise leave a dead session.
+# 0 up, or still admitting when the wait ran out (never killed on a guess);
+# 1 exited, its terminal closed; 2 exited, its terminal could not be closed.
+rex_launch_settle() { # <name> <runtime>
+  local f pid i polls=10 lock rc=0
+  f="$(_rex_file "$1")"
+  pid="$(jq -r .pid "$f" 2>/dev/null)" || return 2
+  [ "$2" != opencode ] || polls="${CEL_REX_ADMIT_POLLS:-450}"
+  for ((i = 0; i < polls; i++)); do
+    _rex_live "$f" || break
+    [ "$2" != opencode ] || ! opencode_launch_admitted "$pid" || return 0
+    sleep 0.1
+  done
+  if _rex_live "$f"; then
+    [ "$2" != opencode ] || c_warn "$1 is still running but its launcher has not admitted a TUI yet - look at it before relying on it"
+    return 0
+  fi
+  exec {lock}>"$f.lock" || return 2
+  if flock -n "$lock"; then _rex_launch_reap "$f" || rc=2; else rc=2; fi
+  exec {lock}>&-
+  [ "$rc" = 0 ] && return 1
+  return 2
+}
+
+# CLOSE A DEAD LAUNCH'S OWN TERMINAL - the session it opened, or its window in
+# a host's - once Rex reports its program finished and nothing else in it
+# (_rex_close_owned's proofs), retried while Rex catches up with the exit. The
+# OpenCode launcher's one refusal line (fixed vocabulary, never native or
+# config text) is repeated first: the terminal that showed it is going.
+_rex_launch_reap() { # <receipt>; the caller holds its lock. 0 closed
+  local f="$1" s b i rc=3
+  IFS=$'\t' read -r s b < <(jq -r '[.rex_session, .rex_block] | @tsv' "$f")
+  { _rex_cli --autostart=false capture -s "$s" -b "$b" 2>/dev/null \
+      | grep -o 'OpenCode guarded private launch refused (reason=[A-Za-z0-9_]*)' | tail -n 1 >&2; } || true
+  for ((i = 0; i < 20 && rc == 3; i++)); do
+    rc=0; _rex_close_owned "$f" || rc=$?
+    [ "$rc" != 3 ] || sleep 0.1
+  done
+  [ "$rc" = 0 ]
 }
 
 # CLOSE ONE AGENT'S OWN CONTAINER - the window a reviewer or team member opened

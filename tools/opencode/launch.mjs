@@ -58,7 +58,11 @@ async function stop(child, lease = false) {
   if (!await waitClosed(child, 1000)) refuse('child_did_not_close');
 }
 
-export async function launch(binary, suppliedArgs, env = process.env) {
+// EVERYTHING DECIDABLE BEFORE A NATIVE PROCESS EXISTS: the scoped config, the
+// location and the argv. `launch` runs it first; `--check` runs only it, so a
+// caller about to stop a live agent can prove its relaunch line is admissible
+// (lib/rex.sh rex_launch_check) without starting anything.
+export async function admit(binary, suppliedArgs, env = process.env) {
   const config = await step('config_unparseable', () => JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? 'null'));
   const directory = await step('location_unreadable', () => realpath(process.cwd()));
   if (directory !== path.resolve(process.cwd())) refuse('location_alias');
@@ -70,7 +74,6 @@ export async function launch(binary, suppliedArgs, env = process.env) {
     const scoped = config.plugins[0].options.catalog;
     return { catalog: scoped, allowedModels: catalogModels(scoped) };
   });
-  let selection = { ...DEFAULT_SELECTION };
   if (!binary || binary.startsWith('-')) refuse('missing_executable');
   const args = [];
   let session;
@@ -90,6 +93,12 @@ export async function launch(binary, suppliedArgs, env = process.env) {
     // before the compatibility guard has been admitted.
     refuse('unsupported_argument');
   }
+  return { directory, agent, catalog, allowedModels, args, session };
+}
+
+export async function launch(binary, suppliedArgs, env = process.env) {
+  const { directory, agent, catalog, allowedModels, args, session } = await admit(binary, suppliedArgs, env);
+  let selection = { ...DEFAULT_SELECTION };
   const privateDirectory = await step('private_directory', async () => {
     const created = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-launch-'));
     await chmod(created, 0o700);
@@ -229,8 +238,11 @@ export async function launch(binary, suppliedArgs, env = process.env) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv[2] !== '--') refuse('launch_arguments');
-    process.exitCode = await launch(process.argv[3], process.argv.slice(4));
+    const check = process.argv[2] === '--check';
+    const [separator, binary, ...rest] = process.argv.slice(check ? 3 : 2);
+    if (separator !== '--') refuse('launch_arguments');
+    if (check) { await admit(binary, rest); process.exitCode = 0; }
+    else process.exitCode = await launch(binary, rest);
   } catch (error) {
     // Only this file's reason code is printed: native/config error text may
     // contain credentials or session content.

@@ -167,8 +167,20 @@ opencode_launch_env() { # append to the shared env prefix, after its guard
   printf 'CEL_OPENCODE_AGENT=%q ' "${CEL_OPENCODE_AGENT:-}"
 }
 
-opencode_launch_command() { # append after env assignments, before native executable
-  printf 'node %q -- ' "$CEL_ROOT/tools/opencode/launch.mjs"
+opencode_launch_command() { # [check]; append after env assignments, before native executable
+  # `check`: the launcher's own admission of this exact line, starting nothing.
+  printf 'node %q %s-- ' "$CEL_ROOT/tools/opencode/launch.mjs" "${1:+--$1 }"
+}
+
+# THE GUARDED LAUNCHER HAS ADMITTED ITS TUI: launch.mjs starts the native TUI
+# (`--server <private endpoint>`) only after the server, guard plugin, session
+# and model admission all passed. Until then a refusal is still to come.
+opencode_launch_admitted() { # <launcher pid>
+  local child a
+  for child in $(ps -o pid= --ppid "$1" 2>/dev/null); do
+    while IFS= read -r -d '' a; do [ "$a" != --server ] || return 0; done 2>/dev/null < "/proc/$child/cmdline"
+  done
+  return 1
 }
 
 opencode_write_config() { # destination; reads buildConfig input JSON on stdin
