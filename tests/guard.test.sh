@@ -564,6 +564,44 @@ test_builder_may_not_open_prs_merge_land_or_start_agents() {
   done
   rm -rf "$T"
 }
+# A MEMBER OR REVIEWER IS A WINDOW IN ITS PRODUCT AGENT'S REX SESSION: only
+# read-only rex commands, however the argv is spelled - global flags before
+# the verb, a path to the binary, an env or `command` prefix.
+_rex_writes_probes=(
+  'rex new x -- pi' 'rex run -s S -- sh' 'rex split -s S' 'rex kill session:lead' 'rex do close-window'
+  'rex send -s S -b B hi' 'rex send-key -s S -b B Enter'
+  'rex window close -s session:lead window:lead' 'rex window new -s session:lead x' 'rex window rename -s S W x'
+  'rex window focus W' 'rex session kill S' 'rex session destroy S'
+  'rex block close -s session:lead block:lead' 'rex block send -s S -b B hi' 'rex block send-key -s S -b B Enter'
+  'rex block call format {} -s S -b B' 'rex block call -s S -b B com.superlogical.terminal.resize {}'
+  'rex api call session.close_window {}' 'rex api call -s S session.view'
+  'rex --autostart=false window close -s S W' 'rex -S unix:///run/x.sock kill S' 'rex --server=x kill S'
+  'rex -v --timeout 5s block close -s S B' 'rex -C mac window close W' 'rex --unknown-flag ls'
+  '/usr/bin/rex kill S' 'env FOO=1 rex kill S' 'command rex window close W' 'ls; rex kill S' 'echo ok && rex send -s S -b B x'
+)
+_rex_read_probes=(
+  'rex ls' 'rex ls --json' 'rex list' 'rex --autostart=false ls --json' 'rex -S unix:///run/x.sock session inspect S --json'
+  'rex session ls' 'rex window ls -s S --json' 'rex window inspect W -s S --json' 'rex block ls -s S --json'
+  'rex block inspect B -s S' 'rex capture -s S -b B --trim' "rex block call process {} -s S -w W -b B"
+  'rex --autostart=false block call -s S -b B process {}' 'rex actions' 'rex api list' 'rex api describe session.view'
+  'rex version' 'rex --help'
+)
+test_members_and_reviewers_run_only_read_only_rex_commands() {
+  _team_ws
+  local c
+  for c in "${_rex_writes_probes[@]}"; do
+    _deny "$(_ro guard_classify member "$c")" "member: $c" || { rm -rf "$T"; return 1; }
+    _deny "$(CEL_ROLE=reviewer guard_classify other "$c")" "reviewer (other): $c" || { rm -rf "$T"; return 1; }
+    _deny "$(CEL_ROLE=reviewer guard_classify root "$c")" "reviewer (root): $c" || { rm -rf "$T"; return 1; }
+  done
+  for c in "${_rex_read_probes[@]}"; do
+    assert_eq "$(_ro guard_classify member "$c")" allow || { echo "member: $c"; rm -rf "$T"; return 1; }
+    assert_eq "$(CEL_ROLE=reviewer guard_classify other "$c")" allow || { echo "reviewer: $c"; rm -rf "$T"; return 1; }
+  done
+  # the product agent itself is not restricted by this rule
+  assert_eq "$(CEL_ROLE=solo guard_classify other 'rex window close -s S W')" allow || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 # A BUILDER WRITES ITS OWN WORKTREE ONLY - by tool, and by shell (plus /tmp).
 test_builder_writes_only_its_own_worktree() {
   _team_ws

@@ -225,6 +225,38 @@ test_rex_restart_never_resumes_into_an_exited_exit_empty_server() {
   _rg_down
 }
 
+# A product's team is one session group: its reviewer and team member are
+# windows in the product agent's session. After a restart the product agent
+# resumes through its own line; the window-scoped guests are held with the
+# door that brings them back (which opens them as windows in the resumed
+# session), never relaunched from their receipts, and nothing closes a guest
+# by name.
+test_rex_restart_resumes_the_product_and_holds_its_window_guests() {
+  _rg_setup
+  _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
+  local name role pid
+  for name in alpha-pr-7-review alpha-login-qa; do
+    role=reviewer; [ "$name" = alpha-login-qa ] && role=member
+    pid="$(_rg_detached_sleep)"; RG_PIDS="$RG_PIDS $pid"
+    jq -n --arg n "$name" --arg role "$role" --arg ws "$RT/ws" --argjson pid "$pid" --arg start "$(_rex_pid_start "$pid")" \
+      '{name:$n,agent:"pi",cwd:$ws,role:$role,workspace:$ws,repo:"widget",pr:"7",backend:"rex",team:"login",
+        rex_scope:"window",rex_host:"alpha-orch",rex_window:("window:" + $n),
+        rex_session:"session:alpha-orch",rex_block:("block:" + $n),pane_id:("rex/session:alpha-orch/block:" + $n),
+        pid:$pid,pid_start:$start,agent_status:"idle"}' > "$CEL_REX_STATE/$name.json"
+  done
+  CEL_ROOT="$RT/celroot" rex_generation_tick >/dev/null
+  _rg_server_restart instance-B
+  local out; out="$(CEL_ROOT="$RT/celroot" rex_generation_tick)"
+  assert_contains "$out" "$(printf 'resumed\talpha-orch')"
+  assert_contains "$out" "$(printf 'held\talpha-pr-7-review\t%s\treviewers never resume' "$RT/ws")"
+  assert_contains "$out" "$(printf 'held\talpha-login-qa\t%s\tteam members never resume - its lead retires and adds it again: cel team retire login alpha-login-qa' "$RT/ws")"
+  assert_eq "$(cat "$REXT_LOG")" 'false|run orchestrator --product alpha --workspace alpha --session-backend rex --model m1'
+  # only the product agent's own dead restored session was closed
+  assert_eq "$(grep -c '^kill' "$REXT_CALLS")" 1
+  assert_contains "$(cat "$REXT_CALLS")" 'kill session:alpha-orch'
+  _rg_down
+}
+
 # A receipt whose saved session disagrees, or that never reported one, is
 # held rather than relaunched into a different or fresh conversation.
 test_rex_restart_never_resumes_into_another_conversation() {

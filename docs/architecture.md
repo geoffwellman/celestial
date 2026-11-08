@@ -209,6 +209,47 @@ never a Herdr pane argument. Rex presence protects its checkout; GC does not
 infer retirement eligibility from a Rex idle status or missing screen output.
 Failed discovery is unknown, not an empty fleet or permission to prune mail.
 
+A product's team is one Rex session group. A product agent (and core, root, a
+lane) opens a session of its own (`rex_scope: "session"` in its receipt). A
+Rex reviewer, and a team member whose lead runs in Rex, opens instead as a
+window labelled with its alias, never focused (`rex window new -s <session>
+<alias> --focus=false`), in its product agent's session - the team's `lead`,
+else `<product>-orch` - and its receipt records `rex_scope: "window"`,
+`rex_window` and `rex_host` beside the session and block. The host session is
+used only when proven the way any managed agent is: its receipt (name,
+workspace, a product-agent role, a session of its own), its live PID/start
+generation, and Rex reporting that PID as the child of the receipt's block in
+that session. Otherwise the reviewer or member opens a session of its own, as
+before, and the launch says so in one line. Retirement closes only the
+agent's own container: a window-scoped reviewer's (`tools/reviewers/retire.mjs`)
+or member's (`rex_agent_close`) proof is its window holding exactly its one
+block, queried window-scoped (`rex window inspect`, `rex block call process
+-w`), before `rex window close` and a check that the window is gone; the host
+session and its other windows are never closed, and a window anyone added a
+terminal to is protected. Session IDs, window IDs and block IDs survive a Rex
+server restart (a restored terminal runs a fresh shell, not the agent).
+Reviewers and members never resume from a receipt: after a restart the product
+agent resumes through its recorded line, and a reviewer relaunched by `cel run
+reviewer` (or a member re-added by `cel team add`) opens as a window in the
+resumed product agent's session.
+
+Known Rex API limits (revision 10): Rex has no compare-and-swap for these
+calls, so two check-then-act gaps remain and are narrowed, not closed. (1)
+Between the host-session proof and `rex window new` the product agent can
+exit or its session can change; `session.new_window` takes no expected
+revision or owner, so the guest may open in a session whose agent has just
+gone. The guest's own identity is its own receipt either way, and nothing is
+closed on the strength of the host proof. (2) Between the last container
+proof (re-run immediately before the close) and `rex window close` / `rex
+kill`, someone can add a terminal to that window or session;
+`session.close_window` (session and window id only; extra fields are
+rejected) and `session.destroy` (an unknown `if_revision` is ignored, not
+enforced) take no revision guard, so that terminal would close with it. Both
+gaps close once Rex offers a conditional create/close.
+Members and reviewers are guarded to read-only `rex` commands (`ls`,
+`inspect`, `capture`, `block call process`), so neither can type into or
+close its product agent's window.
+
 `cel ws down` (and therefore `reset`) explicitly stops managed Rex agents whose
 receipt names that exact workspace, after the existing held-work check; the
 box-wide core and other workspaces are excluded. A failed stop prevents reset

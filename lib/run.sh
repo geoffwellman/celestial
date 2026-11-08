@@ -1918,7 +1918,12 @@ _run_member_confirm() { # <name> <pane>
 # that member - the inventory names exactly one agent with the alias, and the
 # process in that pane carries the launch's CEL_ROLE=member, CEL_WORKSPACE,
 # CEL_TEAM and CEL_TEAM_MEMBER (_run_pane_launch_env, the proof a reviewer's
-# workspace is read by). A builder's worktree is removed only when it is clean
+# workspace is read by). A Rex member is proven the same way from its receipt
+# and its runtime's own environment (_run_rex_member_proven), and only its own
+# window closes - never the lead's session (lib/rex.sh rex_agent_close, which
+# protects a window anyone else has a terminal in). A Rex member that already
+# exited leaves a finished window, closed only when Rex shows nothing runs in
+# it. A builder's worktree is removed only when it is clean
 # and holds no commit that origin lacks - its branch pushed, or a launch that
 # never got past its base - and its local branch goes with it, so a relaunch
 # is not refused for it; otherwise it is kept and said so on stdout. --keep
@@ -1927,6 +1932,7 @@ _run_member_confirm() { # <name> <pane>
 # 0 = closed, or already gone. 1 = refused, nothing closed, reason on stderr.
 member_retire() { # <wsdir> <feature> <alias> [--keep]
   local wsdir="${1:-}" feature="${2:-}" alias="${3:-}" keep=0 dir roster rows n pane backend proof pws pteam palias
+  local receipt crc
   _mr_refuse() { printf 'member_retire: %s - nothing closed\n' "$1" >&2; return 1; }
   case "${4:-}" in "") ;; --keep) keep=1 ;; *) _mr_refuse "unknown argument '$4' (want --keep)"; return 1 ;; esac
   [[ "$feature" =~ $_RUN_TEAM_FEATURE_RE ]] || { _mr_refuse "feature '$feature' is not a feature id"; return 1; }
@@ -1937,19 +1943,37 @@ member_retire() { # <wsdir> <feature> <alias> [--keep]
     || { _mr_refuse "the live agent inventory is unreadable, so which pane is $alias is unknown"; return 1; }
   rows="$(printf '%s' "$roster" | jq -c --arg a "$alias" '[.result.agents[] | select(.name == $a)]')"
   n="$(printf '%s' "$rows" | jq length)"
+  receipt="$(_rex_file "$alias")"
   case "$n" in
-    0) c_ok "$alias is not live - no pane to close" ;;
+    0)
+      if [ -f "$receipt" ] && _run_rex_member_proven "$receipt" "$wsdir" "$feature" "$alias" ""; then
+        crc=0; rex_agent_close "$receipt" || crc=$?
+        if [ "$crc" = 0 ]; then c_ok "$alias had exited - closed its finished Rex window"
+        else printf 'kept the Rex terminal %s of the exited %s: Rex does not show it holding only that finished terminal\n' \
+          "$(jq -r .pane_id "$receipt")" "$alias"; fi
+      else
+        c_ok "$alias is not live - no pane to close"
+      fi ;;
     1)
       IFS=$'\t' read -r pane backend < <(printf '%s' "$rows" | jq -r '.[0] | [(.pane_id // ""), (.backend // "herdr")] | @tsv')
       [ -n "$pane" ] || { _mr_refuse "the live $alias has no pane id"; return 1; }
-      { [ "$backend" != rex ] && [[ "$pane" != rex/* ]]; } \
-        || { _mr_refuse "$alias runs in Rex, and cel run member starts members in herdr only - not one of ours"; return 1; }
-      proof="$(_run_pane_launch_env "$pane" member CEL_WORKSPACE CEL_TEAM CEL_TEAM_MEMBER)"
-      IFS=$'\t' read -r pws pteam palias <<< "$proof"
-      [ -n "$proof" ] && { [ "$pws" = "$wsdir" ] || [ "$pws" -ef "$wsdir" ]; } && [ "$pteam" = "$feature" ] && [ "$palias" = "$alias" ] \
-        || { _mr_refuse "the agent named $alias in pane $pane cannot be proven to be member $alias of team $feature in $wsdir"; return 1; }
-      herdr pane close "$pane" >/dev/null 2>&1 || { _mr_refuse "herdr could not close pane $pane"; return 1; }
-      c_ok "closed $alias (pane $pane)" ;;
+      if [ "$backend" = rex ] || [[ "$pane" == rex/* ]]; then
+        _run_rex_member_proven "$receipt" "$wsdir" "$feature" "$alias" "$pane" \
+          || { _mr_refuse "the agent named $alias in Rex terminal $pane cannot be proven to be member $alias of team $feature in $wsdir"; return 1; }
+        crc=0; rex_agent_close "$receipt" || crc=$?
+        case "$crc" in
+          0) c_ok "closed $alias (its Rex window, terminal $pane)" ;;
+          3) _mr_refuse "Rex does not show $alias's window (or session) holding only its own terminal $pane - protected"; return 1 ;;
+          *) printf 'member_retire: closed the Rex window of %s but could not see it and its runtime gone - check rex ls\n' "$alias" >&2; return 1 ;;
+        esac
+      else
+        proof="$(_run_pane_launch_env "$pane" member CEL_WORKSPACE CEL_TEAM CEL_TEAM_MEMBER)"
+        IFS=$'\t' read -r pws pteam palias <<< "$proof"
+        [ -n "$proof" ] && { [ "$pws" = "$wsdir" ] || [ "$pws" -ef "$wsdir" ]; } && [ "$pteam" = "$feature" ] && [ "$palias" = "$alias" ] \
+          || { _mr_refuse "the agent named $alias in pane $pane cannot be proven to be member $alias of team $feature in $wsdir"; return 1; }
+        herdr pane close "$pane" >/dev/null 2>&1 || { _mr_refuse "herdr could not close pane $pane"; return 1; }
+        c_ok "closed $alias (pane $pane)"
+      fi ;;
     *) _mr_refuse "$n live agents are named $alias - which one is the member is unknown"; return 1 ;;
   esac
   if [ "$keep" = 1 ]; then
@@ -1958,6 +1982,32 @@ member_retire() { # <wsdir> <feature> <alias> [--keep]
   fi
   _run_member_worktree_retire "$wsdir" "$dir" "$alias"
   return 0
+}
+
+# A REX MEMBER IS ITS RECEIPT AND ITS RUNTIME'S ENVIRONMENT: the receipt names
+# this alias, role member, this team and workspace (and the roster's terminal,
+# when given); a live runtime's /proc environ - fixed at exec, the same launch
+# env herdr members are proven by - carries CEL_ROLE=member, this team, alias
+# and workspace, and points CEL_REX_RECORD at this very receipt. An exited one
+# is proven by its receipt alone; rex_agent_close then shows nothing runs.
+_run_rex_member_proven() { # <receipt> <wsdir> <feature> <alias> <pane|"">
+  local f="$1" wsdir="$2" feature="$3" alias="$4" pane="$5" rws pid item
+  local -A env
+  [ -f "$f" ] && [ ! -L "$f" ] && _rex_receipt_valid "$f" || return 1
+  jq -e --arg a "$alias" --arg t "$feature" --arg p "$pane" \
+    '.name == $a and .role == "member" and .team == $t and .backend == "rex" and ($p == "" or .pane_id == $p)' "$f" >/dev/null 2>&1 || return 1
+  rws="$(jq -r '.workspace // ""' "$f")"
+  [ -n "$rws" ] && { [ "$rws" = "$wsdir" ] || [ "$rws" -ef "$wsdir" ]; } || return 1
+  _rex_live "$f" || return 0
+  pid="$(jq -r .pid "$f")"
+  while IFS= read -r -d '' item; do
+    case "$item" in *=*) env["${item%%=*}"]="${item#*=}" ;; esac
+  done < <({ cat "/proc/$pid/environ"; } 2>/dev/null)
+  [ "${env[CEL_ROLE]:-}" = member ] && [ "${env[CEL_TEAM]:-}" = "$feature" ] && [ "${env[CEL_TEAM_MEMBER]:-}" = "$alias" ] \
+    && [ "${env[CEL_REX_RECORD]:-}" = "$f" ] && [ -n "${env[CEL_WORKSPACE]:-}" ] \
+    && { [ "${env[CEL_WORKSPACE]}" = "$wsdir" ] || [ "${env[CEL_WORKSPACE]}" -ef "$wsdir" ]; } || return 1
+  # Still that generation once its environment was read.
+  _rex_live "$f"
 }
 
 _run_member_worktree_retire() { # <wsdir> <team-dir> <alias>
@@ -2159,8 +2209,10 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   # A TEAM MEMBER comes from cel team add only: its token first (spent even
   # when what follows refuses), then its reserved row in team.json, which names
   # the product, the repo and - for a builder - branch, worktree and base. A
-  # dry run previews and spends nothing. Members run in herdr: they live in
-  # their feature's tab.
+  # dry run previews and spends nothing. A member lives where its lead does:
+  # a lead running in Rex (cel team add inherits its CEL_SESSION_BACKEND=rex)
+  # gets it as a window in the lead's own Rex session; otherwise it joins its
+  # feature's herdr tab. A workspace default never moves it off its lead's host.
   if [ "$role" = member ]; then
     [[ "$team" =~ $_RUN_TEAM_FEATURE_RE ]] \
       || die "cel run member: --team wants a feature id ([a-z0-9][a-z0-9-]{1,40}), got '$team'"
@@ -2172,6 +2224,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
     _run_member_load "$wsdir" "$team" "$member"
     repo="$MEMBER_REPO"; product="$MEMBER_PRODUCT"; model_opt="$MEMBER_MODEL"
     session_backend=herdr
+    [ "${CEL_SESSION_BACKEND:-}" != rex ] || session_backend=rex
   elif [ -n "$team$member" ]; then
     die "cel run: --team and --member belong to cel run member (cel team add's launcher)"
   fi
@@ -2706,8 +2759,28 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     return $?
   fi
   if [ "$session_backend" = rex ]; then
+    # ONE SESSION GROUP PER PRODUCT: a reviewer or team member opens as a
+    # window (labelled with its alias, never focused) in its product agent's
+    # own Rex session - the team's lead (team.json `lead`), else <product>-orch
+    # - when that session is proven live (lib/rex.sh _rex_host_session);
+    # otherwise in a session of its own, as before, and says so.
+    local _REX_HOST="" _REX_TEAM="" host_session=""
+    case "$role" in
+      reviewer) _REX_HOST="$(cel_alias_norm "$(ws_product_of_repo "$wsdir" "$repo")-orch")" ;;
+      member)
+        _REX_TEAM="$team"
+        _REX_HOST="$(jq -r '.lead // "" | strings' "$MEMBER_DIR/team.json" 2>/dev/null)"
+        [ -n "$_REX_HOST" ] || _REX_HOST="$(cel_alias_norm "$product-orch")" ;;
+    esac
     if [ "$dry_run" = 1 ]; then
-      printf 'rex new %s --cwd %s --shell=none -- <private launch script: %s %s>\n' "$agent_name" "$cwd" "$runtime" "$(_run_dry_agent_args)"
+      [ -z "$_REX_HOST" ] || host_session="$(_rex_host_session "$_REX_HOST" "$wsdir")" || host_session=""
+      if [ -n "$host_session" ]; then
+        printf 'rex window new -s %s %s --cwd %s --shell=none --focus=false -- <private launch script: %s %s>\n' \
+          "$host_session" "$agent_name" "$cwd" "$runtime" "$(_run_dry_agent_args)"
+      else
+        [ -z "$_REX_HOST" ] || printf '(%s has no provable live Rex session: %s opens in a session of its own)\n' "$_REX_HOST" "$agent_name"
+        printf 'rex new %s --cwd %s --shell=none -- <private launch script: %s %s>\n' "$agent_name" "$cwd" "$runtime" "$(_run_dry_agent_args)"
+      fi
       return 0
     fi
     _rex_preflight "$agent_name" "$runtime"
@@ -2716,6 +2789,15 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run" || return $?
     if [ "$role" = reviewer ]; then
       reviewers_record "$wsdir" "$repo" "$pr" "$_REX_PANE" "$agent_name" "$review_path" "$repodir" "$review_head"
+    fi
+    # A member is reported up only once the inventory shows that exact agent
+    # in that terminal; exit 3 as for herdr below.
+    if [ "$role" = member ]; then
+      if ! _run_member_confirm "$agent_name" "$_REX_PANE"; then
+        c_err "cel run member: $agent_name was started in Rex terminal $_REX_PANE but the agent inventory does not show it there - its launch is unconfirmed; look at it before anything relaunches it"
+        return 3
+      fi
+      printf 'member %s pane %s\n' "$agent_name" "$_REX_PANE"
     fi
     return 0
   fi

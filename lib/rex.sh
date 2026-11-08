@@ -33,6 +33,20 @@ _rex_live() { # record -> prove this is the same process, not a reused PID
   [ -n "$pid" ] && [ -n "$start" ] && [ "$(_rex_pid_start "$pid")" = "$start" ]
 }
 
+# WHERE A MANAGED AGENT'S TERMINAL LIVES. A product agent (and core, root, a
+# lane) owns the session it opened: rex_scope "session". A reviewer or team
+# member opens a WINDOW in its product agent's session instead - rex_scope
+# "window", with rex_window and rex_host (that product agent) - so a product's
+# whole team is one Rex session group. Either way the agent's own terminal is
+# rex_block.
+# A MISSING rex_scope IS "session", deliberately: every receipt written before
+# scopes existed - each live product agent's and reviewer's - has none, and
+# each of them did open a session of its own. Refusing them would hide every
+# live agent from the roster. An unknown non-empty scope is still refused.
+_REX_SCOPE_JQ='((.rex_scope // "session") as $s
+  | if $s == "window" then (.rex_window | type == "string" and length > 0) and (.rex_host | type == "string" and length > 0)
+    else $s == "session" end)'
+
 rex_agent_list() { # same roster shape as Herdr; unknown observation never means idle
   local f rows='[]' row status
   for f in "$(_rex_state)"/*.json; do
@@ -40,8 +54,8 @@ rex_agent_list() { # same roster shape as Herdr; unknown observation never means
     _rex_receipt_valid "$f" || return 1
     row="$(jq -c . "$f" 2>/dev/null)" || return 1
     if _rex_live "$f"; then
-      jq -e 'all([.cwd,.agent,.agent_status,.rex_session,.rex_block,.workspace,.role][]; type == "string" and length > 0)
-        and .backend == "rex" and .pane_id == ("rex/" + .rex_session + "/" + .rex_block)' "$f" >/dev/null 2>&1 || return 1
+      jq -e "all([.cwd,.agent,.agent_status,.rex_session,.rex_block,.workspace,.role][]; type == \"string\" and length > 0)
+        and .backend == \"rex\" and .pane_id == (\"rex/\" + .rex_session + \"/\" + .rex_block) and $_REX_SCOPE_JQ" "$f" >/dev/null 2>&1 || return 1
       rows="$(jq --argjson r "$row" '. + [$r]' <<<"$rows")"
     fi
   done
@@ -91,6 +105,34 @@ native_session_is_subagent() { # native session -> 0 for a subagent transcript
   case "$1" in /*/*.jsonl) [ -f "${1%/*}.jsonl" ] ;; *) return 1 ;; esac
 }
 
+# THE HOST SESSION A REVIEWER OR TEAM MEMBER JOINS: the session its product
+# agent opened, and only when that is proven the same way any managed agent
+# is - its own receipt (name, workspace, a product-agent role, a session of its
+# own), its exact runtime generation live (PID + start time), and Rex itself
+# reporting that runtime as the child of the receipt's terminal in that
+# session. Anything less prints nothing, and the caller opens a session of its
+# own as before: a window is never put into a session nobody can vouch for.
+_rex_host_session() { # <host-agent> <wsdir> -> its session id
+  local host="$1" ws="$2" f s b pid info
+  [ -n "$host" ] && [ -n "$ws" ] || return 1
+  f="$(_rex_file "$host")"
+  [ -f "$f" ] && [ ! -L "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f" || return 1
+  jq -e --arg n "$host" --arg w "$ws" ".name == \$n and .backend == \"rex\" and .workspace == \$w
+    and (.role == \"solo\" or .role == \"orchestrator\")
+    and (.rex_session | type == \"string\" and length > 0) and (.rex_block | type == \"string\" and length > 0)
+    and .pane_id == (\"rex/\" + .rex_session + \"/\" + .rex_block)
+    and $_REX_SCOPE_JQ and (.rex_scope // \"session\") == \"session\"" "$f" >/dev/null 2>&1 || return 1
+  IFS=$'\t' read -r s b pid < <(jq -r '[.rex_session, .rex_block, (.pid | tostring)] | @tsv' "$f")
+  info="$(_rex_cli --autostart=false block call process '{}' -s "$s" -b "$b" 2>/dev/null)" || return 1
+  jq -e --argjson p "$pid" '.child.pid == $p' <<<"$info" >/dev/null 2>&1 || return 1
+  # Still that same generation after Rex answered.
+  _rex_live "$f" || return 1
+  printf '%s' "$s"
+}
+
+# Callers name the product agent whose session a reviewer or member joins in
+# _REX_HOST (and a member's feature in _REX_TEAM); without one the agent opens
+# a session of its own.
 _rex_launch() { # name runtime cwd label envprefix args...
   local name="$1" rt="$2" cwd="$3" label="$4" prefix="$5"; shift 5
   # Capture only an explicit native resume argument, never cast an archived
@@ -116,7 +158,7 @@ _rex_launch() { # name runtime cwd label envprefix args...
     opencode_validate_session "$native" "$cwd" "$CEL_OPENCODE_AGENT" "${wsdir:-}" \
       || die 'cel run: refusing to publish an absent, mismatched, or unmigrated OpenCode native v2 root'
   fi
-  local d file script resp session block pid start bin
+  local d file script resp session block pid start bin window="" host="${_REX_HOST:-}" host_session=""
   d="$(_rex_state)"; mkdir -p "$d"; chmod 700 "$d"
   file="$(_rex_file "$name")"
   local lock
@@ -152,13 +194,28 @@ _rex_launch() { # name runtime cwd label envprefix args...
     printf '%q ' "$@"; printf '\n'
   } > "$script"
   printf '%s\n' "$script" > "$file.pending"; chmod 600 "$file.pending"
-  if ! resp="$(_rex_cli new "$name" --cwd "$cwd" --window "$label" --shell=none --keep-open --json -- /bin/bash "$script")"; then
-    # A timeout can have created a session: keep the script and pid receipt,
-    # and refuse a blind retry; do not destroy an unobserved session.
-    die "cel run: Rex launch was not acknowledged; inspect rex ls before retrying ($name)"
+  if [ -n "$host" ]; then
+    host_session="$(_rex_host_session "$host" "${wsdir:-$cwd}")" \
+      || c_warn "Rex: $host has no live session Celestial can prove is its own - $name opens in a session of its own"
   fi
-  session="$(jq -er '.session_id' <<<"$resp")" || die 'Rex returned no session identity'
-  block="$(jq -er '.initial_windows[0].block_ids[0]' <<<"$resp")" || die 'Rex returned no terminal identity'
+  if [ -n "$host_session" ]; then
+    if ! resp="$(_rex_cli window new -s "$host_session" "$name" --cwd "$cwd" --shell=none --keep-open --focus=false --json -- /bin/bash "$script")"; then
+      die "cel run: Rex launch was not acknowledged; inspect rex window ls -s $host_session before retrying ($name)"
+    fi
+    session="$host_session"
+    window="$(jq -er '.window_id | select(type == "string" and length > 0)' <<<"$resp")" || die 'Rex returned no window identity'
+    block="$(jq -er '.block_ids[0] | select(type == "string" and length > 0)' <<<"$resp")" || die 'Rex returned no terminal identity'
+  else
+    host=""
+    if ! resp="$(_rex_cli new "$name" --cwd "$cwd" --window "$label" --shell=none --keep-open --json -- /bin/bash "$script")"; then
+      # A timeout can have created a session: keep the script and pid receipt,
+      # and refuse a blind retry; do not destroy an unobserved session.
+      die "cel run: Rex launch was not acknowledged; inspect rex ls before retrying ($name)"
+    fi
+    session="$(jq -er '.session_id' <<<"$resp")" || die 'Rex returned no session identity'
+    block="$(jq -er '.initial_windows[0].block_ids[0]' <<<"$resp")" || die 'Rex returned no terminal identity'
+    window="$(jq -r '.initial_windows[0].window_id // "" | strings' <<<"$resp")"
+  fi
   local i
   for ((i=0;i<50;i++)); do [ -s "$file.pid" ] && break; sleep 0.1; done
   pid="$(cat "$file.pid" 2>/dev/null)"; [[ "$pid" =~ ^[0-9]+$ ]] || die "Rex session $session opened but has not started its runtime"
@@ -167,32 +224,125 @@ _rex_launch() { # name runtime cwd label envprefix args...
   jq -n --arg name "$name" --arg rt "$rt" --arg cwd "$cwd" --arg session "$session" --arg block "$block" \
     --argjson pid "$pid" --arg start "$start" --arg role "${env_role:-${role:-core}}" --arg workspace "${wsdir:-$cwd}" \
     --arg repo "${repo:-}" --arg pr "${pr:-}" --arg native "$native" --argjson relaunch "${_REX_RELAUNCH:-null}" \
+    --arg window "$window" --arg host "$host" --arg team "${_REX_TEAM:-}" \
     '{name:$name,agent:$rt,cwd:$cwd,role:$role,workspace:$workspace,repo:$repo,pr:$pr,pane_id:("rex/"+$session+"/"+$block),backend:"rex",rex_session:$session,rex_block:$block,pid:$pid,pid_start:$start,agent_status:"working"}
+      | if $host != "" then .rex_scope="window" | .rex_host=$host else .rex_scope="session" end
+      | if $window != "" then .rex_window=$window else . end
+      | if $team != "" then .team=$team else . end
       | if $native != "" then .agent_session={value:$native} else . end
       | if $relaunch != null then .relaunch=$relaunch else . end' > "$tmp"
   mv "$tmp" "$file"; rm -f "$file.pid" "$file.pending"
   exec {lock}>&-
   _REX_PANE="rex/$session/$block"
-  printf 'Rex session: %s\nTerminal: %s\n' "$session" "$block"
+  if [ -n "$host" ]; then
+    printf 'Rex window: %s in %s'"'"'s session %s\nTerminal: %s\n' "$window" "$host" "$session" "$block"
+  else
+    printf 'Rex session: %s\nTerminal: %s\n' "$session" "$block"
+  fi
 }
 
-rex_agent_stop() { # pane id, stop only an exact owned terminal/session
-  local pane="$1" f session block
+rex_agent_stop() { # pane id, stop only an exact owned terminal
+  local pane="$1" f session block window
   for f in "$(_rex_state)"/*.json; do
     [ -f "$f" ] || continue
     [ "$(jq -r .pane_id "$f")" = "$pane" ] || continue
     # A retained terminal may have been repurposed after its runtime exited.
     # Without the original PID identity, clear bookkeeping only.
     if ! _rex_live "$f"; then rm -f "$f"; return 0; fi
-    session="$(jq -r .rex_session "$f")"; block="$(jq -r .rex_block "$f")"
-    _rex_cli block close -s "$session" "$block" || return 1
-    # We created one terminal per session; never kill a session the owner
-    # subsequently added tabs to; leave the empty session shell intact too.
+    IFS=$'\t' read -r session block window < <(jq -r '[.rex_session, .rex_block, (.rex_window // "")] | @tsv' "$f")
+    # Only this terminal closes, scoped to its recorded window when there is
+    # one: never the session, which may hold a product's whole team or tabs
+    # the owner added; an empty session shell is left intact too. (A window
+    # whose last block closes goes with it.)
+    _rex_cli block close -s "$session" ${window:+-w "$window"} "$block" || return 1
     local i
     for ((i=0;i<50;i++)); do _rex_live "$f" || { rm -f "$f"; return 0; }; sleep 0.1; done
     return 1
   done
   return 1
+}
+
+# CLOSE ONE AGENT'S OWN CONTAINER - the window a reviewer or team member opened
+# in its product agent's session, or the session an agent opened for itself -
+# and nothing else. The caller proves WHO the agent is (role, team,
+# workspace); this proves WHAT closes, first and again just before the close:
+#   - the receipt's window (rex_scope window) or session holds exactly one
+#     terminal, the receipt's block - a block or window anyone added makes it
+#     not only this agent's, and it is protected;
+#   - in that terminal Rex reports the receipt's exact live runtime as the
+#     child, or - its runtime having exited (dead PID generation) - reports a
+#     finished program and nothing running, so closing ends no program.
+# Then the container closes, the runtime is seen gone, the container is seen
+# absent from Rex, and only then the receipt goes. Never the host session.
+# 0 closed; 3 protected, nothing closed; 1 closed but not seen through.
+rex_agent_close() { # <receipt>
+  local f="$1" lock rc=0
+  [ -f "$f" ] && [ ! -L "$f" ] && _rex_receipt_valid "$f" || return 3
+  jq -e "(.rex_session | type == \"string\" and length > 0) and (.rex_block | type == \"string\" and length > 0)
+    and .pane_id == (\"rex/\" + .rex_session + \"/\" + .rex_block) and $_REX_SCOPE_JQ" "$f" >/dev/null 2>&1 || return 3
+  exec {lock}>"$f.lock" || return 1
+  flock -n "$lock" || { exec {lock}>&-; return 3; }
+  _rex_close_owned "$f" || rc=$?
+  exec {lock}>&-
+  return "$rc"
+}
+_rex_container_proven() { # <receipt> <live 0|1>
+  local f="$1" live="$2" scope s w b pid j info
+  IFS=$'\t' read -r scope s w b pid < <(jq -r '[(.rex_scope // "session"), .rex_session, (.rex_window // "-"), .rex_block, (.pid | tostring)] | @tsv' "$f")
+  if [ "$scope" = window ]; then
+    j="$(_rex_cli --autostart=false window inspect "$w" -s "$s" --json 2>/dev/null)" || return 1
+    jq -e --arg s "$s" --arg w "$w" --arg b "$b" '.session_id == $s and .window_id == $w
+      and (.layers | length) == 1 and [.layers[].blocks[]?.block_id] == [$b]' <<<"$j" >/dev/null 2>&1 || return 1
+  else
+    j="$(_rex_cli --autostart=false session inspect "$s" --json 2>/dev/null)" || return 1
+    jq -e --arg s "$s" --arg w "$w" --arg b "$b" '.session_id == $s and (.windows | length) == 1
+      and ($w == "-" or .windows[0].window_id == $w) and (.windows[0].layers | length) == 1
+      and [.windows[0].layers[].blocks[]?.block_id] == [$b]' <<<"$j" >/dev/null 2>&1 || return 1
+    w="-"
+  fi
+  # Scoped to the window too: Rex answers only for a block that is in it.
+  if [ "$w" != - ]; then
+    info="$(_rex_cli --autostart=false block call process '{}' -s "$s" -w "$w" -b "$b" 2>/dev/null)" || return 1
+  else
+    info="$(_rex_cli --autostart=false block call process '{}' -s "$s" -b "$b" 2>/dev/null)" || return 1
+  fi
+  if [ "$live" = 1 ]; then
+    jq -e --argjson p "$pid" '(.error // null) == null and .child.pid == $p' <<<"$info" >/dev/null 2>&1
+  else
+    # Rex omits child and foreground once the program has exited.
+    jq -e '(.error // null) == null and (.child // null) == null and (.foreground // null) == null
+      and (.last_exit | type == "object" and (.exit_code | type == "number"))' <<<"$info" >/dev/null 2>&1
+  fi
+}
+_rex_container_present() { # <receipt> -> 0 present, 1 absent, 2 unknown
+  local f="$1" scope s w j
+  IFS=$'\t' read -r scope s w < <(jq -r '[(.rex_scope // "session"), .rex_session, (.rex_window // "-")] | @tsv' "$f")
+  j="$(_rex_cli --autostart=false ls --json 2>/dev/null)" || return 2
+  jq -e --arg s "$s" '[(.sessions? // .)[]? | .session_id] | index($s) != null' <<<"$j" >/dev/null 2>&1 || return 1
+  [ "$scope" = window ] || return 0
+  j="$(_rex_cli --autostart=false window ls -s "$s" --json 2>/dev/null)" || return 2
+  jq -e --arg w "$w" '[.windows[]? | .window_id] | index($w) != null' <<<"$j" >/dev/null 2>&1
+}
+_rex_close_owned() { # <receipt>; rex_agent_close holds its lock
+  local f="$1" live=0 scope s w i prc=0
+  ! _rex_live "$f" || live=1
+  _rex_container_proven "$f" "$live" || return 3
+  IFS=$'\t' read -r scope s w < <(jq -r '[(.rex_scope // "session"), .rex_session, (.rex_window // "-")] | @tsv' "$f")
+  # Again, just before the irreversible step.
+  if [ "$live" = 1 ]; then _rex_live "$f" || live=0; fi
+  _rex_container_proven "$f" "$live" || return 3
+  if [ "$scope" = window ]; then
+    _rex_cli --autostart=false window close -s "$s" "$w" >/dev/null 2>&1 || return 1
+  else
+    _rex_cli --autostart=false kill "$s" >/dev/null 2>&1 || return 1
+  fi
+  if [ "$live" = 1 ]; then
+    for ((i = 0; i < 50; i++)); do _rex_live "$f" || break; sleep 0.1; done
+    ! _rex_live "$f" || return 1
+  fi
+  _rex_container_present "$f" || prc=$?
+  [ "$prc" = 1 ] || return 1
+  rm -f -- "$f"
 }
 
 # Prove the reporting process descends from this exact launch. An environment
@@ -331,6 +481,11 @@ _rex_resume_veto() { # <receipt>
         ws="$(ws_name "$(jq -r '.workspace // ""' "$f")" 2>/dev/null || true)"
         printf 'reviewers never resume - if %s#%s is still open: cel run reviewer --repo %s --pr %s%s' \
           "$repo" "$pr" "$repo" "$pr" "${ws:+ --workspace $ws}" ;;
+      # A member's only door is cel team add (a one-time token), which is
+      # the lead's: it opens the member as a window in the lead's session again.
+      member)
+        printf 'team members never resume - its lead retires and adds it again: cel team retire %s %s, then cel team add %s ...' \
+          "$(jq -r '.team // "<feature>"' "$f")" "$(jq -r '.name // ""' "$f")" "$(jq -r '.team // "<feature>"' "$f")" ;;
       *) printf 'its launch predates recorded relaunch lines - resume it by hand once (cel run ... --restart), which records one' ;;
     esac
     return 0
