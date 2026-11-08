@@ -160,17 +160,18 @@ cel - the celestial plane
                                 (Forgejo's draft is a WIP: title prefix)
   cel forge pr close <repo>#<n> [--comment-file f]
   cel forge pr ready <repo>#<n>  close a PR (branch kept) / take it out of
-                                draft; the owner, or the product's own agent
-                                on its own product's repos and its own
-                                account's PRs (or a migrated one by Ghost)
+                                draft; only the product's own agent, on its
+                                own product's repos and its own account's PRs
+                                (or a migrated one by Ghost) - the owner uses
+                                the forge's web UI or gh
   cel forge run list <repo> [--branch b] [--sha <head>] [--limit N]
   cel forge run view <repo> <run-id> | logs <repo> <job-id> [--tail N] [--raw]
                                 CI runs, a run's jobs, a job's log - read-only,
                                 Forgejo Actions or GitHub alike; ids are the
                                 API's (--sha lists a commit's runs and job ids)
   cel forge run rerun <repo> <job-id>
-                                run a job again on the same head (product
-                                agent on its own product's repos, or owner)
+                                run a job again on the same head (only the
+                                product agent on its own product's repos)
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
                                 and cel gc closes it when the PR closes

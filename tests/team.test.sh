@@ -50,7 +50,14 @@ EOS
   member_retire() { printf '%s\n' "$3${4:+ $4}" >> "$T/retire.log"; return "${TEAM_RETIRE_RC:-0}"; }
   cel_agent_list() { printf '{"result":{"agents":%s}}\n' "${TEAM_AGENTS:-[]}"; }
 }
-_t() { ( cd "$W" && cmd_team "$@" ) 2>&1; }
+# cel team as shop's lead (shop-orch) unless the caller already names a role
+# or a member; _noid runs it with no agent identity at all.
+_t() {
+  ( cd "$W"
+    if [ -z "${CEL_ROLE+x}" ] && [ -z "${CEL_TEAM_MEMBER:-}" ]; then export CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch; fi
+    cmd_team "$@" ) 2>&1
+}
+_noid() { ( cd "$W"; unset CEL_ROLE CEL_PRODUCT CEL_INBOX_ME CEL_TEAM_MEMBER CEL_TEAM; cmd_team "$@" ) 2>&1; }
 _start() { _t start login --product shop >/dev/null; }
 _cand() { _t event login candidate.updated --data "{\"repo\":\"$1\",\"head\":\"$2\",\"branch\":\"CEL-login\"}" >/dev/null; }
 _row() { jq -c --arg a "$1" '.members[] | select(.alias == $a)' "$W/.cel/teams/login/team.json"; }
@@ -228,7 +235,7 @@ test_a_budget_refusal_is_surfaced_and_leaves_nothing_behind() {
   rm -rf "$T"
 }
 
-test_only_the_lead_or_owner_adds_retires_and_closes() {
+test_only_the_lead_adds_retires_and_closes() {
   _team_fixture
   CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch _t start login --product shop >/dev/null
   local who out verb
@@ -305,7 +312,7 @@ test_concurrent_event_appends_under_the_lock_lose_nothing() {
     (
       read -r _ < "$T/go"
       for j in 1 2 3 4 5 6 7 8; do
-        ( cd "$W" && cmd_team event login decision --data "{\"w\":$i,\"n\":$j}" ) >/dev/null 2>&1 || echo "$i/$j" >> "$T/fail"
+        ( cd "$W" && CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch cmd_team event login decision --data "{\"w\":$i,\"n\":$j}" ) >/dev/null 2>&1 || echo "$i/$j" >> "$T/fail"
       done
     ) &
   done
@@ -379,8 +386,8 @@ test_retire_stays_live_when_the_pane_is_not_confirmed() {
   rm -rf "$T"
 }
 
-# Only <product>-orch or the owner starts a team - a lane of
-# the same product does not become a lead.
+# Only <product>-orch starts a team - a lane of the same product does not
+# become a lead.
 test_a_lane_cannot_start_or_lead_a_team() {
   _team_fixture
   local out
@@ -388,13 +395,101 @@ test_a_lane_cannot_start_or_lead_a_team() {
     && { echo "a lane started a team"; rm -rf "$T"; return 1; }
   assert_contains "$out" "only shop-orch, the product's orchestrator, leads its teams - not shop-x"
   [ ! -e "$W/.cel/teams/login" ] || { echo "a refused start left a team"; rm -rf "$T"; return 1; }
-  _t start login --product shop >/dev/null   # the owner
+  _t start login --product shop >/dev/null   # shop-orch
   assert_eq "$(jq -r .lead "$W/.cel/teams/login/team.json")" shop-orch
   rm -rf "$T"
 }
 
-# A decision records an owner's answer - only the lead or the
-# owner writes one; preview.ready is platform's, qa's or the lead's.
+# NO IDENTITY IS NOT THE OWNER. A process with no agent role - never launched
+# as one, or an agent that shed CEL_ROLE (env -u, setsid) - is refused every
+# lead verb and every write, and pointed at cel inbox / cel decide; a
+# contradictory product is refused too; members keep their own verbs.
+test_a_process_with_no_agent_identity_leads_nothing() {
+  _team_fixture
+  local out verb
+  out="$(_noid start login --product shop)" && { echo "no identity started a team"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel inbox send shop-orch" || { rm -rf "$T"; return 1; }
+  [ ! -e "$W/.cel/teams/login" ] || { echo "a refused start left a team"; rm -rf "$T"; return 1; }
+  _sub() { # <env args...> -- <cel team args...>: a fresh bash, functions and all re-sourced
+    local -a e=(); while [ "$1" != -- ]; do e+=("$1"); shift; done; shift
+    ( cd "$W" && "${e[@]}" bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/team.sh"; cmd_team "$@"' _ "$@" ) 2>&1
+  }
+  out="$(_sub env -u CEL_ROLE CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch -- start login --product shop)" \
+    && { echo "env -u CEL_ROLE started a team"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no agent role" || { rm -rf "$T"; return 1; }
+  out="$(_sub setsid -w env -u CEL_ROLE -u CEL_PRODUCT -u CEL_INBOX_ME -- start login --product shop)" \
+    && { echo "setsid started a team"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no agent role" || { rm -rf "$T"; return 1; }
+  out="$(CEL_ROLE=solo CEL_PRODUCT=other CEL_INBOX_ME=shop-orch _t start login --product shop)" \
+    && { echo "a contradictory identity started a team"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "name different products" || { rm -rf "$T"; return 1; }
+  [ ! -e "$W/.cel/teams/login" ] || { echo "a refused start left a team"; rm -rf "$T"; return 1; }
+  _start; _cand web "$HA"
+  _t add login qa --repo web >/dev/null
+  for verb in "add login platform" "retire login shop-login-qa" "close login" "cap login spend-10" \
+              "event login decision" "event login candidate.updated" "event login preview.ready" \
+              "verdict login --repo web --head $HA pass"; do
+    # shellcheck disable=SC2086  # $verb is words on purpose
+    out="$(_noid $verb)" && { echo "no identity: $verb went through"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "cel" || { rm -rf "$T"; return 1; }
+  done
+  out="$(_sub env -u CEL_ROLE CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch -- cap login spend-10)" \
+    && { echo "env -u CEL_ROLE set the cap"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.spend_cap // "none"' "$W/.cel/teams/login/team.json")" none || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -rs '[.[] | select(.type == "decision")] | length' "$W/.cel/teams/login/events.jsonl")" 0 || { rm -rf "$T"; return 1; }
+  assert_eq "$(_state shop-login-qa)" reserved || { rm -rf "$T"; return 1; }
+  # a member still acks by its member identity
+  CEL_ROLE=member CEL_TEAM_MEMBER=shop-login-qa CEL_TEAM=login _t ack login >/dev/null || { echo "a member could not ack"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# AN AGENT ACTS AS ITS LAUNCH. The nearest process above cel whose environ
+# (fixed at exec) carries CEL_ROLE is the agent's launch; an identity that
+# differs from it - re-dressed in the shell, however spelled - is refused,
+# and so is a role with no launch above it (setsid, a double fork). The
+# suite's /proc is CEL_PROC_DIR: here, the caller is $PPID.
+test_an_agent_acts_only_as_its_launch_environ_says() {
+  _team_fixture
+  local P="$T/proc" out
+  mkdir -p "$P/$PPID" "$P/4242"
+  _launch() { # <pid> <NUL-free environ entries...>: a process whose parent is 4242's, then init
+    local pid="$1"; shift
+    printf '%s\0' "$@" > "$P/$pid/environ"
+    if [ "$pid" = 4242 ]; then printf '4242 (omp) S 1 1 1' > "$P/4242/stat"; else printf '%s (bash) S 4242 1 1' "$pid" > "$P/$pid/stat"; fi
+  }
+  # the agent's runtime (4242) was launched as tools' agent; its tool shell
+  # ($PPID) carries no role of its own
+  _launch 4242 CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch
+  _launch "$PPID" HOME=/h
+  out="$(CEL_PROC_DIR="$P" _t start login --product shop)" && { echo "a re-dressed agent led another product's team"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "CEL_PRODUCT=shop but its launch (pid 4242) says CEL_PRODUCT=tools" || { rm -rf "$T"; return 1; }
+  [ ! -e "$W/.cel/teams/login" ] || { echo "a refused start left a team"; rm -rf "$T"; return 1; }
+  # the nearest carrier wins: a shell exec'd as shop's agent below it
+  _launch "$PPID" CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch
+  CEL_PROC_DIR="$P" _t start login --product shop >/dev/null || { echo "its own launch was refused"; rm -rf "$T"; return 1; }
+  # an extra mark the launch never had is a re-dressing too
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch CEL_TEAM_MEMBER=shop-login-qa _t cap login spend-10)" && { echo "an added mark passed"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "CEL_TEAM_MEMBER=shop-login-qa but its launch" || { rm -rf "$T"; return 1; }
+  # a member re-dressed as another member
+  _t add login qa --repo web >/dev/null; _t add login platform >/dev/null
+  _launch "$PPID" CEL_ROLE=member CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=shop-login-qa CEL_PRODUCT=shop
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=member CEL_TEAM=login CEL_TEAM_ROLE=platform CEL_TEAM_MEMBER=shop-login-platform CEL_PRODUCT=shop _t ack login)" \
+    && { echo "a member acked as another"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "its launch" || { rm -rf "$T"; return 1; }
+  CEL_PROC_DIR="$P" CEL_ROLE=member CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=shop-login-qa CEL_PRODUCT=shop _t ack login >/dev/null \
+    || { echo "a member was refused its own ack"; rm -rf "$T"; return 1; }
+  # detached (setsid, double fork): no launch above it vouches for the role
+  printf 'HOME=/h\0' > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"
+  out="$(CEL_PROC_DIR="$P" _t cap login spend-10)" && { echo "a detached agent set the cap"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no agent launch above it" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.spend_cap // "none"' "$W/.cel/teams/login/team.json")" none || { rm -rf "$T"; return 1; }
+  # status stays open whatever the caller is
+  CEL_PROC_DIR="$P" _t status login >/dev/null || { echo "status was refused"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A decision records an owner's answer - only the lead writes one;
+# preview.ready is platform's, qa's or the lead's.
 test_decision_and_preview_events_are_restricted() {
   _team_fixture; _start; _cand web "$HA"
   _t add login builder --repo web --owns 'src/**' >/dev/null

@@ -47,8 +47,12 @@ How work ships
    with `cel forge pr ready <repo>#<n>`; a PR you abandon is closed with
    `cel forge pr close <repo>#<n> [--comment-file f]` - your own product's
    repos and your account's PRs only (or a migrated one by Ghost). Run
-   `cel forge` as you are: never source lib/forge.sh, call its functions, or
-   set or unset CEL_* variables on its line - the guard refuses each. Where a
+   `cel` as you are: never source lib/forge.sh, call its functions, or set
+   CEL_* or HERDR_* variables on a `cel` line (cel forge, cel team, cel
+   inbox...) - the guard refuses each, and cel team checks you against your
+   launch; with your role or product shed, cel forge changes nothing. The owner closes, readies or
+   reruns anything else in the forge's web UI (or gh) - cel forge has no
+   owner path, so ask them rather than route around it. Where a
    `pr: none` repo is named, follow that line instead.
 5. Where the workspace declares PR review, start the reviewer right away:
    `cel run reviewer --repo <repo> --pr <n>`, then tell it by
@@ -68,8 +72,10 @@ Leading a feature team
   be built independently and at the same time, or needs a specialist you are
   not (device QA, design, data, a release check). One change, a bug fix, a
   refactor in one place: no team. When in doubt, no team.
-- START. Only the product's orchestrator (`<product>-orch`) or the owner
-  starts and leads a team; a lane that needs one asks it by `cel inbox`.
+- START. Only the product's orchestrator (`<product>-orch`) starts and leads
+  a team; a lane that needs one asks it by `cel inbox`, and the owner asks
+  it by `cel inbox` or a `cel decide` answer (a shell with no agent role
+  runs no `cel team` verb but `status`).
   `cel team start <feature> --product <p> [--repo r]... --brief-file
   <f>` creates `<workspace>/.cel/teams/<feature>/`: brief.md,
   acceptance.yaml (`criteria: [{id, text, evidence}]`), contracts/,

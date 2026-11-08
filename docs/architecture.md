@@ -110,11 +110,24 @@ calls nothing external while holding it - the budget, git, the launcher,
 herdr and the inbox are all called outside it - and JSON is written temp +
 rename. `cel team start` builds the folder aside and renames it into place,
 so a half-made team is never visible and a second start of the id fails.
-Authority is checked in `cel team` itself: start, add, retire, close and
-`cap` belong to `<product>-orch` (the lead) or the owner's shell; a
-`decision` event and the spend cap (`team.json` `spend_cap`) are the lead's
-or the owner's only, so nothing a member writes - brief.md included - can
-grant spend or authority.
+Authority is checked in `cel team` itself, and only positively: start, add,
+retire, close and `cap` belong to `<product>-orch` (the lead: `CEL_ROLE` solo
+or orchestrator, its product from `CEL_PRODUCT` and/or its mailbox, agreeing
+and naming the team's product); a `decision` event and the spend cap
+(`team.json` `spend_cap`) are the lead's only, so nothing a member writes -
+brief.md included - can grant spend or authority. There is no owner path: a
+process with no agent role (an agent can shed one with `env -u` or `setsid`)
+is refused and the owner asks the lead by `cel inbox` or `cel decide`.
+Members act by their member identity (ack, event, verdict). Every writing
+verb also checks that identity against the agent's launch
+(`_team_launch_identity`): the nearest process above `cel` whose
+`/proc/<pid>/environ` - fixed at exec, the marks `cel gc` proves agents by -
+carries `CEL_ROLE` must agree on `CEL_ROLE`, `CEL_PRODUCT`, `CEL_INBOX_ME`,
+`CEL_INBOX_WS` and the `CEL_TEAM*` variables, so a shell re-dressed with
+`export` or a variable-held name is refused, and so is a role with no launch
+above it (detached by `setsid` or a double fork). A process that execs a
+fresh environment carrying `CEL_ROLE` is its own nearest launch; that
+spelling is the guard's to refuse.
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
@@ -333,19 +346,20 @@ view|checks|reviews|list|create|close|ready`, `run list|view|logs|rerun`,
 job logs included - to every role; it refuses `pr create` to orchestrators
 and core, as it refuses `gh pr create`, and a reviewer never opens a PR; `pr
 close`, `pr ready` and `run rerun` belong to the product's own agent (solo or
-orchestrator) and the owner, refused to core, root, members and reviewers.
-`cel forge` itself decides who is asking (`_forge_cli_authorise`): the owner
-is a process with NO agent mark - none of the variables a launch sets
-(`CEL_ROLE`, `CEL_INBOX_ME`, `CEL_SESSION_ID`, `CEL_PRODUCT`, `CEL_TEAM*`...),
-not even emptied, and no ancestor whose environ carried one (every runtime
-is exec'd under `env CEL_ROLE=...`); an empty `CEL_ROLE` is never the owner.
-An agent with `CEL_ROLE` solo or orchestrator may change only its OWN
-product's repos (`CEL_PRODUCT`, else its `<product>-orch` mailbox), and a PR
-only if its workspace's account authored it or it is a migrated Forgejo PR
-(author `Ghost`). Every agent and the owner act as that one account, so
-authorship cannot tell an agent's own PR from the owner's on the same
-product - that is the limit. Closing never deletes the branch; a rerun keeps
-the head, so an approval of it stands.
+orchestrator) alone, refused to core, root, members and reviewers.
+`cel forge` itself decides who is asking (`_forge_cli_authorise`), and only
+positively: `CEL_ROLE` solo or orchestrator AND a product - `CEL_PRODUCT`
+and/or its `<product>-orch` mailbox, agreeing when both are set - that owns
+the repo; anything missing or contradictory is refused. There is NO owner
+path: the absence of an agent's marks proves nothing (an agent can shed them
+with `env -u`, `setsid` or a fresh environment), so a process with no agent
+identity is refused every write and told to use the forge's web UI (Forgejo
+or GitHub) or `gh` directly - which is what the owner does. Its reads stay
+open to everyone. A PR is changed only if the workspace's account authored
+it or it is a migrated Forgejo PR (author `Ghost`). Every agent acts as that
+one account, so authorship cannot tell one agent's PR from another's on the
+same product - that is the limit. Closing never deletes the branch; a rerun
+keeps the head, so an approval of it stands.
 There is no merge verb: merging goes through `cel solo land`. The same writes
 by hand - curl at a forge API with a body or a non-GET method in any
 spelling, `tea api` beyond a plain GET, tea's write verbs - are refused to
@@ -355,11 +369,15 @@ shell, or by the native read and edit tools where the guard hook runs); no
 role may source `lib/forge.sh` or call its `_forge_*`/`forge_*` functions
 (also in `bash -c`, `$(...)`, `eval`, or through a variable holding the
 name), which carry the token without `cel forge`'s checks; and no role may
-run `cel forge` on a line that sets, empties or unsets a `CEL_*` variable
-(`VAR=`, `env -u`, `env -i`, `unset`, `export`). Like the rest of the guard
-these are tripwires matched as text, not a sandbox: a script file that
-sources the library, or a name assembled at run time, still runs - which is
-why `cel forge` checks the caller's marks and ancestry itself.
+run any `cel` command on a line that sets a `CEL_*` or `HERDR_*` variable,
+even to empty (`VAR=`, `env VAR=`, `export`, `declare`) - dressing up as
+another product, lead, member or mailbox (`CEL_GUARD_ALLOW_ONCE`, the human's
+approval, does not count; `cel inbox send --from` is a flag). Shedding one
+(`unset`, `env -u`, `env -i`, `setsid`) is left to `cel forge` and `cel
+team`, which change nothing for a process with no agent identity. Like the rest of
+the guard these are tripwires matched as text, not a sandbox: a script file
+that sources the library, or a name assembled at run time, still runs -
+which is why `cel forge` checks who is asking itself.
 
 - **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
   `CEL_FORGE_GH` is its test seam.

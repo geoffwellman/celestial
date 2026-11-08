@@ -103,43 +103,91 @@ _team_event_locked() { # <dir> <by> <type> <data-json>  - under the lock
 
 # --- who is asking ----------------------------------------------------------
 
-# The caller's name in the team's records: a member's alias, an agent's
-# mailbox, or `owner` for a person's shell (no CEL_ROLE).
+# The caller's name in the team's records: a member's alias, else an agent's
+# mailbox. There is no `owner` caller: a missing CEL_ROLE proves nothing.
 _team_caller() {
   if [ -n "${CEL_TEAM_MEMBER:-}" ]; then cel_alias_norm "$CEL_TEAM_MEMBER"; return 0; fi
   if [ -n "${CEL_INBOX_ME:-}" ]; then cel_alias_norm "$CEL_INBOX_ME"; return 0; fi
-  if [ -z "${CEL_ROLE:-}" ]; then printf owner; return 0; fi
   _inbox_me
 }
 
 # The product a solo/orchestrator agent was launched for: CEL_PRODUCT (lanes
-# carry it), else its `<product>-orch` mailbox. Nothing for anyone else.
+# carry it) and/or its `<product>-orch` mailbox. Nothing for anyone else;
+# fails when the two name different products.
 _team_agent_product() {
   case "${CEL_ROLE:-}" in solo|orchestrator) ;; *) return 0 ;; esac
-  if [ -n "${CEL_PRODUCT:-}" ]; then printf '%s' "$CEL_PRODUCT"; return 0; fi
-  case "${CEL_INBOX_ME:-}" in *-orch) printf '%s' "${CEL_INBOX_ME%-orch}" ;; esac
+  local p="${CEL_PRODUCT:-}" m=""
+  case "${CEL_INBOX_ME:-}" in *-orch) m="${CEL_INBOX_ME%-orch}" ;; esac
+  [ -z "$p" ] || [ -z "$m" ] || [ "$p" = "$m" ] || return 1
+  printf '%s' "${p:-$m}"
 }
 
 # THE LEAD STARTS AND RUNS A TEAM: the product's own agent `<product>-orch`
-# (solo or orchestrator, launched for THAT product in THAT workspace) or the
-# owner at their own shell. Lanes, members, reviewers, core and other
-# products' agents are refused - a team is one product's integration, owned
-# by one agent.
+# (solo or orchestrator, launched for THAT product in THAT workspace), proven
+# positively. There is no owner path: an agent can shed CEL_ROLE (env -u,
+# setsid), so a process with no role is refused, and the owner asks the
+# product's agent by cel inbox or cel decide. Lanes, members, reviewers, core
+# and other products' agents are refused - a team is one product's
+# integration, owned by one agent.
 _team_require_lead() { # <wsdir> <product> <verb> [team-lead-alias]
   local wsdir="$1" product="$2" verb="$3" lead="${4:-}"
-  [ -n "${CEL_ROLE:-}" ] || return 0
-  case "$CEL_ROLE" in
+  case "${CEL_ROLE:-}" in
     solo|orchestrator) ;;
-    *) die "cel team $verb: only the product's lead (its solo/orchestrator agent) or the owner may do this - this process is CEL_ROLE=$CEL_ROLE" ;;
+    "") die "cel team $verb: only the product's lead ($product-orch, its solo/orchestrator agent) does this, and this process carries no agent role - a missing role proves nothing, so it is refused. The owner asks the product's agent: cel inbox send $product-orch \"...\", or answers its cel decide question" ;;
+    *) die "cel team $verb: only the product's lead (its solo/orchestrator agent) may do this - this process is CEL_ROLE=$CEL_ROLE" ;;
   esac
-  local mine; mine="$(_team_agent_product)"
-  [ "$mine" = "$product" ] \
+  local mine
+  mine="$(_team_agent_product)" \
+    || die "cel team $verb: this agent's CEL_PRODUCT ($CEL_PRODUCT) and mailbox ($CEL_INBOX_ME) name different products - refused"
+  [ -n "$mine" ] && [ "$mine" = "$product" ] \
     || die "cel team $verb: this agent leads product '${mine:-unknown}', not '$product' - another product's team is its own agent's"
   [ -z "${CEL_INBOX_WS:-}" ] || [ "$CEL_INBOX_WS" = "$(ws_name "$wsdir")" ] \
     || die "cel team $verb: this agent belongs to workspace '$CEL_INBOX_WS', not '$(ws_name "$wsdir")'"
   if [ -n "$lead" ] && [ "$(_team_caller)" != "$lead" ]; then
     die "cel team $verb: only $lead, the product's orchestrator, leads its teams - not $(_team_caller) (a lane asks it by cel inbox)"
   fi
+}
+
+# THE LAUNCH SAYS WHO AN AGENT IS. `cel run` execs every agent runtime under
+# `env CEL_ROLE=... CEL_PRODUCT=...` (lib/run.sh _run_launch_env), and
+# /proc/<pid>/environ is fixed at exec - the marks `cel gc` proves agents by.
+# An agent that re-dresses its own shell (`export CEL_PRODUCT=other`,
+# `X=CEL_PRODUCT; declare -x "$X=other"`, `bash -c 'CEL_ROLE=solo cel ...'`)
+# changes its variables but not the environ its launch fixed. So from the
+# caller (cel's parent) upward, the nearest process whose environ carries
+# CEL_ROLE is this agent's launch, and every identity variable here must
+# equal that environ's (set to the same value, or unset in both). A process
+# that claims a role or a membership with no such launch above it - detached
+# by `setsid` or a double fork, or never launched - is refused: nothing
+# vouches for it. Limit: a process that execs a fresh environment carrying
+# CEL_ROLE (`env CEL_ROLE=solo CEL_PRODUCT=x bash -c ...`) is its own nearest
+# launch; that spelling is the guard's to refuse (_guard_cel_env_tamper).
+# Under the suite the proc root is CEL_PROC_DIR (the seam lib/inbox.sh
+# uses), and without one the check is skipped: a test must never read the
+# environ of the agent that happens to run it.
+_TEAM_IDENTITY_VARS='CEL_ROLE CEL_PRODUCT CEL_INBOX_ME CEL_INBOX_WS CEL_TEAM CEL_TEAM_ROLE CEL_TEAM_MEMBER'
+_team_launch_identity() { # <verb> -> dies unless this identity is its launch's
+  local proc=/proc pid="$PPID" n=0 stat item v
+  if [ -n "${CEL_TESTING:-}" ]; then proc="${CEL_PROC_DIR:-}"; [ -n "$proc" ] || return 0; fi
+  [ -n "${CEL_ROLE:-}${CEL_TEAM_MEMBER:-}" ] || return 0   # no identity: the verb refuses it
+  local -A env=()
+  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
+    if grep -qsz '^CEL_ROLE=' "$proc/$pid/environ"; then
+      while IFS= read -r -d '' item; do
+        case "$item" in CEL_*=*) env["${item%%=*}"]="${item#*=}" ;; esac
+      done < <({ cat "$proc/$pid/environ"; } 2>/dev/null)
+      for v in $_TEAM_IDENTITY_VARS; do
+        if [ "${!v+set}" != "${env[$v]+set}" ] || [ "${!v:-}" != "${env[$v]:-}" ]; then
+          die "cel team $1: this process says $v=${!v-<unset>} but its launch (pid $pid) says $v=${env[$v]-<unset>} - an agent acts as the one it was launched as; nothing changed"
+        fi
+      done
+      return 0
+    fi
+    stat="$({ cat "$proc/$pid/stat"; } 2>/dev/null)" || break
+    stat="${stat##*) }"; stat="${stat#* }"; pid="${stat%% *}"
+    n=$((n + 1))
+  done
+  die "cel team $1: this process claims CEL_ROLE=${CEL_ROLE:-} ${CEL_TEAM_MEMBER:+CEL_TEAM_MEMBER=$CEL_TEAM_MEMBER }but no agent launch above it carries one (detached, or never launched) - nothing vouches for it; nothing changed"
 }
 
 # --- builder ownership -------------------------------------------------------
@@ -683,9 +731,9 @@ _team_event_append_locked() { # <dir> <by> <type> <data>
     '.members |= map(if .alias == $a and (.state == "ready" or .state == "working" or .state == "done") then .state = $n else . end)'
 }
 
-# Who the caller is to this team: lead, member <role>, owner, reviewer, or
-# nothing (refused).
-_team_standing() { # <dir> -> lead|owner|reviewer|member:<role>|""
+# Who the caller is to this team: lead, member <role>, reviewer, or nothing
+# (refused). A process with no role is nothing - never the owner.
+_team_standing() { # <dir> -> lead|reviewer|member:<role>|""
   local me; me="$(_team_caller)"
   if [ -n "${CEL_TEAM_MEMBER:-}" ] || [ "${CEL_ROLE:-}" = member ]; then
     [ -z "${CEL_TEAM:-}" ] || [ "$CEL_TEAM" = "$(jq -r .feature "$1/team.json")" ] || return 0
@@ -693,10 +741,11 @@ _team_standing() { # <dir> -> lead|owner|reviewer|member:<role>|""
     [ -z "$r" ] || printf 'member:%s' "$r"
     return 0
   fi
-  [ -n "${CEL_ROLE:-}" ] || { printf owner; return 0; }
-  case "$CEL_ROLE" in
+  case "${CEL_ROLE:-}" in
     reviewer) printf reviewer ;;
-    solo|orchestrator) [ "$me" = "$(jq -r .lead "$1/team.json")" ] && printf lead ;;
+    solo|orchestrator)
+      local mine; mine="$(_team_agent_product)" || return 0
+      [ "$mine" = "$(jq -r .product "$1/team.json")" ] && [ "$me" = "$(jq -r .lead "$1/team.json")" ] && printf lead ;;
   esac
   return 0
 }
@@ -728,16 +777,17 @@ _team_event() {
   wsdir="$(_team_wsdir "$workspace")" || exit 1
   dir="$(_team_open_dir "$wsdir" "$feature")" || exit 1
   standing="$(_team_standing "$dir")"
-  [ -n "$standing" ] || die "cel team event: only this team's lead, its members, a reviewer or the owner append to it"
+  [ -n "$standing" ] || die "cel team event: only this team's lead, its members or a reviewer append to it - a process with no agent identity is refused; the owner asks the lead by cel inbox or answers its cel decide question"
   case "$type" in
     # A decision records an OWNER's answer (cel decide): only the lead, who
-    # asked it, or the owner writes one - a member cannot forge one.
+    # asked it, writes one - a member cannot forge one, and a process with no
+    # identity is not taken for the owner.
     decision)
-      case "$standing" in lead|owner) ;; *) die "cel team event: a decision records the owner's answer and is the lead's to write - bring the question to the lead (it files cel decide ask)";; esac ;;
+      case "$standing" in lead) ;; *) die "cel team event: a decision records the owner's answer and is the lead's to write - bring the question to the lead (it files cel decide ask)";; esac ;;
     preview.ready)
-      case "$standing" in lead|owner|member:platform|member:qa) ;; *) die "cel team event: preview.ready is posted by the platform or qa member, or the lead";; esac ;;
+      case "$standing" in lead|member:platform|member:qa) ;; *) die "cel team event: preview.ready is posted by the platform or qa member, or the lead";; esac ;;
     candidate.updated)
-      case "$standing" in lead|owner) ;; *) die "cel team event: candidate.updated is the lead's - it alone integrates";; esac
+      case "$standing" in lead) ;; *) die "cel team event: candidate.updated is the lead's - it alone integrates";; esac
       jq -e --argjson d "$data" '$d.head | type == "string" and test("^[0-9a-f]{40}$")' -n >/dev/null \
         || die "cel team event: candidate.updated needs data.head, a full 40-character commit sha"
       jq -e --argjson d "$data" '.repos | index($d.repo)' "$dir/team.json" >/dev/null \
@@ -797,9 +847,8 @@ _team_verdict() {
     member:*) role="${standing#member:}"
               focus="$(jq -r --arg a "$by" '.members[] | select(.alias == $a) | .focus // ""' "$dir/team.json")" ;;
     reviewer) role=reviewer ;;
-    owner)    role=owner ;;
     lead)     die "cel team verdict: the lead does not judge the candidate it integrated - ask qa or a reviewer" ;;
-    *)        die "cel team verdict: only this team's members, a reviewer or the owner record verdicts" ;;
+    *)        die "cel team verdict: only this team's members or a reviewer record verdicts - a process with no agent identity is refused; the owner tells the lead by cel inbox or cel decide" ;;
   esac
   local evj='[]' sum
   for p in "${ev[@]}"; do
@@ -997,7 +1046,7 @@ _team_retire() {
 }
 
 # THE SPEND CAP IS THE LEAD'S. Members default to zero; a cap the owner
-# decided is written here by the lead (or the owner), never into brief.md,
+# decided is written here by the lead alone, never into brief.md,
 # which members can write. Recorded as a decision event too.
 _team_cap_locked() { # <dir> <by> <text>
   if [ -z "$3" ]; then
@@ -1113,6 +1162,8 @@ EOS
 
 cmd_team() {
   local sub="${1:-help}"; shift 2>/dev/null || true
+  # Every verb that writes acts only as the identity this agent was launched with.
+  case "$sub" in start|add|ack|event|verdict|retire|close|cap) _team_launch_identity "$sub" ;; esac
   case "$sub" in
     start)   _team_start "$@" ;;
     add)     _team_add "$@" ;;

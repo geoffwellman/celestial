@@ -345,22 +345,34 @@ test_cel_forge_runs_are_everyones_and_close_ready_the_product_agents() {
   done
   rm -rf "$T"
 }
-# `cel forge` reads who is asking from its environment, so a line that runs
-# it while setting, emptying or unsetting a CEL_* variable is refused to every
-# role - the way an agent would dress up as the owner or another product.
-test_cel_forge_with_a_tampered_cel_environment_is_refused() {
+# `cel` reads who is asking from its environment, so a line that runs any cel
+# command while SETTING a CEL_* or HERDR_* variable (even to empty, exported
+# or declared) is refused to every role - the way an agent would dress up as
+# another product, lead, member or mailbox. Shedding marks (unset, env -u,
+# env -i) gains nothing: cel forge and cel team refuse a process with no
+# agent identity, so the guard leaves those lines to them. The human's
+# CEL_GUARD_ALLOW_ONCE is not an identity and does not count.
+test_cel_with_a_tampered_cel_environment_is_refused() {
   local role c
-  for role in orchestrator root core solo other; do
-    for c in 'CEL_ROLE= cel forge pr close gizmo#3' 'env -u CEL_ROLE cel forge pr close gizmo#3' \
-             'env --unset=CEL_ROLE cel forge pr ready gizmo#3' 'unset CEL_ROLE; cel forge pr close gizmo#3' \
-             'export CEL_ROLE=; cel forge pr close gizmo#3' 'env -i PATH=/usr/bin cel forge pr close gizmo#3' \
+  for role in orchestrator root core solo other member; do
+    for c in 'CEL_ROLE= cel forge pr close gizmo#3' 'export CEL_ROLE=; cel forge pr close gizmo#3' \
              'CEL_PRODUCT=other cel forge run rerun gizmo 15' 'CEL_INBOX_ME=x-orch cel --workspace w forge pr ready gizmo#3' \
-             'env CEL_ROLE=solo /home/u/celestial/bin/cel forge pr close gizmo#3' 'unset CEL_INBOX_ME CEL_ROLE && cel forge run list gizmo'; do
-      case "$(guard_classify "$role" "$c")" in "deny cel forge reads who is asking"*) ;; *) echo "$role allowed: $c"; return 1;; esac
+             'env CEL_ROLE=solo /home/u/celestial/bin/cel forge pr close gizmo#3' 'declare -x CEL_PRODUCT=x; cel forge pr ready gizmo#3' \
+             'env -i PATH=/usr/bin CEL_ROLE=solo cel forge pr close gizmo#3' \
+             'CEL_PRODUCT=other CEL_INBOX_ME=other-orch cel team start login --product other' \
+             'export CEL_PRODUCT=other; cel team cap login "x"' 'CEL_TEAM_MEMBER=other-login-qa cel team verdict login --repo web --head x pass' \
+             'CEL_INBOX_ME=widget-orch cel inbox read' 'env CEL_INBOX_WS=other cel inbox send root hi' \
+             'HERDR_PANE_ID=p9 cel run reviewer --repo r --pr 1' 'typeset -x HERDR_PANE_ID=p9; cel status' \
+             'CEL_WORKSPACE=/w cel team status' 'CEL_GUARD_ALLOW_ONCE=1 CEL_PRODUCT=other cel team start x --product other'; do
+      case "$(guard_classify "$role" "$c")" in "deny cel reads who is asking"*) ;; *) echo "$role allowed: $c"; return 1;; esac
     done
   done
-  for c in 'cel forge pr close gizmo#3' 'cel --workspace sandbox forge run list gizmo' 'echo CEL_ROLE=x' 'unset CEL_ROLE; cel inbox read'; do
-    case "$(guard_classify solo "$c")" in "deny cel forge reads who is asking"*) echo "refused: $c"; return 1;; esac
+  for c in 'cel forge pr close gizmo#3' 'cel --workspace sandbox forge run list gizmo' 'echo CEL_ROLE=x' 'unset CEL_ROLE; cel inbox read' \
+           'env -u CEL_ROLE cel forge pr close gizmo#3' 'unset CEL_INBOX_ME CEL_ROLE && cel forge run list gizmo' \
+           'env -i PATH=/usr/bin cel forge pr close gizmo#3' 'cel team status login' \
+           'cel inbox send celestial-orch "done" --from celestial-pr-1-review --workspace plane' \
+           'CEL_GUARD_ALLOW_ONCE=1 cel team status' 'grep -r CEL_ROLE= lib/' 'X=1 make -C ~/.cel/solo/x'; do
+    case "$(guard_classify solo "$c")" in "deny cel reads who is asking"*) echo "refused: $c"; return 1;; esac
   done
 }
 # ...and the hook enforces it where it runs: a reviewer pane outside any
