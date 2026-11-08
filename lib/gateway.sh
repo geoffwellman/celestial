@@ -37,6 +37,11 @@ gateway_state_dir() { printf '%s' "${CEL_GATEWAY_STATE:-${XDG_DATA_HOME:-$HOME/.
 gateway_config_file() { printf '%s/config.yaml' "$(gateway_state_dir)"; }
 gateway_auth_dir()   { printf '%s/auth' "$(gateway_state_dir)"; }
 _gateway_key_file()  { printf '%s/api-key' "$(gateway_state_dir)"; }
+# A rotation in flight (cel gateway rotate-key, lib/gateway-rotate.sh): the
+# minted key waits in api-key.next until the gateway accepts it, then becomes
+# api-key while the old one waits in api-key.previous for --finish.
+_gateway_key_next_file()     { printf '%s/api-key.next' "$(gateway_state_dir)"; }
+_gateway_key_previous_file() { printf '%s/api-key.previous' "$(gateway_state_dir)"; }
 _gateway_mgmt_key_file() { printf '%s/management-key' "$(gateway_state_dir)"; }
 
 # The port, from the box config, with CLIProxyAPI's default. `gateway.port` is
@@ -60,7 +65,9 @@ gateway_installed() {
 }
 
 # Mint a 32-byte hex secret into <file> once, in a 0700 dir. MINTED ONCE
-# MATTERS: rolling a key would 401 every client already holding it.
+# MATTERS: replacing a key in place would 401 every client already holding it;
+# the client key changes only through `cel gateway rotate-key`, which keeps
+# the old one accepted until its holders have been restarted.
 _gateway_mint_secret() { # <file>
   local f="$1"
   [ -s "$f" ] && return 0
@@ -68,12 +75,34 @@ _gateway_mint_secret() { # <file>
   ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
 }
 
-# The api-key, read from a 0600 file. A rolled key reads as "the model is
-# gone" to every pi worker already launched against this gateway.
+# The api-key, read from a 0600 file. A key swapped under a running pi worker
+# reads as "the model is gone" to it - hence rotate-key's two-key window.
 _gateway_api_key() {
   local f; f="$(_gateway_key_file)"
   _gateway_mint_secret "$f"
   tr -d '\r\n' < "$f"
+}
+
+# The keys config.yaml lists, as its `api-keys:` entries, oldest first: api-key alone, and
+# during a rotation api-key.previous before it or api-key.next after it. Read
+# from the files on every write, so a config rewritten mid-rotation (cel
+# update's refresh) keeps accepting the key every running agent still holds.
+# Never printed: it feeds the config file only.
+_gateway_accepted_keys() {
+  local f k seen=" "
+  for f in "$(_gateway_key_previous_file)" "$(_gateway_key_file)" "$(_gateway_key_next_file)"; do
+    if [ "$f" = "$(_gateway_key_file)" ]; then
+      k="$(_gateway_api_key)"
+    elif [ -s "$f" ]; then
+      k="$(tr -d '\r\n' < "$f")"
+    else
+      continue
+    fi
+    [ -n "$k" ] || continue
+    case "$seen" in *" $k "*) continue ;; esac
+    seen="$seen$k "
+    printf '  - "%s"\n' "$k"
+  done
 }
 
 # The management secret: a panel already open in a browser holds it. 0600 in
@@ -331,9 +360,10 @@ port: $(gateway_port)
 auth-dir: "$(gateway_auth_dir)"
 
 # The static bearer every /v1 route requires. pi is handed the NAME of the
-# variable that holds it, never the value.
+# variable that holds it, never the value. Two entries only while a rotation
+# is in flight (cel gateway rotate-key): the old key and the new one.
 api-keys:
-  - "$(_gateway_api_key)"
+$(_gateway_accepted_keys)
 
 # Provider prefixes stay off, so model ids reach pi plain (gpt-5.5, not
 # ompgw/openai-codex/gpt-5.5): the plane splits a model id on the first slash.
@@ -912,7 +942,8 @@ _gateway_omp_scope_cmd() { # [--check|--apply|--json]
 # service entry, pi's models.json and omp's models.yml (so a gateway catalog
 # that gained a versioned Codex id is registered), and the agent-root
 # invariant. Idempotent: the api-key and management key are minted once and
-# never rolled, unrelated providers in the owner's files are preserved, no
+# never rolled here (a rotation in flight keeps both its keys in the rewrite),
+# unrelated providers in the owner's files are preserved, no
 # credential is read or written, nothing is restarted - CLIProxyAPI reloads
 # its config file on change. Returns non-zero when anything that SHOULD have
 # been registered was not, and says which.
@@ -1004,6 +1035,12 @@ cel gateway - several subscriptions behind one loopback door
       [--sync --workspace NAME --agent ALIAS [--dry-run]]
                                      opt-in private scoped config publication;
                                      requires coordinated activation, never reloads
+  cel gateway rotate-key [--status]  a client-key rotation: which keys the
+                                     config accepts, who still holds the old
+                                     key, and the restart plan (agents may read)
+  cel gateway rotate-key --stage|--finish [--force]|--abort [--force]
+                                     owner only: replace the client key with
+                                     no downtime (lib/gateway-rotate.sh)
 EOS
 }
 
@@ -1128,6 +1165,10 @@ cmd_gateway() {
       fi ;;
     omp-scope) _gateway_omp_scope_cmd "$@" ;;
     opencode-models) _gateway_opencode_models "$@" ;;
+    rotate-key)
+      # shellcheck source=lib/gateway-rotate.sh
+      . "${BASH_SOURCE[0]%/*}/gateway-rotate.sh"
+      gateway_rotate_key "$@" ;;
     refresh) gateway_refresh ;;
     help|-h|--help) _gateway_usage ;;
     *) c_err "cel gateway: unknown verb '$verb'"; echo; _gateway_usage; return 2 ;;

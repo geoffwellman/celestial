@@ -1253,6 +1253,7 @@ one has left.
 cel gateway install          # CLIProxyAPI as one box service, loopback only
 cel gateway status           # one row per account: provider, id, plan, email
 cel gateway login claude     # sign another subscription in (--no-browser: device flow)
+cel gateway rotate-key       # a client-key rotation: accepted keys, old-key holders, restart plan
 ```
 
 Under it is **one** process, `cli-proxy-api`: it is both the credential vault —
@@ -1318,6 +1319,25 @@ Three things are worth knowing before you rely on it:
 - **One api-key grants every subscription in the vault** to anything that can
   reach the port. The service binds loopback only, the config is `0600`, and
   nothing prints the key.
+
+**Rotating the client key (owner only).** A running agent keeps the key it
+was launched with, so the key is replaced in stages, with no downtime:
+
+```bash
+cel gateway rotate-key --stage    # mint a new key; the gateway accepts old + new; new launches get the new key
+cel gateway rotate-key --status   # who still holds the old key (name, pid) and the exact restart for each
+cel gateway rotate-key --finish   # refused while anyone holds the old key (--force cuts them off); old -> 401
+cel gateway rotate-key --abort    # before --finish: the old key becomes the only key again
+```
+
+`--stage` checks that both keys get HTTP 200 from `/v1/models` before
+`api-key` changes. The old key waits in `api-key.previous` until `--finish`,
+which confirms the old key now gets 401 and the new one 200. Restart the
+holders in the order `--status` prints, with root and core last. Reviewers
+finish their round on their own. Holders are matched by the sha256 of the
+key in their `/proc` environment, and no key value is ever printed. Staging,
+finishing and aborting are refused to agents. Run them from your own shell.
+Any agent may read `--status`.
 
 **The pinned release has a floor: 8.0.22.** `agents.yaml` pins CLIProxyAPI
 8.0.29. Releases before 8.0.22 can bench a Claude account until the monthly

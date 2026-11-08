@@ -279,6 +279,29 @@ test_no_agent_reads_or_writes_the_forge_token() {
   # the plane's own files are not the token
   assert_eq "$(guard_classify orchestrator 'cat lib/forge.sh tests/fixtures/forge/forgejo/pull.json')" allow
 }
+# Rotating the gateway client key is the owner's: every agent pane, whatever
+# its role, is refused --stage, --finish and --abort however it spells the
+# call, and may still read the rotation - a team member excepted, whose own
+# short list of cel verbs it is not on.
+test_no_agent_rotates_the_gateway_key_but_any_may_read_it() {
+  local role c
+  for role in orchestrator root core solo member other; do
+    for c in 'cel gateway rotate-key --stage' 'cel gateway rotate-key --finish' \
+             'cel gateway rotate-key --finish --force' 'cel gateway rotate-key --abort --force' \
+             '/home/u/celestial/bin/cel gateway rotate-key --stage' 'env -u CEL_ROLE cel gateway rotate-key --stage' \
+             'cd /tmp && cel gateway rotate-key --abort' "bash -c 'cel gateway rotate-key --finish'" \
+             'cel --workspace plane gateway rotate-key --stage' \
+             'env -u CEL_ROLE -u OMP_GATEWAY_TOKEN /home/u/celestial/bin/cel gateway rotate-key --finish'; do
+      case "$(guard_classify "$role" "$c")" in
+        deny*'owner'*) ;;
+        *) echo "$role allowed: $c"; return 1 ;;
+      esac
+    done
+    [ "$role" != member ] || continue
+    case "$(guard_classify "$role" 'cel gateway rotate-key --status')" in deny*) echo "$role may not read the rotation"; return 1 ;; esac
+    case "$(guard_classify "$role" 'cel gateway rotate-key')" in deny*) echo "$role may not read the rotation (bare)"; return 1 ;; esac
+  done
+}
 # lib/forge.sh is cel's own code: sourcing it and calling its functions
 # reaches the forge with the token and none of `cel forge`'s checks (a
 # product agent closed PRs that way). Refused to every role however it is
