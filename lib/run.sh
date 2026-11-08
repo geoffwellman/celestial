@@ -1104,7 +1104,7 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
     if [ "$dry" = 1 ]; then
       printf 'rex new core --cwd %s --shell=none -- <private launch script: %s%s>\n' "$cwd" "$(_rex_launch_line "$runtime" "$dry_envprefix" "$runtime" run)" "$(_run_dry_agent_args)"
     else
-      _rex_launch core "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}"
+      _rex_launch core "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || return $?
     fi
     return 0
   fi
@@ -1416,12 +1416,30 @@ _run_restart_backend() { # <restart-pane>
   session_backend="$host"
 }
 
+# THE LINE THAT BRINGS A STOPPED AGENT BACK: its recorded relaunch line
+# (_run_rex_relaunch, the caller's _REX_RELAUNCH). Without one, never a bare
+# `cel`: the hand restart, named as far as this launch knows it.
+_run_restart_back() { # <role> <agent-name> -> one sentence
+  local line r="$1"
+  if line="$(jq -er 'select(type == "array" and length > 0 and all(.[]; type == "string")) | join(" ")' <<<"${_REX_RELAUNCH:-}" 2>/dev/null)"; then
+    printf 'Bring it back with: cel %s' "$line"; return 0
+  fi
+  if [ "$r" = core ]; then line='cel core'
+  else
+    [ "${solo_forced:-0}" != 1 ] || r=solo
+    line="cel run $r${product:+ --product $product}${lane:+ --lane $lane}${wsdir:+ --workspace $(ws_name "$wsdir")}"
+  fi
+  printf 'No relaunch line was recorded for %s: restart it by hand with %s --session-backend rex, adding the profile/model it ran on' "$2" "$line"
+}
+
 # RESTART IN PLACE: exit the agent in its pane, leaving the pane and its
 # shell, and start the current launch line there under the same name.
 # A Rex agent is stopped only once its relaunch line has passed its own
 # launcher's admission (rex_launch_check): a line that would be refused leaves
-# the agent running. A relaunch that still dies takes its terminal with it
-# (rex_launch_settle), and the restart says so and how to bring it back.
+# the agent running. A relaunch that still fails - its terminal never started
+# the runtime (_rex_launch), or the runtime died before admission
+# (rex_launch_settle) - takes its terminal with it, and the restart says so
+# and how to bring the agent back.
 _run_restart_in_place() { # <role> <pane> <label> <envprefix> <dry-envprefix> <prefix-required> <dry-run> <agent-name> <runtime> <cwd>
   local role="$1" pane="$2" label="$3" envprefix="$4" dry_envprefix="$5" prefix_required="$6"
   local dry_run="$7" agent_name="$8" runtime="$9" cwd="${10}"
@@ -1431,16 +1449,17 @@ _run_restart_in_place() { # <role> <pane> <label> <envprefix> <dry-envprefix> <p
         "$agent_name" "$cwd" "$(_rex_launch_line "$runtime" "$dry_envprefix" "$runtime" run)" "$(_run_dry_agent_args)"
       return 0
     fi
-    local back="cel $(jq -r 'join(" ")' <<<"${_REX_RELAUNCH:-[]}")" src=0
+    local back src=0
+    back="$(_run_restart_back "$role" "$agent_name")"
     rex_launch_check "$agent_name" "$runtime" "$cwd" "$envprefix" "${AGENT_ARGS[@]}" \
       || die "cel run $role --restart: the relaunch line of $agent_name was refused by its launcher - $agent_name was NOT stopped and still runs in $pane"
     rex_agent_stop "$pane" || die "cel run: could not stop Rex terminal $pane"
-    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || return $?
-    rex_launch_settle "$agent_name" "$runtime" || src=$?
+    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || src=$?
+    [ "$src" != 0 ] || { rex_launch_settle "$agent_name" "$runtime" || src=$?; }
     case "$src" in
       0) return 0 ;;
-      1) c_err "cel run $role --restart: $agent_name was stopped and its relaunch exited during startup; its Rex terminal was closed and nothing of $agent_name is running. Bring it back with: $back" ;;
-      *) c_err "cel run $role --restart: $agent_name was stopped and its relaunch exited during startup, and its Rex terminal $_REX_PANE could not be closed - close it (rex ls), then bring $agent_name back with: $back" ;;
+      1) c_err "cel run $role --restart: $agent_name was stopped and its relaunch failed during startup; its Rex terminal was closed and nothing of $agent_name is running. $back" ;;
+      *) c_err "cel run $role --restart: $agent_name was stopped and its relaunch failed during startup, and its Rex terminal could not be closed - close it (rex ls) first. $back" ;;
     esac
     return 1 ;;
   esac
