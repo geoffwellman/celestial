@@ -140,6 +140,43 @@ test_opencode_rex_restart_dry_run_prints_the_line_the_restart_runs() {
   assert_contains "$out" "${launcher}opencode --standalone --auto --session ses_SavedNative>"
   local rest="${out#*"$launcher"}"
   case "$rest" in *launch.mjs*) echo "a second launcher in the restart line: $out"; _ocl_down; return 1 ;; esac
+  _ocl_assert_gateway_masked "$out" || { _ocl_down; return 1; }
+  _ocl_down
+}
+
+# A gateway profile's launch words are shown masked, never the key file the
+# real line reads or the session key it routes by.
+_ocl_assert_gateway_masked() { # <dry-run output>
+  assert_contains "$1" 'OMP_GATEWAY_TOKEN=****'
+  assert_contains "$1" 'CEL_SESSION_ID=****'
+  case "$1" in
+    *api-key*|*fixture-key*|*CEL_SESSION_ID=widget-orch*) echo "a gateway secret word in the dry run: $1"; return 1 ;;
+  esac
+}
+
+# THE REVERSE CASE: a workspace defaulting to Rex, its agent in a Herdr pane.
+# The restart types its line into that pane, so the line carries the OpenCode
+# launcher itself - exactly once - or OpenCode would start unguarded.
+test_opencode_herdr_restart_in_rex_default_workspace_types_its_launcher() {
+  _ocl_setup
+  printf 'session_backend: rex\n' >> "$T/workspace.yaml"
+  herdr() {
+    [ "$1 $2" = 'agent list' ] || return 1
+    jq -cn --arg cwd "$T/repos/widget" '{result:{agents:[{name:"widget-orch",pane_id:"w1:p1",agent_status:"idle",agent:"opencode",cwd:$cwd,agent_session:{value:"ses_SavedNative"}}]}}'
+  }
+  _run_sessions_record "$T/repos/widget" ses_SavedNative
+  # The role a live agent was launched with, private (a dry run writes none).
+  (umask 077; printf 'fixture role\n' > "$T/.cel/opencode/widget-orch/role-orchestrator.md")
+  local out typed launcher
+  out="$(_ocl_restart --dry-run)" || { echo "$out"; _ocl_down; return 1; }
+  assert_contains "$out" 'herdr pane send-keys w1:p1'
+  case "$out" in *'rex new'*|*'rex block close'*) echo "a Herdr pane restarted through Rex: $out"; _ocl_down; return 1 ;; esac
+  typed="$(printf '%s\n' "$out" | grep '^herdr pane send-text w1:p1 ')" || { echo "$out"; _ocl_down; return 1; }
+  launcher="$(opencode_launch_command)"
+  assert_contains "$typed" "$launcher"
+  case "${typed#*"$launcher"}" in *launch.mjs*) echo "a second launcher typed: $typed"; _ocl_down; return 1 ;; esac
+  assert_contains "$out" 'agent start widget-orch --kind opencode --pane w1:p1 -- --standalone --auto --session ses_SavedNative'
+  _ocl_assert_gateway_masked "$out" || { _ocl_down; return 1; }
   _ocl_down
 }
 

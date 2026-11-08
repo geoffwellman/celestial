@@ -260,10 +260,28 @@ _rex_launch() { # name runtime cwd label envprefix args...
     block="$(jq -er '.initial_windows[0].block_ids[0]' <<<"$resp")" || die 'Rex returned no terminal identity'
     window="$(jq -r '.initial_windows[0].window_id // "" | strings' <<<"$resp")"
   fi
-  local i
+  local i why=""
   for ((i=0;i<50;i++)); do [ -s "$file.pid" ] && break; sleep 0.1; done
-  pid="$(cat "$file.pid" 2>/dev/null)"; [[ "$pid" =~ ^[0-9]+$ ]] || die "Rex session $session opened but has not started its runtime"
-  start="$(_rex_pid_start "$pid")" || die "Rex session $session exited during startup; inspect rex capture -s $session -b $block"
+  pid="$(cat "$file.pid" 2>/dev/null)"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]]; then why='opened but has not started its runtime'; pid=""
+  elif ! start="$(_rex_pid_start "$pid")"; then why='exited during startup'
+  fi
+  if [ -n "$why" ]; then
+    # A LAUNCH THAT NEVER STARTED ITS RUNTIME CLOSES ITS TERMINAL. Its script
+    # starts the runtime only once this launch publishes the receipt, which it
+    # now never will, so whatever runs there is the script alone; once Rex
+    # reports it finished (it gives up within 10s) the terminal closes, and
+    # only then is a retry admitted. A terminal that cannot be proven and
+    # closed keeps the pending markers: a blind retry stays refused.
+    if _rex_launch_abandon "$name" "$session" "$window" "$block" "$host" "$pid"; then
+      rm -f "$file.pid" "$file.pending"; exec {lock}>&-
+      c_err "cel run: Rex session $session $why ($name); its terminal was closed"
+      return 1
+    fi
+    exec {lock}>&-
+    c_err "cel run: Rex session $session $why ($name) and its terminal could not be closed; inspect rex capture -s $session -b $block, close it, then remove $file.pending before retrying"
+    return 2
+  fi
   local tmp; tmp="$(mktemp "$d/.record.XXXXXX")"; chmod 600 "$tmp"
   jq -n --arg name "$name" --arg rt "$rt" --arg cwd "$cwd" --arg session "$session" --arg block "$block" \
     --argjson pid "$pid" --arg start "$start" --arg role "${env_role:-${role:-core}}" --arg workspace "${wsdir:-$cwd}" \
@@ -343,16 +361,34 @@ rex_launch_settle() { # <name> <runtime>
 # (_rex_close_owned's proofs), retried while Rex catches up with the exit. The
 # OpenCode launcher's one refusal line (fixed vocabulary, never native or
 # config text) is repeated first: the terminal that showed it is going.
-_rex_launch_reap() { # <receipt>; the caller holds its lock. 0 closed
-  local f="$1" s b i rc=3
+_rex_launch_reap() { # <receipt> [polls]; the caller holds its lock. 0 closed
+  local f="$1" polls="${2:-20}" s b i rc=3
   IFS=$'\t' read -r s b < <(jq -r '[.rex_session, .rex_block] | @tsv' "$f")
   { _rex_cli --autostart=false capture -s "$s" -b "$b" 2>/dev/null \
       | grep -o 'OpenCode guarded private launch refused (reason=[A-Za-z0-9_]*)' | tail -n 1 >&2; } || true
-  for ((i = 0; i < 20 && rc == 3; i++)); do
+  for ((i = 0; i < polls && rc == 3; i++)); do
     rc=0; _rex_close_owned "$f" || rc=$?
     [ "$rc" != 3 ] || sleep 0.1
   done
   [ "$rc" = 0 ]
+}
+
+# The terminal of a launch that wrote no receipt, closed through the same
+# proofs as a dead receipt's: a private stand-in receipt with no live
+# generation (its pid, if any, never matches the start time "abandoned"),
+# never seen by the roster (no .json name). Waits out the script's own 10s.
+_rex_launch_abandon() { # name session window block host [pid]; the caller holds the launch lock
+  local f rc=0
+  f="$(mktemp "$(_rex_state)/.abandon.XXXXXX")" || return 1
+  chmod 600 "$f"
+  jq -n --arg name "$1" --arg session "$2" --arg window "$3" --arg block "$4" --arg host "$5" \
+    --argjson pid "${6:-${BASHPID:-$$}}" \
+    '{name:$name,pid:$pid,pid_start:"abandoned",rex_session:$session,rex_block:$block,pane_id:("rex/"+$session+"/"+$block)}
+      | if $host != "" then .rex_scope="window" | .rex_host=$host else .rex_scope="session" end
+      | if $window != "" then .rex_window=$window else . end' > "$f" || { rm -f -- "$f"; return 1; }
+  _rex_launch_reap "$f" "${CEL_REX_ABANDON_POLLS:-150}" || rc=1
+  rm -f -- "$f"
+  return "$rc"
 }
 
 # CLOSE ONE AGENT'S OWN CONTAINER - the window a reviewer or team member opened
