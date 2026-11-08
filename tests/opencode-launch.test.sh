@@ -213,6 +213,24 @@ test_opencode_rex_restart_failed_relaunch_leaves_no_dead_terminal() {
   _ocl_down
 }
 
+# A WEDGED REX CANNOT STRETCH THE SETTLE. A relaunch whose runtime died is
+# reaped through Rex calls bounded by the reap's own deadline (20 polls x
+# 0.2s): a Rex that never answers leaves its terminal reported as not closed
+# (2) on time, never a wait without end.
+test_opencode_rex_settle_with_a_wedged_rex_ends_on_its_deadline() {
+  local d rc=0 started took
+  d="$(mktemp -d)"
+  printf '#!/bin/bash\nexec sleep 30\n' > "$d/rex"; chmod +x "$d/rex"
+  (exit 0) & local dead=$!; wait "$dead"
+  jq -n --argjson pid "$dead" '{name:"dead",pid:$pid,pid_start:"gone",rex_session:"session:s",rex_block:"block:b",pane_id:"rex/session:s/block:b",rex_scope:"session"}' > "$d/dead.json"
+  started="$SECONDS"
+  (export CEL_REX_STATE="$d" CEL_REX_BIN="$d/rex"; rex_launch_settle dead opencode) 2>/dev/null || rc=$?
+  took=$((SECONDS - started))
+  rm -rf "$d"
+  assert_eq "$rc" 2
+  [ "$took" -le 7 ] || { echo "the settle waited ${took}s on a wedged Rex"; return 1; }
+}
+
 test_opencode_parent_launch_owns_affinity_and_tracks_title_rewritten_native_holder() {
   _ocl_setup
   local out

@@ -32,14 +32,17 @@ policy: { merge: self, pr: required }
 YAML
   # The fake Rex, except that while $FAKE_REX_DIR/sabotage names a mode a new
   # terminal runs something else: `nostart` never writes the launch's pid;
-  # `deadpid` writes a pid that has already exited.
+  # `deadpid` writes a pid that has already exited; `wedged` is `nostart`,
+  # after which every Rex call hangs (a wedged server or client).
   cat > "$RT/bin/rex" <<'SH'
 #!/bin/bash
 mode="$(cat "$FAKE_REX_DIR/sabotage" 2>/dev/null)"
+[ ! -e "$FAKE_REX_DIR/wedge" ] || exec sleep 8
 if [ "${1:-}" = new ] && [ -n "$mode" ]; then
   args=(); for a in "$@"; do [ "$a" = -- ] && break; args+=("$a"); done
   case "$mode" in
     nostart) exec "$CEL_ROOT/tests/lib/fake-rex" "${args[@]}" -- /bin/true ;;
+    wedged) "$CEL_ROOT/tests/lib/fake-rex" "${args[@]}" -- /bin/true; rc=$?; : > "$FAKE_REX_DIR/wedge"; exit "$rc" ;;
     deadpid) exec "$CEL_ROOT/tests/lib/fake-rex" "${args[@]}" -- /bin/sh -c '(exit 0) & p=$!; wait "$p"; printf "%s" "$p" > "$1"' sh "$CEL_REX_STATE/$2.json.pid" ;;
   esac
 fi
@@ -104,10 +107,36 @@ test_rex_core_restart_whose_terminal_never_starts_closes_it_and_says_how_back() 
   assert_contains "$out" 'Bring it back with: cel run core --session-backend rex'
   assert_eq "$(_rr_terminals)" 0
   [ ! -e "$CEL_REX_STATE/core.json.pending" ] && [ ! -e "$CEL_REX_STATE/core.json" ] || { echo 'launch markers left behind'; _rr_down; return 1; }
+  # The terminal never ran its one-shot script, which deletes itself only when
+  # run: the abandon removes it.
+  ! compgen -G "$CEL_REX_STATE/.launch.*" >/dev/null || { echo 'the private launch script was left behind'; _rr_down; return 1; }
   # Nothing is left to refuse the line the restart named.
   rm -f "$FAKE_REX_DIR/sabotage"
   out="$( (unset CEL_SESSION_BACKEND; cmd_run core --session-backend rex --fresh) 2>&1)" || { echo "$out"; _rr_down; return 1; }
   _rex_live "$CEL_REX_STATE/core.json" || { echo 'core did not come back'; _rr_down; return 1; }
+  _rr_down
+}
+
+# A WEDGED REX CANNOT STRETCH THE ABANDON. Every Rex call there is bounded by
+# the abandon's own deadline (CEL_REX_ABANDON_POLLS x 0.2s), so a server or
+# client that never answers ends the wait on time: the terminal is reported
+# as not closed and the pending markers stay, refusing a blind retry.
+test_rex_abandon_with_a_wedged_rex_ends_on_its_deadline() {
+  _rr_setup
+  local out rc=0 started took
+  out="$(cmd_run core --session-backend rex --fresh 2>&1)" || { echo "$out"; _rr_down; return 1; }
+  _rr_idle core || { _rr_down; return 1; }
+  printf wedged > "$FAKE_REX_DIR/sabotage"
+  started="$SECONDS"
+  out="$( (unset CEL_SESSION_BACKEND; export CEL_REX_ABANDON_POLLS=5; cmd_run core --restart --fresh) 2>&1)" || rc=$?
+  took=$((SECONDS - started))
+  rm -f "$FAKE_REX_DIR/wedge"
+  [ "$rc" != 0 ] || { echo "a relaunch that never started reported success: $out"; _rr_down; return 1; }
+  # 5s waiting for the runtime's pid, then at most 1s of bounded Rex calls.
+  [ "$took" -le 9 ] || { echo "the abandon waited ${took}s on a wedged Rex: $out"; _rr_down; return 1; }
+  assert_contains "$out" 'opened but has not started its runtime'
+  assert_contains "$out" 'its Rex terminal could not be closed'
+  [ -e "$CEL_REX_STATE/core.json.pending" ] || { echo 'the pending marker of an unclosed terminal was removed'; _rr_down; return 1; }
   _rr_down
 }
 
@@ -131,7 +160,15 @@ test_rex_restart_recovery_line_without_a_recorded_relaunch_is_a_hand_restart() {
   out="$(_REX_RELAUNCH='' product=widget lane=ui solo_forced=1 wsdir=/nonexistent/alpha; ws_name() { printf alpha; }
     _run_restart_back orchestrator widget-ui)"
   assert_eq "$out" 'No relaunch line was recorded for widget-ui: restart it by hand with cel run solo --product widget --lane ui --workspace alpha --session-backend rex, adding the profile/model it ran on'
-  out="$(_REX_RELAUNCH='[]'; _run_restart_back core core)"
+  out="$(_REX_RELAUNCH='' product=widget wsdir=/nonexistent/alpha; ws_name() { printf alpha; }
+    _run_restart_back orchestrator widget-orch)"
+  assert_eq "$out" 'No relaunch line was recorded for widget-orch: restart it by hand with cel run orchestrator --product widget --workspace alpha --session-backend rex, adding the profile/model it ran on'
+  # An orchestrator's line always names a product; one this launch could not
+  # determine is said so, never silently left out.
+  out="$(_REX_RELAUNCH='' product='' wsdir=/nonexistent/alpha; ws_name() { printf alpha; }
+    _run_restart_back orchestrator widget-orch)"
+  assert_eq "$out" 'No relaunch line was recorded for widget-orch, and its product could not be determined: restart it by hand with cel run orchestrator --product <product> --workspace alpha --session-backend rex, naming its product and adding the profile/model it ran on'
+  out="$(_REX_RELAUNCH=''; _run_restart_back core core)"
   assert_contains "$out" 'restart it by hand with cel core --session-backend rex'
   out="$(_REX_RELAUNCH='["run","core","--session-backend","rex"]'; _run_restart_back core core)"
   assert_eq "$out" 'Bring it back with: cel run core --session-backend rex'

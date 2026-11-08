@@ -18,10 +18,18 @@ _rex_close_leases() {
   [ -z "${_REX_LAUNCH_FD:-}" ] || exec {_REX_LAUNCH_FD}>&-
   [ -z "${_REX_GEN_FD:-}" ] || exec {_REX_GEN_FD}>&-
 }
+# A call made under a deadline (_REX_DEADLINE_MS, epoch milliseconds) gets
+# only the time left, and none starts once it has passed: a wedged Rex server
+# or client cannot stretch a bounded wait. Coreutils timeout, not Rex's own
+# --timeout, which bounds each request but not a client that never returns.
 _rex_cli() (
   _rex_close_leases
-  exec "${CEL_REX_BIN:-rex}" "$@"
+  [ -n "${_REX_DEADLINE_MS:-}" ] || exec "${CEL_REX_BIN:-rex}" "$@"
+  left=$(( _REX_DEADLINE_MS - $(_rex_now_ms) ))
+  [ "$left" -gt 0 ] || exit 124
+  exec timeout -k 1 "$((left / 1000)).$(printf '%03d' $((left % 1000)))" "${CEL_REX_BIN:-rex}" "$@"
 )
+_rex_now_ms() { local t="${EPOCHREALTIME//[!0-9]/}"; printf '%s' "$((10#$t / 1000))"; }
 _rex_file() { printf '%s/%s.json' "$(_rex_state)" "$1"; }
 _rex_pid_start() { local s; s="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1; s="${s##*) }"; set -- $s; printf '%s' "${20}"; }
 _rex_receipt_valid() {
@@ -227,7 +235,8 @@ _rex_launch() { # name runtime cwd label envprefix args...
   bin="$(command -v "$(agent_get "$rt" bin)")"
   script="$(mktemp "$d/.launch.XXXXXX")"; chmod 700 "$script"
   # No secret values in the roster or Rex command arguments. The private
-  # one-shot script deletes itself once the terminal has opened it.
+  # one-shot script deletes itself once the terminal has opened it; one the
+  # terminal never ran goes with its abandoned launch.
   {
     printf '#!/bin/bash\nset -e\nrm -f -- %q\n' "$script"
     printf 'printf "%%s" "$$" > %q\n' "$file.pid"
@@ -274,7 +283,7 @@ _rex_launch() { # name runtime cwd label envprefix args...
     # only then is a retry admitted. A terminal that cannot be proven and
     # closed keeps the pending markers: a blind retry stays refused.
     if _rex_launch_abandon "$name" "$session" "$window" "$block" "$host" "$pid"; then
-      rm -f "$file.pid" "$file.pending"; exec {lock}>&-
+      rm -f -- "$file.pid" "$file.pending" "$script"; exec {lock}>&-
       c_err "cel run: Rex session $session $why ($name); its terminal was closed"
       return 1
     fi
@@ -361,13 +370,17 @@ rex_launch_settle() { # <name> <runtime>
 # (_rex_close_owned's proofs), retried while Rex catches up with the exit. The
 # OpenCode launcher's one refusal line (fixed vocabulary, never native or
 # config text) is repeated first: the terminal that showed it is going.
+# The whole of it is bounded: each poll's 0.1s wait and as long again for Rex
+# to answer, every Rex call within that deadline (_rex_cli).
 _rex_launch_reap() { # <receipt> [polls]; the caller holds its lock. 0 closed
-  local f="$1" polls="${2:-20}" s b i rc=3
+  local f="$1" polls="${2:-20}" s b i rc=3 _REX_DEADLINE_MS
+  _REX_DEADLINE_MS=$(( $(_rex_now_ms) + polls * 200 ))
   IFS=$'\t' read -r s b < <(jq -r '[.rex_session, .rex_block] | @tsv' "$f")
   { _rex_cli --autostart=false capture -s "$s" -b "$b" 2>/dev/null \
       | grep -o 'OpenCode guarded private launch refused (reason=[A-Za-z0-9_]*)' | tail -n 1 >&2; } || true
   for ((i = 0; i < polls && rc == 3; i++)); do
     rc=0; _rex_close_owned "$f" || rc=$?
+    [ "$rc" != 3 ] || [ "$(_rex_now_ms)" -lt "$_REX_DEADLINE_MS" ] || break
     [ "$rc" != 3 ] || sleep 0.1
   done
   [ "$rc" = 0 ]

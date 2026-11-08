@@ -1418,18 +1418,25 @@ _run_restart_backend() { # <restart-pane>
 
 # THE LINE THAT BRINGS A STOPPED AGENT BACK: its recorded relaunch line
 # (_run_rex_relaunch, the caller's _REX_RELAUNCH). Without one, never a bare
-# `cel`: the hand restart, named as far as this launch knows it.
+# `cel`: the hand restart, named as far as this launch knows it. An
+# orchestrator's line always names its product - one this launch could not
+# determine is said so, with a placeholder, never silently left out.
 _run_restart_back() { # <role> <agent-name> -> one sentence
-  local line r="$1"
+  local line r="$1" unknown="" naming=""
   if line="$(jq -er 'select(type == "array" and length > 0 and all(.[]; type == "string")) | join(" ")' <<<"${_REX_RELAUNCH:-}" 2>/dev/null)"; then
     printf 'Bring it back with: cel %s' "$line"; return 0
   fi
   if [ "$r" = core ]; then line='cel core'
   else
+    if [ "$r" = orchestrator ]; then
+      [ -n "${product:-}" ] || { unknown=', and its product could not be determined'; naming='naming its product and '; }
+      line=" --product ${product:-<product>}"
+    else line="${product:+ --product $product}"
+    fi
     [ "${solo_forced:-0}" != 1 ] || r=solo
-    line="cel run $r${product:+ --product $product}${lane:+ --lane $lane}${wsdir:+ --workspace $(ws_name "$wsdir")}"
+    line="cel run $r$line${lane:+ --lane $lane}${wsdir:+ --workspace $(ws_name "$wsdir")}"
   fi
-  printf 'No relaunch line was recorded for %s: restart it by hand with %s --session-backend rex, adding the profile/model it ran on' "$2" "$line"
+  printf 'No relaunch line was recorded for %s%s: restart it by hand with %s --session-backend rex, %sadding the profile/model it ran on' "$2" "$unknown" "$line" "$naming"
 }
 
 # RESTART IN PLACE: exit the agent in its pane, leaving the pane and its

@@ -1,0 +1,4 @@
+### Fixed
+- Closing the terminal of a Rex launch that never started (or a relaunch that died before admission) is now bounded even when Rex itself is wedged. Every Rex call in that close runs under the close's own deadline (0.2s per poll; about 30s for an abandoned launch, 4s for a dead relaunch), and none starts once the deadline has passed. A Rex that never answers leaves the terminal reported as not closed, with its pending markers kept so a blind retry stays refused.
+- An abandoned Rex launch whose terminal never ran its private `.launch.*` script now removes that script once its terminal is closed. Before, the script only deleted itself when run, so it was left behind in the Rex state directory.
+- The hand-restart recovery line of an orchestrator always names `--product`. When the product could not be determined, the line says so and shows `--product <product>` for the owner to fill in.
