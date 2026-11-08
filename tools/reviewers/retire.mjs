@@ -587,12 +587,22 @@ function clearSettledRequest(receipt, nonce) {
   if (saved.value.nonce === nonce && saved.value.phase === 'exit') fs.unlinkSync(filename);
 }
 
+// The gh this retirement runs with the workspace's token is the one the bash
+// side resolved (lib/reviewer-retirement.sh, cel_gh_bin: the box's gh, a test
+// stub only under the suite) and passed as an argument. No environment
+// variable names it here: an agent's export would otherwise choose the
+// binary that is handed the token.
+export function githubBinary(ghBin) {
+  requireProof(typeof ghBin === 'string' && ghBin !== '', 'github_binary_unavailable');
+  return ghBin;
+}
+
 export async function retire(options) {
-  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, declared = [], githubUser = '', repodir = '' } = options;
+  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, declared = [], githubUser = '', repodir = '', ghBin = '' } = options;
   let proofPath;
   const rex = (args, opts) => command(process.env.CEL_REX_BIN || 'rex', ['--autostart=false', ...args], opts);
   const gh = () => {
-    const bin = process.env.CEL_WS_GH_BIN || 'gh';
+    const bin = githubBinary(ghBin);
     let token;
     if (githubUser) token = command(bin, ['auth', 'token', '--user', githubUser], { json: false }).trim();
     requireProof(!githubUser || token, 'github_account_unavailable');
@@ -814,8 +824,8 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
   if (process.argv[2] === '--checkout-preserved') {
     process.exitCode = checkoutPreserved(process.argv[3], process.argv[4]) ? 0 : 1;
   } else {
-    const [repo, pr, pane, agent, dry, receipt, wsname, slug, helpers = '', githubUser = '', repodir = ''] = process.argv.slice(2);
-    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir });
+    const [repo, pr, pane, agent, dry, receipt, wsname, slug, helpers = '', githubUser = '', repodir = '', ghBin = ''] = process.argv.slice(2);
+    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir, ghBin });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exitCode = result.status === 'retired' || (dry === '1' && result.status === 'eligible') ? 0 : result.status === 'protected' ? 3 : 2;
   }

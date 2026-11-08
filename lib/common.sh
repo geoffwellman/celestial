@@ -18,8 +18,9 @@ die()    { c_err "$*"; exit 1; }
 
 # IS THIS PROCESS UNDER ITS OWN CHECKOUT'S TEST SUITE? The test seams that
 # redirect what cel trusts - CEL_PROC_DIR (whose /proc an identity is proven
-# from) and CEL_FORGE_CURL (which binary the forge token goes to) - are
-# honoured only then, and the environment alone never says so: an agent can
+# from), CEL_FORGE_CURL (which binary the forge token goes to) and the gh
+# stubs (CEL_WS_GH_BIN, fed from CEL_FORGE_GH, GH or CEL_AFK_GH: cel_gh_bin) -
+# are honoured only then, and the environment alone never says so: an agent can
 # export anything (`X=CEL_TESTING; export $X=1` included) but cannot change
 # which processes are its ancestors. So the answer is read from the kernel:
 # some ancestor is the same bash as this shell (its /proc/<pid>/exe) running,
@@ -33,7 +34,7 @@ die()    { c_err "$*"; exit 1; }
 # checkout's tests/run.sh, not only for its tests. Any agent code the suite
 # runs - a test file, or a tool a test calls that a PATH put first - can
 # point CEL_PROC_DIR at a tree that vouches for a forged identity, or
-# CEL_FORGE_CURL at a binary that then receives the forge token. That is
+# CEL_FORGE_CURL or a gh stub at a binary that then receives a token. That is
 # accepted: agents run as the owner's Unix user, so they can read the token
 # file and call the forge API directly anyway; nothing in-process stops a
 # determined one. What this does stop is the easy route - an exported
@@ -105,6 +106,18 @@ cel_tool_bin() { # <name> [--system] -> its absolute path on cel_tool_path, else
   for d in $dirs; do
     if [ -f "$d/$1" ] && [ -x "$d/$1" ]; then printf '%s' "$d/$1"; return 0; fi
   done
+  return 1
+}
+# THE gh THIS PROCESS RUNS. Every gh call - with a workspace's token
+# (ws_gh) or with the box's own login (afk, release, gc) - runs this binary:
+# cel_tool_bin gh, never the caller's PATH. A stub a caller names (the
+# tests' CEL_WS_GH_BIN, CEL_FORGE_GH, GH, CEL_AFK_GH, passed in here) is
+# honoured only under this checkout's own suite (cel_under_suite); anywhere
+# else it names nothing. Fails, saying so, when the box has no gh there.
+cel_gh_bin() { # [stub] -> the gh to run
+  if [ -n "${1:-}" ] && [ "$1" != gh ] && cel_under_suite; then printf '%s' "$1"; return 0; fi
+  cel_tool_bin gh && return 0
+  printf 'cel: no gh in the system directories or ~/.local/bin - cel runs no gh found elsewhere on PATH\n' >&2
   return 1
 }
 

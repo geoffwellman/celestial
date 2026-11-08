@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { parseNative as parseNativeAtLeaf, emptyComposer, checkoutPreserved, validateNativeResponse, validateExitCommitment, validateArchivedRole, validatedProcessEvidence, sessionTopology, selectedRound, durableRound } from './retire.mjs';
+import { parseNative as parseNativeAtLeaf, emptyComposer, checkoutPreserved, validateNativeResponse, validateExitCommitment, validateArchivedRole, validatedProcessEvidence, sessionTopology, selectedRound, durableRound, githubBinary } from './retire.mjs';
 
 // These are parser/preservation fixtures, not evidence of real review quality
 // or of the production Rex lifecycle (the latter requires a supported smoke).
@@ -258,4 +258,20 @@ test('private prepared evidence vetoes deletion without granting retirement', ()
     fs.chmodSync(filename, 0o666);
     assert.equal(checkoutPreserved(cwd, state), false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the gh handed the workspace token is the one the bash side passed, never an environment variable', () => {
+  const saved = process.env.CEL_WS_GH_BIN;
+  process.env.CEL_WS_GH_BIN = '/tmp/planted/gh';
+  try {
+    // no binary passed: refused, however the environment names one
+    refusal(() => githubBinary(''), 'github_binary_unavailable');
+    refusal(() => githubBinary(undefined), 'github_binary_unavailable');
+    assert.equal(githubBinary('/usr/bin/gh'), '/usr/bin/gh');
+    // and no code path reads it from the environment
+    const source = fs.readFileSync(new URL('./retire.mjs', import.meta.url), 'utf8');
+    assert.equal(source.includes('process.env.CEL_WS_GH_BIN'), false);
+  } finally {
+    if (saved === undefined) delete process.env.CEL_WS_GH_BIN; else process.env.CEL_WS_GH_BIN = saved;
+  }
 });

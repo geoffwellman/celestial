@@ -22,15 +22,17 @@ _CEL_AFK=1
 afk_dir()   { printf '%s' "${CEL_AFK_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/afk}"; }
 _afk_state(){ printf '%s/state.json' "$(afk_dir)"; }
 _afk_log()  { printf '%s/log.jsonl' "$(afk_dir)"; }
-# Overridable so the named GitHub exception can be watched in a test without
-# reaching a real review thread.
-_afk_gh()   { printf '%s' "${CEL_AFK_GH:-gh}"; }
+# CEL_AFK_GH lets a test watch the named GitHub exception without reaching a
+# real review thread - honoured only under the suite (cel_gh_bin); anywhere
+# else gh is the box's, never one the caller's PATH offers.
 # A reply or a rebase acts for the workspace that owns the PR: as its
 # `github.user` when it declares one, refused if that account is not logged
 # in, and plain `gh` when nothing owns it or nothing is declared.
 _afk_ws_gh() { # <wsdir-or-empty> <gh args...>
-  local w="$1"; shift
-  if [ -n "$w" ]; then CEL_WS_GH_BIN="$(_afk_gh)" ws_gh "$w" "$@"; else "$(_afk_gh)" "$@"; fi
+  local w="$1" bin; shift
+  if [ -n "$w" ]; then CEL_WS_GH_BIN="${CEL_AFK_GH:-}" ws_gh "$w" "$@"; return; fi
+  bin="$(cel_gh_bin "${CEL_AFK_GH:-}")" || return 1
+  "$bin" "$@"
 }
 _afk_wsdir_for_slug() { # <owner/name> -> wsdir, or nothing
   local n w r

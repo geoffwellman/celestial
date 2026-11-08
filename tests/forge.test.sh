@@ -389,6 +389,41 @@ test_cel_tool_bin_resolves_from_the_box_never_the_callers_path() {
   rm -rf "$T"
 }
 
+# EVERY gh IS THE BOX'S (cel_gh_bin), with a workspace's token or without.
+# Outside the suite - a process the runner did not start (detached, then
+# reparented away from it) - neither a gh first on PATH nor a stub named by
+# CEL_WS_GH_BIN, CEL_FORGE_GH or CEL_AFK_GH ever runs: ws_gh, cel forge's
+# gh, afk's, release's and gc's all run the system gh (or refuse, on a box
+# with none). Under the suite those stubs stand, as every other test shows.
+test_gh_outside_the_suite_is_never_a_planted_or_named_stub() {
+  local T o; T="$(mktemp -d)"; o="$T/out"
+  mkdir -p "$T/ws"; printf 'name: ghws\nrepos:\n  - name: widget\n    url: git@github.com:acme/widget.git\n' > "$T/ws/workspace.yaml"
+  _fake_tool "$T/pathbin" gh "$T/path-gh.log"; _fake_tool "$T/stub" gh "$T/stub-gh.log"
+  # shellcheck disable=SC2016  # expanded by the detached shell
+  OUT_T="$T" setsid -f bash -c '
+    while p="$(cut -d" " -f4 /proc/$$/stat)"; [ "$(cat "/proc/$p/comm" 2>/dev/null)" = setsid ]; do sleep 0.05; done
+    export PATH="$OUT_T/pathbin:$PATH" CEL_TESTING=1
+    export CEL_WS_GH_BIN="$OUT_T/stub/gh" CEL_FORGE_GH="$OUT_T/stub/gh" CEL_AFK_GH="$OUT_T/stub/gh"
+    cd "$OUT_T"
+    . "$CEL_ROOT/lib/common.sh"
+    if cel_under_suite; then echo under; else echo outside; fi
+    for call in "ws_gh $OUT_T/ws --version" "_forge_gh $OUT_T/ws --version" "_afk_ws_gh \"\" --version" \
+                "_release_gh \"\" --version" "_gc_gh $OUT_T --version"; do
+      bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/workspace.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; . \"\$CEL_ROOT/lib/afk.sh\"; . \"\$CEL_ROOT/lib/release.sh\"; . \"\$CEL_ROOT/lib/gc.sh\"; $call" 2>&1 \
+        | grep -E -m1 "^gh version|no gh in the system" || echo "NOTHING: $call"
+    done
+    echo finished
+  ' > "$o" 2>&1 < /dev/null
+  local i=0
+  until grep -q '^finished' "$o" 2>/dev/null || [ "$i" -ge 400 ]; do sleep 0.05; i=$((i + 1)); done
+  local out; out="$(cat "$o")"
+  assert_contains "$out" outside || { echo "$out"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/path-gh.log" ] || { echo "a gh first on PATH ran: $(cat "$T/path-gh.log")"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/stub-gh.log" ] || { echo "a stub gh named by the environment ran: $(cat "$T/stub-gh.log")"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^gh version|no gh in the system' <<<"$out")" 5 || { echo "$out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 test_forge_repo_describes_an_internal_forgejo_on_plain_http() {
   _forge_ws git@forgejo-ct.internal:geoff/gizmo.git forgejo http://forgejo.internal
   _json_eq "$(_desc)" "$GIZMO" || { rm -rf "$T"; return 1; }

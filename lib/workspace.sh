@@ -262,23 +262,17 @@ ws_github_ready() { # <wsdir> [gh-binary]
 # declared account that cannot produce a token refuses the call rather than
 # falling back to the active account, because acting as the wrong identity is
 # the whole bug. THE BINARY IS THE BOX'S: gh is run with the account's token,
-# so it is resolved by cel_tool_bin (lib/common.sh: the system directories,
-# then this user's ~/.local/bin, never the caller's PATH). A gh installed
-# only under the home directory is the least-bad case - it cannot be told
-# from one planted over it - and a gh found nowhere there refuses the call.
+# so it is cel_gh_bin's (lib/common.sh: the system directories, then this
+# user's ~/.local/bin, never the caller's PATH). A gh installed only under
+# the home directory is the least-bad case - it cannot be told from one
+# planted over it - and a gh found nowhere there refuses the call.
 # CEL_WS_GH_BIN, the stub seam callers pass on (cel forge's CEL_FORGE_GH,
 # land's GH, afk's CEL_AFK_GH), is honoured only under this checkout's own
 # suite (cel_under_suite); anywhere else it names nothing.
 ws_gh() { # <wsdir> <gh args...>
   local wsdir="$1"; shift
   local bin user tok
-  if [ -n "${CEL_WS_GH_BIN:-}" ] && [ "$CEL_WS_GH_BIN" != gh ] && cel_under_suite; then bin="$CEL_WS_GH_BIN"
-  else
-    bin="$(cel_tool_bin gh)" || {
-      printf 'gh %s refused: no gh in the system directories or ~/.local/bin - cel runs no gh found elsewhere on PATH\n' "$*" >&2
-      return 1
-    }
-  fi
+  bin="$(cel_gh_bin "${CEL_WS_GH_BIN:-}")" || { printf 'gh %s refused: no trusted gh\n' "$*" >&2; return 1; }
   user="$(ws_github_user "$wsdir")"
   if [ -z "$user" ]; then "$bin" "$@"; return; fi
   tok="$("$bin" auth token --user "$user" 2>/dev/null)" || tok=""

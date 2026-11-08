@@ -181,13 +181,13 @@ every exported function (`BASH_FUNC_*`) unless the environ it started with
 carries none of them, so smuggled shell code (an exported `exit` that
 returns, a function that shadows the check) never reaches cel's checks.
 
-The limit, plainly: `CEL_PROC_DIR` and `CEL_FORGE_CURL` are trusted for every
-process beneath that checkout's `tests/run.sh`, not only for its tests. Agent
-code the suite runs - a test file, or a tool a test calls that a `PATH` put
-first - can point them at a tree that vouches for a forged identity, or at a
-binary that then receives the forge token. The gh stub seams
-(`CEL_FORGE_GH`, `CEL_WS_GH_BIN`) are still honoured from the environment
-everywhere. This is accepted: agents run as the owner's Unix user, so they can
+The limit, plainly: the test seams - `CEL_PROC_DIR`, `CEL_FORGE_CURL` and the
+gh stubs (`CEL_WS_GH_BIN`, fed from `CEL_FORGE_GH`, `GH` or `CEL_AFK_GH`) -
+are trusted for every process beneath that checkout's `tests/run.sh`, not
+only for its tests, and for nothing outside it. Agent code the suite runs - a
+test file, or a tool a test calls that a `PATH` put first - can point them at
+a tree that vouches for a forged identity, or at a binary that then receives
+the forge token or a workspace's GitHub token. This is accepted: agents run as the owner's Unix user, so they can
 read the token file and call the forge API directly; nothing in-process stops a
 determined one. What the checks stop is the easy route. `tests/run.sh` refuses
 to start with `BASH_ENV` or `ENV` set, and the guard refuses an agent line that
@@ -497,12 +497,16 @@ land`, the reviewer's PR facts and the steward) and every `cel team` verb runs
 on `cel_tool_path` (lib/common.sh): the system directories, then this user's
 `~/.local/bin` (its home read from `/etc/passwd`, not `$HOME`), never the
 caller's `PATH`. The Forgejo token goes only to the system's `curl`, and `jq`
-must be the system's; both refuse to run otherwise. `ws_gh` resolves `gh` the
-same way (system, then `~/.local/bin`): a `gh` or `yq` installed only under the
-home directory cannot be told from one planted over it, so that is the
-least-bad rule - a prepended `PATH` or a moved `HOME` no longer chooses the
-binary, a write over the installed file still would. Under the suite tests
-stub tools on `PATH`; `CEL_TOOL_PATH_REAL=1` runs the production rule.
+must be the system's; both refuse to run otherwise. Every `gh` call - `ws_gh`
+with a workspace's token, and the plain ones in lib/afk.sh, lib/release.sh
+and lib/gc.sh - runs `cel_gh_bin` (system, then `~/.local/bin`), and
+`tools/reviewers/retire.mjs` runs the gh the bash side resolved the same way
+and passes it as an argument; it reads no binary from its environment. A
+`gh` or `yq` installed only under the home directory cannot be told from one
+planted over it, so that is the least-bad rule - a prepended `PATH` or a
+moved `HOME` no longer chooses the binary, a write over the installed file
+still would. Under the suite tests stub tools on `PATH` or as functions;
+`CEL_TOOL_PATH_REAL=1` runs the production rule.
 
 - **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
   `CEL_FORGE_GH` is its test seam, honoured (as `CEL_WS_GH_BIN`, `GH` and

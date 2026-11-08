@@ -25,10 +25,14 @@ _CEL_GC=1
 # workspace a worktree belongs to, and a workspace with `github.user` must be asked about
 # as that account. A declared account that is not logged in makes the call
 # fail, which every caller here already reads as UNKNOWN: kept, never closed.
+# Without a workspace it is plain gh - the box's (cel_gh_bin), never one the
+# caller's PATH offers.
 _gc_gh() { # <dir> <gh args...> - run in <dir>, as its workspace's account
-  local d="$1" w; shift
+  local d="$1" w bin; shift
   w="$(ws_of_checkout "$d")" || w=""
-  if [ -n "$w" ]; then (cd "$d" && ws_gh "$w" "$@"); else (cd "$d" && gh "$@"); fi
+  if [ -n "$w" ]; then (cd "$d" && ws_gh "$w" "$@"); return; fi
+  bin="$(cel_gh_bin)" || return 1
+  (cd "$d" && "$bin" "$@")
 }
 
 _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
@@ -556,7 +560,8 @@ _gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> gh pr view JS
     if [ -n "${slug:-}" ] && [ -n "${wsdir:-}" ]; then
       out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json "$f" 2>/dev/null)" || return 1
     else
-      out="$(gh pr view "$2" --repo "$1" --json "$f" 2>/dev/null)" || return 1
+      local bin; bin="$(cel_gh_bin)" || return 1
+      out="$("$bin" pr view "$2" --repo "$1" --json "$f" 2>/dev/null)" || return 1
     fi
   fi
   printf '%s' "$out"

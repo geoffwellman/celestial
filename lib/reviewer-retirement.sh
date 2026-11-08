@@ -5,7 +5,7 @@ _CEL_REVIEWER_RETIREMENT=1
 
 rex_reviewer_retire() ( # repo pr pane agent dry [repodir]
   local repo="${1:-}" pr="${2:-}" pane="${3:-}" agent="${4:-}" dry="${5:-}" repodir="${6:-}"
-  local file fd workspace wsname slug helpers user="" resolved=1
+  local file fd workspace wsname slug helpers user="" resolved=1 ghbin
   _rr_unknown() { printf '{"status":"unknown","reason":"%s"}\n' "$1"; exit 2; }
   [[ "$agent" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && [[ "$pr" =~ ^[1-9][0-9]*$ ]] \
     && [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && [[ "$dry" =~ ^[01]$ ]] || _rr_unknown invalid_arguments
@@ -24,13 +24,18 @@ rex_reviewer_retire() ( # repo pr pane agent dry [repodir]
     if declare -F ws_github_user >/dev/null; then user="$(ws_github_user "$workspace" 2>/dev/null)" || resolved=0; fi
     [ "$resolved" -eq 1 ] || slug=""
   fi
+  # The gh retire.mjs runs with the workspace's token: resolved here, by the
+  # same rule as ws_gh (cel_gh_bin: the box's gh; a stub only under the suite),
+  # and handed over as an argument - retire.mjs reads no binary from its
+  # environment. Empty when there is none: it then refuses to ask GitHub.
+  ghbin="$(cel_gh_bin "${CEL_WS_GH_BIN:-}" 2>/dev/null)" || ghbin=""
   # No child or Rex server may inherit launch, GC, or retirement lock leases.
   (
     exec {fd}>&-
     [ -z "${_RUN_ADMISSION_FD:-}" ] || exec {_RUN_ADMISSION_FD}>&-
     [ -z "${_REX_LAUNCH_FD:-}" ] || exec {_REX_LAUNCH_FD}>&-
     [ -z "${lock_fd:-}" ] || exec {lock_fd}>&-
-    exec node "$CEL_ROOT/tools/reviewers/retire.mjs" "$repo" "$pr" "$pane" "$agent" "$dry" "$file" "$wsname" "$slug" "$helpers" "$user" "$repodir"
+    exec node "$CEL_ROOT/tools/reviewers/retire.mjs" "$repo" "$pr" "$pane" "$agent" "$dry" "$file" "$wsname" "$slug" "$helpers" "$user" "$repodir" "$ghbin"
   )
 )
 
