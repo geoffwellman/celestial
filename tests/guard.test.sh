@@ -1186,3 +1186,47 @@ test_every_adapter_reads_a_newline_as_a_separator() {
   _deny "$out" 'guard-classify.sh: orchestrator merge after cel' || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+# Review of #283: a heredoc's delimiter spelled $'EOF' or $"EOF" (bash ends
+# the body at EOF), legacy $[...] arithmetic and a [...] subscript (no
+# heredoc at all), and a body read by anything but a data sink - an
+# interpreter, a pipe into one or into `$SHELL`, a loop that runs its lines,
+# a file written and then run. Each runs the `git push` / `gh pr merge` on its
+# later lines; an orchestrator is refused all of them.
+test_heredoc_edges_and_non_sink_readers_are_commands() {
+  local c
+  for c in $'cat <<$\'EOF\'\nx\nEOF\ngit push\n$EOF' $'cat <<$"EOF"\nx\nEOF\ngit push\n$EOF' $'echo $[1<<2]\ngit push\n2]' \
+           $'x[1<<2]=3\ngit push\n2]=3' $'echo $((1<<2))\ngit push' $'(( x = 1 << 2 ))\ngit push' \
+           $'let x=1 x<<=2\ngit push\n=2\ngh pr merge 3' \
+           $'python3 <<EOF\nimport os; os.system("git push")\ngit push\nEOF' $'perl <<EOF\ngh pr merge 3\nEOF' \
+           $'node <<EOF\ngit push\nEOF' $'cat <<EOF | node\ngit push\nEOF' $'cat <<EOF | $SHELL\ngit push\nEOF' \
+           $'cat <<EOF | while read l; do $l; done\ngit push\nEOF' $'cat <<EOF |\nbash\ngit push\nEOF' \
+           $'cat <<EOF >x; chmod +x x; ./x\ngit push\nEOF' $'cat > run.sh <<\'EOF\'\ngit push\nEOF\nbash run.sh' \
+           $'tee /tmp/r.sh <<EOF\ngh pr merge 3\nEOF\nsource /tmp/r.sh'; do
+    _deny "$(guard_classify orchestrator "$c")" "orchestrator: $c" || return 1
+  done
+  # data sinks, and arithmetic that is only arithmetic, stay allowed
+  for c in $'cat <<EOF | tee .cel/x.md | wc -l\ngit push\nEOF' $'cat <<EOF | while read l; do echo "$l"; done\ngit push\nEOF' \
+           $'jq . <<EOF\n{"a":"git push"}\nEOF' $'cel inbox send root - <<\'EOF\'\ngh pr merge 3\nEOF' 'echo $[1+2]' 'echo $((1<<2))'; do
+    assert_eq "$(guard_classify orchestrator "$c")" allow || { echo "orchestrator refused: $c"; return 1; }
+  done
+  for c in $'gh pr create --title x --body-file - <<\'EOF\'\ngh pr merge 3\nEOF' $'git commit -F - <<\'EOF\'\nx\ngh pr merge 3\nEOF'; do
+    assert_eq "$(guard_classify solo "$c")" allow || { echo "solo refused: $c"; return 1; }
+  done
+}
+# A CLASSIFIER THAT DOES NOT FINISH refuses the call in every adapter: a
+# command long enough to outrun the guard is never waved through. (OpenCode's
+# is tools/opencode/runtime.test.mjs.)
+test_a_guard_timeout_fails_closed_in_every_adapter() {
+  _gws
+  local R; R="$(mktemp -d)"; mkdir -p "$R/lib" "$R/tools/hooks"
+  printf '. %q\n' "$CEL_ROOT/lib/guard.sh" > "$R/lib/guard.sh"
+  printf 'exec sleep 30\n' > "$R/tools/hooks/guard-classify.sh"
+  CEL_ROOT="$R" CEL_GUARD_TIMEOUT=1 CEL_ROLE=solo _hook "$T/repos/widget" Bash '{"command":"ls"}' \
+    && { echo "claude hook let a timed-out call through"; rm -rf "$T" "$R"; return 1; }
+  assert_contains "$HOOK_ERR" "did not finish" || { rm -rf "$T" "$R"; return 1; }
+  local out
+  out="$(_OMP_HOOK="$CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts" CEL_ROOT="$R" CEL_GUARD_TIMEOUT=1 CEL_ROLE=solo _omp_guard /tmp 'ls')"
+  assert_eq "$(jq -r .block <<<"$out")" true || { echo "omp let a timed-out call through"; rm -rf "$T" "$R"; return 1; }
+  assert_contains "$(jq -r .reason <<<"$out")" "did not finish" || { rm -rf "$T" "$R"; return 1; }
+  rm -rf "$T" "$R"
+}

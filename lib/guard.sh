@@ -133,32 +133,43 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 }
 
 # THE COMMANDS A LINE RUNS, READ AS BASH READS THEM: one command per output
-# line. Every adapter - the claude hook, omp/pi and OpenCode (both through
-# guard-classify.sh) - hands the classifier the tool call's command text as
-# it is, newlines included, so a newline ends a command here as it does in
-# bash, and so do `;`, `&`, `|`, `&&`, `||`, `(`, `)`, `$(...)` and
-# backquotes (a redirection's `&`, as in 2>&1 or &>, does not). What bash
-# runs no command from is DATA, kept out of the commands:
-# - a heredoc body (<<EOF, <<-EOF, <<'EOF') is dropped, except for the
-#   $(...) and backquotes an unquoted one expands - unless the line that
-#   opens it feeds it to a shell (bash, sh, eval, source, ., ssh: `bash
-#   <<EOF`, `cat <<EOF | sh`), when its lines are commands;
+# line. Every adapter - the claude hook, omp/pi and OpenCode, all through
+# guard-classify.sh - hands the classifier the tool call's command text as it
+# is, newlines included, so a newline ends a command here as it does in bash,
+# and so do `;`, `&`, `|`, `&&`, `||`, `(`, `)`, `$(...)` and backquotes (a
+# redirection's `&`, as in 2>&1 or &>, does not). What bash runs no command
+# from is DATA, kept out of the commands:
+# - a heredoc body (<<EOF, <<-EOF, <<'EOF') whose reader is a DATA SINK:
+#   the command it is given to, and every command that command pipes into,
+#   is one of cat, tee, cel, read, jq, yq, echo, printf, wc, head, tail,
+#   uniq, cut, tr, grep, rg, diff, cmp, base64, the sha/md5 sums, column,
+#   fold, fmt, nl, tac, rev, paste, iconv, mapfile/readarray (without -C),
+#   `git commit -F -`/`--file=-` and `gh ... --body-file -`/`-F -` - and no
+#   file it writes (`>`, `>>`, tee) is run anywhere in the line (named as a
+#   command, or handed to chmod, a shell, source, `.`, an interpreter, awk,
+#   xargs, crontab or at). Only the $(...) and backquotes an unquoted one
+#   expands are commands. Any other reader - a shell, python, node, perl,
+#   `$SHELL`, `while read l; do $l; done` - makes the body commands;
 # - a newline inside a quoted string ('...', "...", $'...' and its \n,
 #   \x0a, \012 or \cj) is a space (with <join>, nothing: a path split across
 #   lines) - unless the string is code for a shell (`bash -c`, `sh -c`, `su
 #   -c`, `flock -c`, eval, ssh, watch), when it and the string's own `;`, `&`,
 #   `|`, `(` and `)` end a command;
 # - a comment is dropped, and a backslash before a newline joins the lines.
-# A line this reading does not end cleanly - a quote, an expansion or a
-# heredoc left open, a heredoc opened inside a heredoc - is read the cautious
-# way instead: every newline and separator ends a command and nothing is data.
+# Arithmetic - $((...)), ((...)), $[...] and a [...] subscript - opens no
+# heredoc. A line this reading cannot be sure of - a quote, an expansion or a
+# heredoc left open, a heredoc opened inside a heredoc, a heredoc delimiter
+# with `$`, `[` or `]` in it, a `<<` inside a word's [...] - is read the
+# cautious way instead: every newline and separator ends a command and
+# nothing is data.
 read -r -d '' _GUARD_LINES_AWK <<'AWK' || :
 # A heredoc body that is data is quiet: only the commands its $(...) and
 # backquotes run are written out.
 function emit(x) { if (!qt[d]) { out = out x; cur[cl[d]] = cur[cl[d]] x } }
-function brk() { out = out "\n"; cur[cl[d]] = ""; ws = 1 }
-function push(t, code) {
-  d++; st[d] = t; cf[d] = code; pc[d] = 0
+# A command ends; <sep> is what ended it ("|" a pipe, "n" a newline).
+function brk(sep) { out = out "\n"; nseg++; ssep[nseg] = sep; cur[cl[d]] = ""; ws = 1; wb = 0 }
+function push(t, code, closer) {
+  d++; st[d] = t; cf[d] = code; pc[d] = 0; ac[d] = closer
   if (t == "T" || t == "C" || t == "B" || t == "A") { cl[d] = d; cur[d] = ""; qt[d] = 0 } else { cl[d] = cl[d - 1]; qt[d] = t == "H" || qt[d - 1] }
 }
 function pop() { if (d > 0) d--; else bad = 1 }
@@ -169,15 +180,76 @@ function iscode(x) {
   if (x ~ /(^|[^A-Za-z0-9_.-])(su|flock|script)([ \t].*)?[ \t](-[A-Za-z]*c|--command)/) return 1
   return x ~ /(^|[^A-Za-z0-9_.-])(eval|ssh|watch)([ \t]|$)/
 }
-# Does the line that opens a heredoc feed it to a shell?
-function hdcode(x) {
-  gsub(/[\047"\\]/, "", x)
-  if (x ~ /(^|[^A-Za-z0-9_.-])((ba|z|da|k|mk|a)?sh|eval|source|ssh)([^A-Za-z0-9_.-]|$)/) return 1
-  return x ~ /(^|[;&|(`])[ \t]*\.[ \t]/
+function words(x) { gsub(/[\047"\\]/, "", x); gsub(/[ \t]+/, " ", x); sub(/^ /, "", x); sub(/ $/, "", x); return x }
+# The word a command runs: past assignments, keywords and wrappers.
+function firstword(x,   n, a, i) {
+  n = split(words(x), a, " "); i = 1
+  while (i <= n) {
+    if (a[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || a[i] ~ /^(if|then|else|elif|do|done|while|until|fi|!|\{|\}|time)$/) { i++; continue }
+    if (a[i] ~ /^(.*\/)?(sudo|doas|env|command|builtin|exec|nohup|nice|ionice|setsid|stdbuf|timeout)$/) {
+      i++; while (i <= n && (a[i] ~ /^-/ || a[i] ~ /^[0-9.]+[smhd]?$/)) i++
+      continue
+    }
+    break
+  }
+  return i <= n ? a[i] : ""
 }
-function num(h, base,   i, v) {
+function base(w) { sub(/^.*\//, "", w); return w }
+# Is this command a data sink for a heredoc it reads?
+function sink(x,   w) {
+  w = words(x); sub(/ .*/, "", w)
+  if (w == "for" || w == "select") return 1
+  w = base(firstword(x))
+  if (w == "") return 1
+  if (w ~ /^(cat|tee|cel|cel-linear|read|jq|yq|echo|printf|true|:|wc|head|tail|uniq|cut|tr|grep|egrep|fgrep|rg|diff|cmp|base64|sha1sum|sha256sum|sha512sum|md5sum|column|fold|fmt|nl|tac|rev|paste|iconv)$/) return 1
+  x = " " words(x) " "
+  if (w == "mapfile" || w == "readarray") return x !~ / -[A-Za-z]*C/
+  if (w == "git") return x ~ / commit / && x ~ /( -F ?-|--file[= ]-) /
+  if (w == "gh") return x ~ /(--body-file[= ]-| -F ?-) /
+  return 0
+}
+# The files a command writes, by base name: > >> >| targets and tee's.
+function targets(x,   n, a, i, w, t, tee, r) {
+  n = split(words(x), a, " "); tee = base(firstword(x)) == "tee"; r = ""
+  for (i = 1; i <= n; i++) {
+    w = a[i]; t = ""
+    if (w ~ /^[0-9]*>[>|]?$/) t = a[i + 1]
+    else if (w ~ /^[0-9]*>[>|]?[^&]/) { t = w; sub(/^[0-9]*>[>|]?/, "", t) }
+    else if (tee && w !~ /^-/ && base(w) != "tee") t = w
+    if (t != "") r = r " " base(t)
+  }
+  return r
+}
+# Does this command run the file <t> (or hand it to something that does)?
+function executes(x, t,   n, a, i, w) {
+  w = base(firstword(x))
+  if (w == t) return 1
+  if (w !~ /^(chmod|bash|sh|zsh|dash|ksh|mksh|ash|fish|csh|tcsh|source|\.|python[0-9.]*|perl|ruby|node|nodejs|php|deno|bun|awk|gawk|mawk|nawk|crontab|at|batch|eval|xargs|install)$/) return 0
+  n = split(words(x), a, " ")
+  for (i = 2; i <= n; i++) if (base(a[i]) == t) return 1
+  return 0
+}
+# Heredoc k's body is data when its reader, and all it pipes into - a whole
+# compound command (while ... done, if ... fi, { ... }, ( ... )) included -
+# are sinks.
+function datasink(k,   j, r, w, depth) {
+  r = ""; depth = 0
+  for (j = hseg[k]; j <= nseg; j++) {
+    if (!sink(S[j])) return 0
+    r = r targets(S[j])
+    w = words(S[j]); sub(/ .*/, "", w)
+    if (w ~ /^(while|until|for|select|if|case|\{)$/) depth++
+    else if (w ~ /^(done|fi|esac|\})$/) depth--
+    if (ssep[j] == "(") depth++
+    else if (ssep[j] == ")") depth--
+    if (depth <= 0 && ssep[j] != "|") { tg[hid[k]] = r; return 1 }
+    if (ssep[j] == "|" && S[j + 1] ~ /^[ \t]*$/ && ssep[j + 1] == "n") return 0
+  }
+  return 0
+}
+function num(h, b,   i, v) {
   v = 0
-  for (i = 1; i <= length(h); i++) v = v * base + index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
+  for (i = 1; i <= length(h); i++) v = v * b + index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
   return v
 }
 # The length of the $'...' escape at x[i] when it is a newline, else 0.
@@ -192,7 +264,8 @@ function escnl(x, i,   r) {
   return 0
 }
 # A heredoc operator at x[i] (`<<` or `<<-`, then its word): the index of its
-# last character, with HW its delimiter, HQ whether it is quoted, HS `<<-`.
+# last character, with HW its delimiter, HQ whether it is quoted, HS `<<-`;
+# a delimiter with $, [ or ] in it (`$'EOF'`, `2]`) sets bad.
 function heredoc(x, i,   j, m, c, w, q, k) {
   m = length(x); j = i + 2; HS = 0
   if (substr(x, j, 1) == "-") { HS = 1; j++ }
@@ -201,6 +274,7 @@ function heredoc(x, i,   j, m, c, w, q, k) {
   while (j <= m) {
     c = substr(x, j, 1)
     if (c ~ /[ \t;&|()<>]/) break
+    if (c ~ /[$\[\]]/) bad = 1
     if (c == "\047" || c == "\"") {
       k = index(substr(x, j + 1), c); if (!k) return 0
       q = 1; w = w substr(x, j + 1, k - 1); j += k + 1; continue
@@ -213,23 +287,23 @@ function heredoc(x, i,   j, m, c, w, q, k) {
   return j - 1
 }
 function hstart() {
-  hmode = hcode ? "code" : hq[hk] ? "skip" : "expand"
-  if (hmode == "expand") push("H", 0)
+  hmode = hc[hk] ? "code" : hq[hk] ? "skip" : "expand"
+  if (hmode == "expand") push("H", 0, "")
   hdp = d
 }
-{ s = NR > 1 ? s "\n" $0 : $0 }
-END {
-  nl = split(s, L, "\n")
-  d = 0; st[0] = "T"; cf[0] = 0; pc[0] = 0; cl[0] = 0; cur[0] = ""; ws = 1; out = ""
-  nh = 0; hact = 0; bad = 0; lstart = 1
+function lex(   li, line, m, cont, ci, c, nx, pv, t, k, b) {
+  split("", st); split("", cf); split("", pc); split("", ac); split("", cl); split("", cur); split("", qt)
+  split("", hd); split("", hq); split("", hs); split("", hid); split("", hseg); split("", hc); split("", ssep); split("", tg)
+  d = 0; st[0] = "T"; cf[0] = 0; pc[0] = 0; cl[0] = 0; cur[0] = ""; qt[0] = 0; ws = 1; wb = 0; out = ""
+  nh = 0; hn = 0; hact = 0; bad = 0; nseg = 0
   for (li = 1; li <= nl; li++) {
     line = L[li]; m = length(line); cont = 0
     if (hact) {
       b = line; if (hs[hk]) sub(/^\t+/, "", b)
       if (b == hd[hk] && d == hdp) {
         if (hmode == "expand") pop()
-        brk()
-        if (++hk > nh) { hact = 0; nh = 0; lstart = li + 1 } else hstart()
+        brk("n")
+        if (++hk > nh) { hact = 0; nh = 0 } else hstart()
         continue
       }
       if (hmode == "skip") continue
@@ -238,14 +312,14 @@ END {
       c = substr(line, ci, 1); nx = substr(line, ci + 1, 1); pv = ci > 1 ? substr(line, ci - 1, 1) : ""; t = st[d]
       # quoted text: a separator in one handed to a shell as code ends a command
       if (t == "S" || t == "Q" || t == "D") {
-        if (cf[d] && (c == ";" || c == "|" || c == "(" || c == ")" || (c == "&" && nx != ">" && pv != ">" && pv != "<"))) { brk(); continue }
+        if (cf[d] && (c == ";" || c == "|" || c == "(" || c == ")" || (c == "&" && nx != ">" && pv != ">" && pv != "<"))) { brk(c); continue }
       }
       if (t == "S") { if (c == "\047") pop(); emit(c); continue }
       if (t == "Q") {
         if (c == "\047") { pop(); emit(c); continue }
         if (c == "\\") {
           k = escnl(line, ci)
-          if (k) { if (cf[d]) brk(); else emit(J); ci += k - 1; continue }
+          if (k) { if (cf[d]) brk(";"); else emit(J); ci += k - 1; continue }
           emit(c nx); ci++; continue
         }
         emit(c); continue
@@ -255,11 +329,12 @@ END {
         emit(c nx); ci++; ws = 0; continue
       }
       # expansions open in commands, double quotes, heredoc bodies and ${...}
-      if (c == "$" && nx == "(" && substr(line, ci + 2, 1) == "(") { emit("$(("); push("A", 0); ci += 2; continue }
-      if (c == "$" && nx == "(") { emit("$("); push("C", 0); brk(); ci++; continue }
-      if (c == "$" && nx == "{") { emit("${"); push("P", 0); ci++; ws = 0; continue }
+      if (c == "$" && nx == "(" && substr(line, ci + 2, 1) == "(") { emit("$(("); push("A", 0, ")"); ci += 2; continue }
+      if (c == "$" && nx == "[") { emit("$["); push("A", 0, "]"); ci++; continue }
+      if (c == "$" && nx == "(") { emit("$("); push("C", 0, ")"); brk("("); ci++; continue }
+      if (c == "$" && nx == "{") { emit("${"); push("P", 0, "}"); ci++; ws = 0; continue }
       if (c == "`") {
-        if (t == "B") { brk(); pop(); emit(c); ws = 0 } else { emit(c); push("B", 0); brk() }
+        if (t == "B") { brk("`"); pop(); emit(c); ws = 0 } else { emit(c); push("B", 0, "`"); brk("`") }
         continue
       }
       if (t == "D" || t == "H") {
@@ -268,12 +343,15 @@ END {
       }
       if (t == "P") {
         if (c == "}") pop()
-        else if (c == "\"") push("D", 0)
-        else if (c == "\047" && st[d - 1] != "D" && st[d - 1] != "H") push("S", 0)
+        else if (c == "\"") push("D", 0, "\"")
+        else if (c == "\047" && st[d - 1] != "D" && st[d - 1] != "H") push("S", 0, "\047")
         emit(c); continue
       }
       if (t == "A") {
-        if (c == "(") pc[d]++
+        if (ac[d] == "]") {
+          if (c == "[") pc[d]++
+          else if (c == "]") { if (pc[d] > 0) pc[d]--; else { emit(c); pop(); ws = 0; continue } }
+        } else if (c == "(") pc[d]++
         else if (c == ")") {
           if (pc[d] > 0) pc[d]--
           else if (nx == ")") { emit("))"); pop(); ci++; ws = 0; continue }
@@ -281,53 +359,83 @@ END {
         emit(c); continue
       }
       # a command: T (the line), C ($(...)), B (`...`)
-      if (c == "\047") { push("S", iscode(cur[cl[d]])); emit(c); ws = 0; continue }
-      if (c == "$" && nx == "\047") { push("Q", iscode(cur[cl[d]])); emit("$\047"); ci++; ws = 0; continue }
-      if (c == "\"") { push("D", iscode(cur[cl[d]])); emit(c); ws = 0; continue }
+      if (c == "\047") { push("S", iscode(cur[cl[d]]), "\047"); emit(c); ws = 0; continue }
+      if (c == "$" && nx == "\047") { push("Q", iscode(cur[cl[d]]), "\047"); emit("$\047"); ci++; ws = 0; continue }
+      if (c == "\"") { push("D", iscode(cur[cl[d]]), "\""); emit(c); ws = 0; continue }
       if (c == "#" && ws) break
-      if (c == "(" && nx == "(" && ws) { emit("(("); push("A", 0); ci++; continue }
+      if (c == "(" && nx == "(" && ws) { emit("(("); push("A", 0, ")"); ci++; continue }
       if (c == "<" && nx == "<") {
-        if (substr(line, ci + 2, 1) == "<") { emit("<<<"); ci += 2; ws = 1; continue }
+        if (substr(line, ci + 2, 1) == "<") { emit("<<<"); ci += 2; ws = 1; wb = 0; continue }
+        # inside a word's [...] (`x[1<<2]=3`) it is arithmetic: be cautious
+        if (wb > 0) bad = 1
         k = heredoc(line, ci)
         if (k) {
           if (hact) bad = 1
-          nh++; hd[nh] = HW; hq[nh] = HQ; hs[nh] = HS
+          nh++; hn++; hd[nh] = HW; hq[nh] = HQ; hs[nh] = HS; hid[nh] = hn; hseg[nh] = nseg + 1
           emit(substr(line, ci, k - ci + 1)); ci = k; ws = 0; continue
         }
-        emit("<<"); ci++; ws = 1; continue
+        emit("<<"); ci++; ws = 1; wb = 0; continue
       }
-      if (c == "&" && (nx == ">" || pv == ">" || pv == "<")) { emit(c); ws = 1; continue }
-      if (c == ";" || c == "&" || c == "|") { brk(); continue }
-      if (c == "(") { pc[d]++; brk(); continue }
+      if (c == "&" && (nx == ">" || pv == ">" || pv == "<")) { emit(c); ws = 1; wb = 0; continue }
+      if (c == "|") { if (nx == "|") { brk("o"); ci++ } else { if (nx == "&") ci++; brk("|") } continue }
+      if (c == "&") { if (nx == "&") { brk("o"); ci++ } else brk("&"); continue }
+      if (c == ";") { brk(";"); continue }
+      if (c == "(") { pc[d]++; brk("("); continue }
       if (c == ")") {
-        if (t == "C" && pc[d] == 0) { brk(); pop(); emit(c); ws = 0; continue }
+        if (t == "C" && pc[d] == 0) { brk(")"); pop(); emit(c); ws = 0; continue }
         if (pc[d] > 0) pc[d]--
-        brk(); continue
+        brk(")"); continue
       }
-      emit(c); ws = (c == " " || c == "\t" || c == "<" || c == ">")
+      if (c == "[") wb++
+      else if (c == "]" && wb > 0) wb--
+      emit(c)
+      if (c == " " || c == "\t" || c == "<" || c == ">") { ws = 1; wb = 0 } else ws = 0
     }
     if (li == nl || cont) continue
     # the end of a line
     t = st[d]
-    if (t == "S" || t == "Q" || t == "D" || t == "H" || t == "P") { if (cf[d]) brk(); else emit(J); continue }
+    if (t == "S" || t == "Q" || t == "D" || t == "H" || t == "P") { if (cf[d]) brk("n"); else emit(J); continue }
     if (t == "A") { emit(" "); continue }
-    brk()
+    brk("n")
     if (nh > 0 && !hact) {
-      opener = L[lstart]; for (k = lstart + 1; k <= li; k++) opener = opener " " L[k]
-      hcode = hdcode(opener); hact = 1; hk = 1; hstart()
-    } else if (!hact) lstart = li + 1
+      split(out, S, "\n")
+      for (k = 1; k <= nh; k++) hc[k] = (hid[k] in force) || !datasink(k)
+      hact = 1; hk = 1; hstart()
+    }
   }
-  # not ended cleanly: every newline and separator ends a command
-  if (bad || d != 0 || hact) {
+}
+# Is a file a data heredoc wrote run anywhere in the line? Then that body is
+# commands: read the line again with it so.
+function rerun(   n, a, h, nt, T, i, j, again) {
+  if (bad) return 0
+  n = split(out, a, "\n"); again = 0
+  for (h in tg) {
+    if (h in force) continue
+    nt = split(tg[h], T, " ")
+    for (i = 1; i <= nt && !(h in force); i++)
+      for (j = 1; j <= n; j++) if (executes(a[j], T[i])) { force[h] = 1; again = 1; break }
+  }
+  return again
+}
+{ s = NR > 1 ? s "\n" $0 : $0 }
+END {
+  nl = split(s, L, "\n")
+  for (pass = 0; pass < 8; pass++) { lex(); if (!rerun()) break }
+  # not sure of it: every newline and separator ends a command
+  if (bad || d != 0 || hact || pass == 8) {
     gsub(/\\\n/, "", s)
-    gsub(/[;&|()`\n]+|\$\(/, "\n", s)
+    gsub(/[;&|()`\n]+|\$[([]/, "\n", s)
     out = s
   }
   printf "%s", out
 }
 AWK
 _guard_lines() { # <command> [join] -> the commands it runs, one per line
-  printf '%s' "$1" | LC_ALL=C awk -v J="${2- }" "$_GUARD_LINES_AWK"
+  # If the reader itself fails, the cautious split: never an empty, allowed line.
+  local s
+  s="$(printf '%s' "$1" | LC_ALL=C awk -v J="${2- }" "$_GUARD_LINES_AWK" 2>/dev/null)" && { printf '%s' "$s"; return 0; }
+  s="${1//$'\\\n'/}"; s="${s//\$\(/$'\n'}"; s="${s//\$\[/$'\n'}"
+  printf '%s' "${s//[;&|()\`]/$'\n'}"
 }
 
 # THE COMMANDS A SHELL LINE WOULD RUN, one per line, each reduced to the verb
@@ -352,26 +460,28 @@ _guard_lines() { # <command> [join] -> the commands it runs, one per line
 # command (`c=cel; $c solo land`) or a script file still runs. What this
 # stops is the plausible mistake, spelled any of the ways an agent writes it.
 _guard_segments() { # <command> -> one normalised command per line
-  printf '%s' "$1" | tr '\t\r' '  ' \
-    | sed -E 's/\$\(/;/g; s/[`();|&]+/\n/g' \
-    | sed -E "s/[\"']//g; s/ +/ /g; s/^ //; s/ $//" \
-    | sed -E ':a
-        s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
-        s#^(if|then|else|elif|do|while|until|!|\{|\})( |$)##; ta
-        s#^[^ ]*/(bash|sh|env|command|exec|nohup|time|xargs|sudo|doas|nice|ionice|stdbuf|setsid|timeout)( |$)#\1\2#; ta
-        s#^(bash|sh|command|nohup|setsid)( (-o [^ ]+|-[^ ]+))* ##; ta
-        s#^env( (-[uC] [^ ]+|--(unset|chdir) [^ ]+|-[^ ]+))* ##; ta
-        s#^exec( (-a [^ ]+|-[^ ]+))* ##; ta
-        s#^time( (-[fo] [^ ]+|-[^ ]+))* ##; ta
-        s#^xargs( (-[adEILnPs] [^ ]+|--(arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var) [^ ]+|-[^ ]+))* ##; ta
-        s#^(sudo|doas)( (-[ugCDhprtTU] [^ ]+|--(user|group|close-from|chdir|host|prompt|role|type|other-user|command-timeout) [^ ]+|-[^ ]+))* ##; ta
-        s#^(nice|ionice)( (-[nct] [^ ]+|--adjustment [^ ]+|-[^ ]+))* ##; ta
-        s#^stdbuf( (-[ioe] [^ ]+|-[^ ]+))* ##; ta
-        s#^timeout( (-[sk] [^ ]+|-[^ ]+))* [0-9.]+[smhd]? ##; ta' \
-    | sed -E 's#^[^ ]*/(cel|gh|herdr|tea|curl|git)( |$)#\1\2#' \
-    | sed -E ':b
-        s#^cel (-C [^ ]+|--workspace[= ][^ ]+)( |$)#cel\2#; tb
-        s#^gh (-R [^ ]+|--repo[= ][^ ]+)( |$)#gh\2#; tb'
+  printf '%s' "$1" | sed -E 's/\$\(/;/g; s/[`();|&]+/\n/g' | _guard_normalise
+}
+# The normalising half, line for line: one command in, its verb out.
+_guard_normalise() { # stdin: one command per line -> each normalised, on its line
+  tr '\t\r' '  ' | sed -E 's/["'"'"']//g; s/ +/ /g; s/^ //; s/ $//
+    :a
+    s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
+    s#^(if|then|else|elif|do|while|until|!|\{|\})( |$)##; ta
+    s#^[^ ]*/(bash|sh|env|command|exec|nohup|time|xargs|sudo|doas|nice|ionice|stdbuf|setsid|timeout)( |$)#\1\2#; ta
+    s#^(bash|sh|command|nohup|setsid)( (-o [^ ]+|-[^ ]+))* ##; ta
+    s#^env( (-[uC] [^ ]+|--(unset|chdir) [^ ]+|-[^ ]+))* ##; ta
+    s#^exec( (-a [^ ]+|-[^ ]+))* ##; ta
+    s#^time( (-[fo] [^ ]+|-[^ ]+))* ##; ta
+    s#^xargs( (-[adEILnPs] [^ ]+|--(arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var) [^ ]+|-[^ ]+))* ##; ta
+    s#^(sudo|doas)( (-[ugCDhprtTU] [^ ]+|--(user|group|close-from|chdir|host|prompt|role|type|other-user|command-timeout) [^ ]+|-[^ ]+))* ##; ta
+    s#^(nice|ionice)( (-[nct] [^ ]+|--adjustment [^ ]+|-[^ ]+))* ##; ta
+    s#^stdbuf( (-[ioe] [^ ]+|-[^ ]+))* ##; ta
+    s#^timeout( (-[sk] [^ ]+|-[^ ]+))* [0-9.]+[smhd]? ##; ta
+    s#^[^ ]*/(cel|gh|herdr|tea|curl|git)( |$)#\1\2#
+    :b
+    s#^cel (-C [^ ]+|--workspace[= ][^ ]+)( |$)#cel\2#; tb
+    s#^gh (-R [^ ]+|--repo[= ][^ ]+)( |$)#gh\2#; tb'
 }
 
 # Does any command in the line start with one of these (extended) patterns?
@@ -809,13 +919,13 @@ _guard_resolve() { # <absolute path...> -> each with symlinks followed, one per 
 # duplications (2>&1, &>) are folded first so their `&` does not split a
 # command. Sets _GW_SEG[i] and _GW_DIRS[i] (tab-separated).
 _guard_walk() { # <command>
-  local seg w d
+  local seg w d joined="${_GUARD_CWD:-$PWD}"
   local -a dirs=("${_GUARD_CWD:-$PWD}") t nds
   _GW_SEG=(); _GW_DIRS=()
   while IFS= read -r seg || [ -n "$seg" ]; do
     [ -n "$seg" ] || continue
     _GW_SEG+=("$seg")
-    _GW_DIRS+=("$(IFS=$'\t'; printf '%s' "${dirs[*]}")")
+    _GW_DIRS+=("$joined")
     case "$seg" in
       cd|"cd "*|pushd|"pushd "*|popd|"popd "*)
         read -r -a t <<< "$seg"
@@ -825,7 +935,8 @@ _guard_walk() { # <command>
         for d in "${dirs[@]}"; do
           if [ "$w" != - ] && _guard_norm "$d" "$w"; then nds+=("$_GN"); else nds+=('?'); fi
         done
-        dirs+=("${nds[@]}") ;;
+        dirs+=("${nds[@]}")
+        printf -v joined '%s\t' "${dirs[@]}"; joined="${joined%$'\t'}" ;;
     esac
   done < <(_guard_segments "$(printf '%s' "$1" | sed -E 's/[0-9]*>&[0-9-]+/ /g; s/\|&/|/g; s/&>/>/g')")
 }
@@ -833,12 +944,15 @@ _guard_walk() { # <command>
 # Does any word of the command, resolved, name a launch directory?
 _guard_cmd_reaches_launch() { # <command> -> 0 when it does
   _guard_names_launch_token "$1" && return 0
-  local i w c d r
+  local i w c d r k
   local -a t ds cands abs=()
+  local -A seen=()
+  local -; set -f   # split words below without globbing them
   _guard_walk "$1"
   for i in "${!_GW_SEG[@]}"; do
-    IFS=$'\t' read -r -a ds <<< "${_GW_DIRS[i]}"
-    read -r -a t <<< "${_GW_SEG[i]}"
+    if [[ "${_GW_DIRS[i]}" == *$'\t'* ]]; then IFS=$'\t' read -r -a ds <<< "${_GW_DIRS[i]}"; else ds=("${_GW_DIRS[i]}"); fi
+    # shellcheck disable=SC2206 # word splitting is the point; globbing is off
+    t=(${_GW_SEG[i]})
     for w in "${t[@]}"; do
       cands=("$w")
       [[ "$w" != *=* ]] || cands+=("${w#*=}")
@@ -846,6 +960,7 @@ _guard_cmd_reaches_launch() { # <command> -> 0 when it does
       for c in "${cands[@]}"; do
         [ -n "$c" ] && [[ "$c" != -* ]] || continue
         for d in "${ds[@]}"; do
+          k="$d"$'\t'"$c"; [ -z "${seen[$k]+x}" ] || continue; seen[$k]=1
           _guard_norm "$d" "$c" && abs+=("$_GN")
         done
       done
@@ -868,8 +983,8 @@ _guard_path_reaches_launch() { # <file path> -> 0 when it is in a launch dir
 # lands look at the original command, since -C is exactly how a command
 # reaches into another checkout.
 _guard_git_writes() { # <command> -> 0 when it writes to a git repository
-  local norm
-  norm="$(printf '%s' "$1" | sed -E 's/git( +-C +[^ ]+| +--git-dir=[^ ]+| +--work-tree=[^ ]+| +-c +[^ ]+)+/git/g')"
+  local norm="$1" re='git( +-C +[^ ]+| +--git-dir=[^ ]+| +--work-tree=[^ ]+| +-c +[^ ]+)+'
+  while [[ "$norm" =~ $re ]]; do norm="${norm/"${BASH_REMATCH[0]}"/git}"; done
   case "$norm" in
     *git\ commit*|*git\ push*|*git\ merge*|*git\ rebase*|*git\ reset*|*git\ revert*|\
     *git\ cherry-pick*|*git\ am\ *|*git\ apply*|*git\ stash*|*git\ checkout*|*git\ switch*|\
@@ -1479,44 +1594,48 @@ guard_classify() { # <role> <command>
   fi
   # THE REST IS JUDGED ONE COMMAND AT A TIME, and the line's verdict is the
   # strictest of its commands': a sanctioned command allows itself, never the
-  # commands chained or written after it (`cel fleet; gh pr merge 3`).
-  local seg v
-  while IFS= read -r seg || [ -n "$seg" ]; do
-    [[ "$seg" == *[![:space:]]* ]] || continue
-    v="$(_guard_orch_command "$role" "$seg" "$cmd")"
-    [ "$v" = allow ] || { printf '%s' "$v"; return 0; }
-  done <<<"$cmd"
+  # commands chained or written after it (`cel fleet; gh pr merge 3`). Every
+  # command is normalised in one pass, beside it line for line.
+  # Root's git writes are its own config repo's unless the line reaches INTO
+  # a product checkout (repos/, also by an earlier cd) or a herdr worktree.
+  local i product=1
+  if [ "$role" = root ]; then
+    product=0
+    case "$cmd" in *repos/*|*.herdr/worktrees*|*\ -C\ *) product=1;; esac
+  fi
+  local -a segs heads
+  mapfile -t segs <<<"$cmd"
+  mapfile -t heads < <(printf '%s\n' "${segs[@]}" | _guard_normalise)
+  for i in "${!segs[@]}"; do
+    [[ "${segs[i]}" == *[![:space:]]* ]] || continue
+    _guard_orch_command "${segs[i]}" "${heads[i]-}" "$product" || { printf '%s' "$_GO_DENY"; return 0; }
+  done
   printf allow
 }
 
-# ONE COMMAND of an orchestrator-class line (orchestrator, root, core).
-_guard_orch_command() { # <role> <command> <the whole line> -> allow | deny <reason>
-  local role="$1" cmd="$2" line="$3" head=""
+# ONE COMMAND of an orchestrator-class line (orchestrator, root, core), with
+# its normalised verb: 0 allows it, 1 refuses it with the reason in _GO_DENY.
+_guard_orch_command() { # <command> <its verb> <1: a git write is a product write>
+  local cmd="$1" head="$2" product="$3"
   # The sanctioned commands. These are the mechanism; refusing them would
   # refuse the orchestrator's actual job - and one allows only itself.
-  case "$cmd" in *cel*|*gh*) IFS= read -r head < <(_guard_segments "$cmd") || : ;; esac
   case "$head" in
-    cel|cel\ *|cel-linear|cel-linear\ *) printf allow; return 0;;
+    cel|cel\ *|cel-linear|cel-linear\ *) return 0;;
     gh\ pr\ comment|gh\ pr\ comment\ *|gh\ pr\ review|gh\ pr\ review\ *|gh\ issue\ comment|gh\ issue\ comment\ *|gh\ pr\ checks|gh\ pr\ checks\ *)
-      printf allow; return 0;;
+      return 0;;
   esac
+  # Every refusal below names git, herdr, gh or repos/.
+  case "$cmd" in *git*|*herdr*|*gh\ *|*repos/*) ;; *) return 0;; esac
 
   # Repository mutation. An ORCHESTRATOR's cwd is a product checkout, so any
   # git write from it is a product write - denied, in its own checkout or a
   # herdr worktree alike. ROOT's cwd is the workspace directory, which is
   # itself a small git repo of config (workspace.yaml, layouts, notes) that
-  # root and the owner legitimately commit to; so for root a git write is
-  # denied only when the line reaches INTO a product checkout (repos/, also by
-  # an earlier cd) or a herdr worktree.
+  # root and the owner legitimately commit to (<product> says which).
   if _guard_git_writes "$cmd"; then
-    local product=1
-    if [ "$role" = root ]; then
-      product=0
-      case "$line" in *repos/*|*.herdr/worktrees*|*\ -C\ *) product=1;; esac
-    fi
     if [ "$product" -eq 1 ]; then
-      printf 'deny orchestrators do not write to repositories - the product'"'"'s solo agent builds it, opens the PR and lands it (cel solo land)'
-      return 0
+      _GO_DENY='deny orchestrators do not write to repositories - the product'"'"'s solo agent builds it, opens the PR and lands it (cel solo land)'
+      return 1
     fi
   fi
 
@@ -1524,29 +1643,28 @@ _guard_orch_command() { # <role> <command> <the whole line> -> allow | deny <rea
   # `herdr worktree remove --force` from a coordinator can destroy unlanded work.
   case "$cmd" in
     *herdr\ worktree\ remove*|*herdr\ worktree\ create*)
-      printf 'deny herdr worktree is not called from an orchestrator pane; the product'"'"'s solo agent manages its own worktrees'
-      return 0;;
+      _GO_DENY='deny herdr worktree is not called from an orchestrator pane; the product'"'"'s solo agent manages its own worktrees'
+      return 1;;
   esac
 
   # Anything that changes GitHub state. Merging in particular has exactly one
   # path, and it is the one that checks whose PR it is.
   case "$cmd" in
     *gh\ pr\ merge*|*gh\ pr\ close*|*gh\ pr\ ready*|*gh\ pr\ edit*|*gh\ pr\ create*|*gh\ pr\ reopen*)
-      printf 'deny the product'"'"'s solo agent opens and updates PRs and lands them (cel solo land), which checks review and CI'
-      return 0;;
+      _GO_DENY='deny the product'"'"'s solo agent opens and updates PRs and lands them (cel solo land), which checks review and CI'
+      return 1;;
     *gh\ release\ *|*gh\ repo\ *|*gh\ api\ *-X\ *|*gh\ api\ *--method*|*gh\ api\ *\ -[fF]\ *|*gh\ api\ *--field*|*gh\ api\ *--raw-field*)
-      printf 'deny orchestrators do not change GitHub state directly'
-      return 0;;
+      _GO_DENY='deny orchestrators do not change GitHub state directly'
+      return 1;;
   esac
 
   # Editing files under repos/ by shell. (The native edit tools are checked
   # separately by the hook, by path.)
   if _guard_shell_edits_repos "$cmd"; then
-    printf 'deny orchestrators do not edit files under repos/ - the product'"'"'s solo agent does'
-    return 0
+    _GO_DENY='deny orchestrators do not edit files under repos/ - the product'"'"'s solo agent does'
+    return 1
   fi
-
-  printf allow
+  return 0
 }
 
 # For the native edit tools (Edit/Write/MultiEdit/NotebookEdit), which never

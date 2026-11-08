@@ -364,6 +364,19 @@ test('a newline separates commands in the shared guard, and heredoc and quoted b
   } finally { await f.cleanup(); }
 });
 
+// A classifier that does not finish (execFile's timeout kills it: no exit
+// code, a signal) refuses the call; only the classifier's own exit 2 allows.
+test('a guard timeout fails closed', async () => {
+  const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async () => {
+    throw Object.assign(new Error('Command failed: bash guard-classify.sh'), { killed: true, code: null, signal: 'SIGTERM' });
+  } } });
+  try {
+    await f.emit(created());
+    await assert.rejects(f.shell('ls -la'), /Command failed/);
+    await assert.rejects(f.tool('write', { path: 'allowed', content: 'x' }), /Command failed/);
+  } finally { await f.cleanup(); }
+});
+
 test('a classifier that reports its own error (exit 2) allows as before, except a verdict-shaped command; other classifier failures still refuse', async () => {
   let failure;
   const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async () => { throw failure; } } });

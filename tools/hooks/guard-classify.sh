@@ -4,10 +4,11 @@
 #                     (a human's CEL_GUARD_ALLOW_ONCE=1 one-off is decided here too)
 #   guard-classify.sh path    <cwd> <file path>       -> allow | deny <reason>  (a write)
 #   guard-classify.sh read    <cwd> <file path>       -> allow | deny <reason>
-# The claude adapter (orchestrator-guard.sh) sources lib/guard.sh directly; the
-# omp/pi adapter is TypeScript inside the agent process and shells out to
-# this, which costs a few milliseconds per tool call and buys one source of
-# truth for what an orchestrator may do. ITS OWN FAILURE IS NOT A VERDICT: a
+# Every adapter runs it for a shell command, under its own deadline: the
+# claude hook (orchestrator-guard.sh, which also sources lib/guard.sh for the
+# native edit and read tools), omp/pi (TypeScript inside the agent process)
+# and OpenCode. That costs a few milliseconds per tool call and buys one
+# source of truth for what an orchestrator may do. ITS OWN FAILURE IS NOT A VERDICT: a
 # policy that will not load or a mode it does not know exits 2 with the reason
 # on stderr and prints nothing, so an adapter can tell "the classifier broke"
 # from "allow" and apply its own failure policy to it.

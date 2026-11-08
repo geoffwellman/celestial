@@ -8,10 +8,12 @@
 //
 // Fails OPEN on any error of its own: a guard that cannot run must never take
 // an agent down with it - except a team member's (CEL_ROLE=member), whose
-// scope IS this guard, and a shell command that looks like a forge review
+// scope IS this guard, a shell command that looks like a forge review
 // verdict (VERDICT_SHAPED: no agent posts one, so refusing it - or a
-// lookalike - while the guard is down costs little), both of which fail
-// closed. The event contract is pi's
+// lookalike - while the guard is down costs little), and a classifier that
+// RAN but did not finish in time (CEL_GUARD_TIMEOUT seconds, default 10): a
+// command long enough to outrun the guard is refused, never waved through.
+// All of those fail closed. The event contract is pi's
 // ToolCallEvent / ToolCallEventResult ({ block, reason }).
 // @ts-nocheck
 import { execFileSync } from "node:child_process";
@@ -27,14 +29,22 @@ function celRoot(): string {
 // The same text in every adapter (orchestrator-guard.sh, tools/opencode/runtime.mjs).
 const VERDICT_SHAPED = /pr\s+review\b|eviews|pullrequestreview|reviewmutation|approve\b|lgtm|reject|\bgh\s+alias\b|\btea\b|graphql/i;
 
+// How long the classifier may take before the call is refused.
+function timeoutMs(): number {
+  const s = Number(process.env.CEL_GUARD_TIMEOUT);
+  return (Number.isFinite(s) && s > 0 ? s : 10) * 1000;
+}
+
 function classify(mode: "command" | "path" | "read", arg: string): string {
   try {
     return execFileSync("bash", [path.join(celRoot(), "tools/hooks/guard-classify.sh"), mode, process.cwd(), arg], {
       encoding: "utf8",
-      timeout: 3000,
+      timeout: timeoutMs(),
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-  } catch {
+  } catch (error) {
+    if (error?.code === "ETIMEDOUT" || error?.signal)
+      return "deny the guard did not finish classifying this call in time, so nothing ran - split it into smaller calls";
     if (process.env.CEL_ROLE === "member")
       return "deny the guard could not classify this call, and a team member's scope is the guard - nothing ran";
     if (mode === "command" && VERDICT_SHAPED.test(arg))

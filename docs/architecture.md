@@ -554,21 +554,29 @@ which it refuses.
 
 The guard reads a command line as bash does (`_guard_lines` in
 lib/guard.sh), whichever adapter hands it in - all three pass the tool
-call's text as it is, newlines included. A newline ends a command, like `;`,
-`&&`, `||`, `|` and `&`, so a command on a later line is held to every rule
-the first line is. What bash runs nothing from is data: a heredoc body
-(`<<EOF`, `<<-EOF`, `<<'EOF'`; an unquoted one's `$(...)` and backquotes
-excepted), a newline inside a quoted string, a comment. A heredoc fed to a
-shell (`bash <<EOF`, `cat <<EOF | sh`) and a string that is code for one
-(`bash -c`, `sh -c`, `$'...\n...'` given to either, eval, ssh) are commands
-again. A line it cannot end cleanly (an open quote or heredoc) is read the
-cautious way, every newline a separator. The orchestrator-class roles
-(orchestrator, root, core) are judged one command at a time and the line
-takes the strictest verdict, so a sanctioned command (`cel ...`, `gh pr
-comment|review ...`) allows itself and never what is chained or written
-after it. The name tripwires (the forge token, lib/forge.sh, a `CEL_*`
-variable, the suite's environment, a team launch token) still read every
-character, heredoc bodies included.
+call's text as it is, newlines included, to `guard-classify.sh`. A newline
+ends a command, like `;`, `&&`, `||`, `|` and `&`, so a command on a later
+line is held to every rule the first line is. What bash runs nothing from is
+data: a newline inside a quoted string, a comment, and a heredoc body
+(`<<EOF`, `<<-EOF`, `<<'EOF'`) whose reader is a data sink - the command
+given it and all it pipes into (a `while read ... done` loop included) are
+cat, tee, `cel`, read, jq, echo, grep and their like, `git commit -F -` or
+`gh ... --body-file -`, and no file it writes is run later in the line (as a
+command, or through chmod, a shell, source, an interpreter). Any other reader
+- a shell, python, node, perl, `$SHELL`, a loop running `$l` - makes the body
+commands, and so does a string that is code for a shell (`bash -c`, `sh -c`,
+`$'...\n...'` given to either, eval, ssh). Arithmetic (`$((..))`, `((..))`,
+`$[..]`, a `[..]` subscript) opens no heredoc. A line it cannot be sure of (an
+open quote or heredoc, a delimiter with `$`, `[` or `]`, a `<<` inside a
+subscript) is read the cautious way, every newline a separator. The
+orchestrator-class roles (orchestrator, root, core) are judged one command
+at a time and the line takes the strictest verdict, so a sanctioned command
+(`cel ...`, `gh pr comment|review ...`) allows itself and never what is
+chained or written after it. The name tripwires (the forge token,
+lib/forge.sh, a `CEL_*` variable, the suite's environment, a team launch
+token) still read every character, heredoc bodies included. A classifier
+that does not finish in time (`CEL_GUARD_TIMEOUT`, 10 s for the claude and
+omp/pi adapters; OpenCode's 15 s) refuses the call in every adapter.
 
 The binaries that see a token or decide a write are not the caller's to
 choose. Every forge operation (`cel forge`, and the library under `cel solo
