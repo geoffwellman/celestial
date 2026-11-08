@@ -124,6 +124,34 @@ if (cmd === 'gh') {
   if (state.mailFailure) process.exit(1);
   console.log(state.mail);
 } else if (cmd === 'rex') {
+  // windowScope: the reviewer is a window (reviewer-window) in its product
+  // agent's session, beside the product's own window; only window-scoped
+  // calls may touch it, and killing the session is never allowed.
+  const flag = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+  if (state.windowScope && args[0] === 'block' && flag('-w') !== 'reviewer-window') process.exit(97);
+  if (state.windowScope && args[0] === 'window' && args[1] === 'inspect') {
+    if (state.inspectFailure || state.windowAbsent || args[2] !== 'reviewer-window' || flag('-s') !== 'widget-review') process.exit(3);
+    const blocks = [{block_id:'terminal',type:'terminal'}];
+    if (state.extraBlock) blocks.push({block_id:'user-terminal',type:'terminal'});
+    emit({session_id:'widget-review',window_id:'reviewer-window',label:'widget-pr-71-review',focused_block_id:'terminal',layers:[{layer_id:'layer',kind:'tiled',blocks}]});
+    process.exit(0);
+  }
+  if (state.windowScope && args[0] === 'window' && args[1] === 'ls') {
+    emit({session_id:'widget-review',label:'widget-orch',windows:[{window_id:'product-window'},...(state.windowAbsent?[]:[{window_id:'reviewer-window'}])]});
+    process.exit(0);
+  }
+  if (state.windowScope && args[0] === 'window' && args[1] === 'close') {
+    if (flag('-s') !== 'widget-review' || args.at(-1) !== 'reviewer-window') process.exit(96);
+    const pid=Number(fs.readFileSync(root+'/ready','utf8'));
+    try {
+      const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8');
+      if (!/^\d+ \(.*\) Z /.test(stat)) { state.nativeLiveAtKill=true; save(); process.exit(94); }
+    } catch {}
+    if (state.closeFailure) process.exit(1);
+    state.windowAbsent=true; save();
+    process.exit(0);
+  }
+  if (state.windowScope && args.includes('kill')) { state.sessionKilled=true; save(); process.exit(95); }
   if (args[0] === 'session' && args[1] === 'inspect') {
     if (state.inspectFailure) process.exit(1);
     state.observations=(state.observations||0)+1;
@@ -220,7 +248,8 @@ _rr_start() {
   fi
   jq -n --arg name "$RR_ALIAS" --arg cwd "$RR_CO" --arg workspace "$RR_WS" \
     --arg pane "$RR_PANE" --argjson pid "$RR_PID" --arg start "$RR_PID_START" --arg native "$RR_NATIVE" \
-    '{name:$name,agent:"pi",cwd:$cwd,role:"reviewer",workspace:$workspace,repo:"widget",pr:"71",pane_id:$pane,backend:"rex",rex_session:"widget-review",rex_block:"terminal",pid:$pid,pid_start:$start,agent_status:"idle",agent_session:{value:$native}}' > "$RR_RECEIPT"
+    '{name:$name,agent:"pi",cwd:$cwd,role:"reviewer",workspace:$workspace,repo:"widget",pr:"71",pane_id:$pane,backend:"rex",rex_session:"widget-review",rex_block:"terminal",pid:$pid,pid_start:$start,agent_status:"idle",agent_session:{value:$native}}
+     | if env.RR_WINDOW == "1" then .rex_scope="window" | .rex_window="reviewer-window" | .rex_host="widget-orch" else . end' > "$RR_RECEIPT"
   chmod 600 "$RR_RECEIPT"
   : > "$RR_T/receipt-ready"
   for ((i=0;i<200;i++)); do [ -s "$RR_T/producer-started" ] && break; sleep .02; done
@@ -324,6 +353,61 @@ test_gc_rex_completed_exact_head_approved_rounds_retire_and_preserve_evidence() 
     ' "$RR_T/calls.jsonl" >/dev/null || return
     _rr_cleanup
   done
+}
+
+# A reviewer opened as a WINDOW in its product agent's session retires by
+# closing that window only: the same native handshake and evidence, every
+# Rex call scoped to its window, and the session - the product agent's - is
+# never killed. Its completion proof says a window went, not the session.
+test_gc_rex_window_scoped_reviewer_retires_only_its_window() {
+  export RR_WINDOW=1
+  _rr_fixture
+  _rr_set '.windowScope=true'
+  _rr_gc
+  _rr_exited || return
+  [ ! -e "$RR_RECEIPT" ] || return 1
+  assert_eq "$(reviewers_rows | jq length)" 0 || return
+  _rr_preserved || return
+  assert_eq "$(jq -r '.sessionKilled // false' "$RR_T/boundary.json")" false || return
+  assert_eq "$(jq -r '.windowAbsent // false' "$RR_T/boundary.json")" true || return
+  assert_eq "$(jq -r '.nativeLiveAtKill // false' "$RR_T/boundary.json")" false || return
+  # calls.jsonl logs argv as given, --autostart=false first
+  jq -se '
+    def a: .args - ["--autostart=false"];
+    [to_entries[] | select(.value.cmd=="rex" and (.value|a)[0:2]==["window","close"])] as $close |
+    ($close|length)==1 and ($close[0].value|a)==["window","close","-s","widget-review","reviewer-window"] and
+    ([.[] | select(.cmd=="rex" and (a|index("kill"))!=null)] | length)==0 and
+    ([.[] | select(.cmd=="rex" and (a)[0]=="session")] | length)==0 and
+    ([.[] | select(.cmd=="rex" and (a)[0]=="block")] | all(a | index("-w") != null)) and
+    any(to_entries[]; .key>$close[0].key and .value.cmd=="rex" and (.value|a)[0:2]==["window","ls"])
+  ' "$RR_T/calls.jsonl" >/dev/null || return
+  jq -e '.container=="window" and .containerAbsent==true and .sessionAbsent==false' \
+    "$CEL_REX_STATE"/retirements/*.retired.json >/dev/null || return
+  unset RR_WINDOW
+  _rr_cleanup
+}
+
+# A terminal the owner added to the reviewer's window makes it not only the
+# reviewer's: protected, nothing closed. A receipt claiming a window without
+# naming it is no identity at all.
+test_gc_rex_window_scoped_reviewer_with_an_added_terminal_is_protected() {
+  export RR_WINDOW=1
+  _rr_fixture
+  _rr_set '.windowScope=true | .extraBlock=true'
+  _rr_gc
+  _rr_kept || return
+  assert_eq "$(jq -s '[.[] | select(.cmd=="rex" and (.args - ["--autostart=false"])[0:2]==["window","close"])] | length' "$RR_T/calls.jsonl")" 0 || return
+  # it was the window proof that refused, not an unreachable fixture
+  assert_eq "$(jq -s '[.[] | select(.cmd=="rex" and (.args - ["--autostart=false"])[0:2]==["window","inspect"])] | length > 0' "$RR_T/calls.jsonl")" true || return
+  _rr_cleanup
+  _rr_fixture
+  _rr_set '.windowScope=true'
+  _rr_receipt_set 'del(.rex_window)'
+  _rr_gc
+  kill -0 "$RR_PID" && [ -f "$RR_RECEIPT" ] || return 1
+  assert_eq "$(jq -s '[.[] | select(.cmd=="rex" and ((.args - ["--autostart=false"])[0]=="window" or (.args|index("kill"))!=null))] | length' "$RR_T/calls.jsonl")" 0 || return
+  unset RR_WINDOW
+  _rr_cleanup
 }
 
 # A reviewer whose round asked for CHANGES stays for the re-review, even once

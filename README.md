@@ -266,10 +266,15 @@ Or set `session_backend: rex` in a workspace's `workspace.yaml` for its new
 are never moved: a restart retains their current terminal host. After a process
 has exited, normal new-launch defaults apply; keep `--session-backend rex` in
 recovery commands unless the workspace default is Rex. Rex must already be
-installed; Celestial does not adopt unrelated Rex sessions. Each new agent gets
-its own named Rex session, and the command
-prints its session and terminal IDs. Use `rex ls`, `rex capture -s <session>
--b <block>` and Rex's native controls, not Herdr commands, for those terminals.
+installed; Celestial does not adopt unrelated Rex sessions. A product agent,
+lane, root or core gets its own named Rex session. A reviewer - and a team
+member whose lead runs in Rex - opens as a window labelled with its alias in
+its product agent's session instead, so a product's whole team is one session
+group; when that session cannot be proven live it gets a session of its own,
+and says so. The command prints its session (and window) and terminal IDs.
+Use `rex ls`, `rex window ls -s <session>`, `rex capture -s <session> -b
+<block>` and Rex's native controls, not Herdr commands, for those terminals.
+Retiring a reviewer or member closes only its own window, never the session.
 
 Role prompts, model/profile selection, workspace and gateway environment,
 inbox identity and review gates are unchanged. Pi/OMP report their real turn

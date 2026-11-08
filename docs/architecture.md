@@ -209,6 +209,30 @@ never a Herdr pane argument. Rex presence protects its checkout; GC does not
 infer retirement eligibility from a Rex idle status or missing screen output.
 Failed discovery is unknown, not an empty fleet or permission to prune mail.
 
+A product's team is one Rex session group. A product agent (and core, root, a
+lane) opens a session of its own (`rex_scope: "session"` in its receipt). A
+Rex reviewer, and a team member whose lead runs in Rex, opens instead as a
+window labelled with its alias, never focused (`rex window new -s <session>
+<alias> --focus=false`), in its product agent's session - the team's `lead`,
+else `<product>-orch` - and its receipt records `rex_scope: "window"`,
+`rex_window` and `rex_host` beside the session and block. The host session is
+used only when proven the way any managed agent is: its receipt (name,
+workspace, a product-agent role, a session of its own), its live PID/start
+generation, and Rex reporting that PID as the child of the receipt's block in
+that session. Otherwise the reviewer or member opens a session of its own, as
+before, and the launch says so in one line. Retirement closes only the
+agent's own container: a window-scoped reviewer's (`tools/reviewers/retire.mjs`)
+or member's (`rex_agent_close`) proof is its window holding exactly its one
+block, queried window-scoped (`rex window inspect`, `rex block call process
+-w`), before `rex window close` and a check that the window is gone; the host
+session and its other windows are never closed, and a window anyone added a
+terminal to is protected. Session IDs, window IDs and block IDs survive a Rex
+server restart (a restored terminal runs a fresh shell, not the agent).
+Reviewers and members never resume from a receipt: after a restart the product
+agent resumes through its recorded line, and a reviewer relaunched by `cel run
+reviewer` (or a member re-added by `cel team add`) opens as a window in the
+resumed product agent's session.
+
 `cel ws down` (and therefore `reset`) explicitly stops managed Rex agents whose
 receipt names that exact workspace, after the existing held-work check; the
 box-wide core and other workspaces are excluded. A failed stop prevents reset

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# A stateful fake Rex for the session-group tests: sessions > windows > blocks,
+# with the JSON shapes the real CLI (API revision 10) prints for the calls
+# lib/rex.sh and tools/reviewers/retire.mjs make. Each block runs its command
+# as a real background process, so PID/start-time receipts are real. No socket,
+# no server: state is one JSON file, $FAKE_REX_DIR/state.json, under a lock.
+#
+#   new NAME --cwd D [--window L] ... --json -- CMD...
+#   window new -s S [LABEL] --cwd D ... --json -- CMD...    (unknown S: exit 3)
+#   window inspect W -s S --json | window ls -s S --json | window close -s S W
+#   session inspect S --json | ls --json [--short=false] | kill S
+#   block call process '{}' -s S [-w W] -b B   (B not in S/W: exit 3)
+#   block close -s S [-w W] B   (a window whose last block closes goes too)
+# Knobs: FAKE_REX_CHILD_PID=<pid> reports that pid as every live child (a
+# repurposed terminal). Calls are appended to $FAKE_REX_DIR/calls (one argv
+# per line, NUL-free).
+set -u
+d="${FAKE_REX_DIR:?FAKE_REX_DIR is required}"; mkdir -p "$d"
+st="$d/state.json"
+[ -s "$st" ] || printf '{"sessions":[],"pids":{},"n":0}' > "$st"
+args=()
+for a in "$@"; do [ "$a" = --autostart=false ] || args+=("$a"); done
+set -- "${args[@]}"
+printf '%s\n' "$*" >> "$d/calls"
+exec {lock}>"$d/state.lock"; flock "$lock"
+
+j() { jq "$@" "$st"; }
+save() { local tmp; tmp="$(mktemp "$d/.state.XXXXXX")"; cat > "$tmp" && mv -f "$tmp" "$st"; }
+next() { local n; n="$(jq -r .n "$st")"; n=$((n + 1)); jq --argjson n "$n" '.n = $n' "$st" | save; printf '%s:fake%04d' "$1" "$n"; }
+alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null && ! grep -q '^[0-9]* (.*) Z ' "/proc/$1/stat" 2>/dev/null; }
+opt() { # <flag> args... -> value
+  local f="$1"; shift
+  while [ $# -gt 0 ]; do [ "$1" = "$f" ] && { printf '%s' "${2:-}"; return 0; }; shift; done
+  return 1
+}
+spawn() { # <block> <cwd> cmd... -> records the pid
+  local b="$1" cwd="$2" pid; shift 2
+  # The terminal's program must not inherit the state lock.
+  (exec {lock}>&-; cd "$cwd" && exec "$@") </dev/null >/dev/null 2>&1 &
+  pid=$!
+  jq --arg b "$b" --argjson p "$pid" '.pids[$b] = $p' "$st" | save
+}
+window_label() { # window new's positional LABEL, before --
+  shift 2
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do
+    case "$1" in -s|-c|--cwd|--shell) shift 2 ;; -*) shift ;; *) printf '%s' "$1"; return 0 ;; esac
+  done
+  printf Window
+}
+after_dashdash() { local seen=0; for a in "$@"; do if [ "$seen" = 1 ]; then printf '%s\0' "$a"; elif [ "$a" = -- ]; then seen=1; fi; done; }
+have_session() { jq -e --arg s "$1" 'any(.sessions[]; .session_id == $s)' "$st" >/dev/null; }
+window_of() { # <session> <window> -> window json
+  jq -ce --arg s "$1" --arg w "$2" '.sessions[] | select(.session_id == $s) | .windows[] | select(.window_id == $w)' "$st"
+}
+win_json() { # <window-id> <label> <block>
+  jq -nc --arg w "$1" --arg l "$2" --arg b "$3" \
+    '{window_id:$w,label:$l,focused_block_id:$b,layers:[{layer_id:("layer:" + $w),kind:"tiled",blocks:[{block_id:$b,label:"shell"}]}]}'
+}
+kill_block() { local p; p="$(jq -r --arg b "$1" '.pids[$b] // empty' "$st")"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; }
+
+case "${1:-} ${2:-}" in
+  "new "*)
+    name="$2"; cwd="$(opt --cwd "$@")"; label="$(opt --window "$@" || printf 'Window')"
+    s="$(next session)"; w="$(next window)"; b="$(next block)"
+    jq --arg s "$s" --arg n "$name" --argjson win "$(win_json "$w" "$label" "$b")" \
+      '.sessions += [{session_id:$s,label:$n,active_window_id:$win.window_id,windows:[$win]}]' "$st" | save
+    mapfile -d '' -t cmd < <(after_dashdash "$@")
+    spawn "$b" "$cwd" "${cmd[@]}"
+    jq -nc --arg s "$s" --arg w "$w" --arg b "$b" '{session_id:$s,initial_windows:[{window_id:$w,block_ids:[$b],revision:1}]}' ;;
+  "window new")
+    s="$(opt -s "$@")"; cwd="$(opt --cwd "$@")"
+    have_session "$s" || { echo "Error: session target \"$s\" not found" >&2; exit 3; }
+    label="$(window_label "$@")"
+    w="$(next window)"; b="$(next block)"
+    jq --arg s "$s" --argjson win "$(win_json "$w" "$label" "$b")" \
+      '(.sessions[] | select(.session_id == $s) | .windows) += [$win]' "$st" | save
+    mapfile -d '' -t cmd < <(after_dashdash "$@")
+    spawn "$b" "$cwd" "${cmd[@]}"
+    jq -nc --arg w "$w" --arg b "$b" '{window_id:$w,block_ids:[$b],revision:2}' ;;
+  "window inspect")
+    s="$(opt -s "$@")"
+    win="$(window_of "$s" "$3")" || { echo "Error: window target \"$3\" not found" >&2; exit 3; }
+    jq -c --arg s "$s" '{session_id:$s} + .' <<<"$win" ;;
+  "window ls")
+    s="$(opt -s "$@")"
+    have_session "$s" || { echo "Error: session target \"$s\" not found" >&2; exit 3; }
+    jq -c --arg s "$s" '.sessions[] | select(.session_id == $s) | {session_id, label, windows}' "$st" ;;
+  "window close")
+    s="$(opt -s "$@")"; w="${*: -1}"
+    win="$(window_of "$s" "$w")" || { echo "Error: window target \"$w\" not found" >&2; exit 3; }
+    for b in $(jq -r '.layers[].blocks[].block_id' <<<"$win"); do kill_block "$b"; done
+    jq --arg s "$s" --arg w "$w" '(.sessions[] | select(.session_id == $s) | .windows) |= map(select(.window_id != $w))' "$st" | save ;;
+  "session inspect")
+    have_session "$3" || { echo "Error: session target \"$3\" not found" >&2; exit 3; }
+    jq -c --arg s "$3" '.sessions[] | select(.session_id == $s) | . + {revision: 1, clients: []}' "$st" ;;
+  "ls "*|"ls")
+    jq -c '{sessions: [.sessions[] | {session_id, label}]}' "$st" ;;
+  "kill "*)
+    have_session "$2" || { echo "Error: session target \"$2\" not found" >&2; exit 3; }
+    for b in $(jq -r --arg s "$2" '.sessions[] | select(.session_id == $s) | .windows[].layers[].blocks[].block_id' "$st"); do kill_block "$b"; done
+    jq --arg s "$2" '.sessions |= map(select(.session_id != $s))' "$st" | save ;;
+  "block call")
+    [ "${3:-}" = process ] || exit 92
+    s="$(opt -s "$@")"; w="$(opt -w "$@" || true)"; b="$(opt -b "$@")"
+    jq -e --arg s "$s" --arg w "$w" --arg b "$b" 'any(.sessions[] | select(.session_id == $s) | .windows[]
+        | select($w == "" or .window_id == $w) | .layers[].blocks[]; .block_id == $b)' "$st" >/dev/null \
+      || { echo "Error: block target \"$b\" not found" >&2; exit 3; }
+    p="$(jq -r --arg b "$b" '.pids[$b] // empty' "$st")"
+    if alive "$p"; then
+      p="${FAKE_REX_CHILD_PID:-$p}"
+      jq -nc --argjson p "$p" '{last_exit:null,child:{pid:$p,name:"runtime"},foreground:{pid:$p,name:"runtime"},home:"/home/fixture"}'
+    else
+      jq -nc '{last_exit:{exit_code:0},home:"/home/fixture"}'
+    fi ;;
+  "block close")
+    s="$(opt -s "$@")"; w="$(opt -w "$@" || true)"; b="${*: -1}"
+    jq -e --arg s "$s" --arg w "$w" --arg b "$b" 'any(.sessions[] | select(.session_id == $s) | .windows[]
+        | select($w == "" or .window_id == $w) | .layers[].blocks[]; .block_id == $b)' "$st" >/dev/null \
+      || { echo "Error: block target \"$b\" not found" >&2; exit 3; }
+    kill_block "$b"
+    jq --arg s "$s" --arg b "$b" '(.sessions[] | select(.session_id == $s) | .windows) |=
+        (map(.layers |= map(.blocks |= map(select(.block_id != $b)))) | map(select([.layers[].blocks[]] | length > 0)))' "$st" | save ;;
+  *) echo "fake-rex: unsupported call: $*" >&2; exit 91 ;;
+esac

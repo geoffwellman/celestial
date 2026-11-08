@@ -798,9 +798,11 @@ _guard_builder_push() { # <push arguments...> -> deny <reason>, or nothing
 _guard_member() { # <command> -> allow | deny <reason>
   local cmd="$1" i seg d
   _guard_member_scope || { printf '%s' "$_GUARD_MEMBER_NO_SCOPE"; return 0; }
-  # Every member, whatever its role.
+  # Every member, whatever its role. A Rex member is a window in its lead's
+  # session, so no Rex control that opens, closes or types into terminals.
   if _guard_starts "$cmd" 'cel run' 'cel (core|console)' 'cel ws (up|down|reset)' 'cel team (start|add|retire|close|cap)' \
-       'herdr agent (start|stop)' 'herdr worktree' 'herdr pane (close|split|send-text|send-keys|run)' 'herdr (tab|workspace) (create|close)' 'rex new'; then
+       'herdr agent (start|stop)' 'herdr worktree' 'herdr pane (close|split|send-text|send-keys|run)' 'herdr (tab|workspace) (create|close)' \
+       'rex (new|run|split|kill|send|send-key)' 'rex (window|block|session) (new|close|kill|destroy)'; then
     printf 'deny a team member starts and stops no agents or panes and runs no lead verb - ask the lead (cel team event %s <type> --to <lead>)' "$_GM_TEAM"
     return 0
   fi

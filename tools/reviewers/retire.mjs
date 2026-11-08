@@ -385,30 +385,86 @@ function sessionPresent(rex, session) {
   requireProof(Array.isArray(roster.sessions) && roster.sessions.every(s => object(s) && typeof s.session_id === 'string'), 'unknown_rex_roster');
   return roster.sessions.some(s => s.session_id === session);
 }
-function sessionAbsent(rex, session) {
-  requireProof(!sessionPresent(rex, session), 'rex_session_still_present');
-}
+
+const layerBlocks = layer => {
+  requireProof(object(layer) && Array.isArray(layer.blocks), 'unknown_rex_layer_topology');
+  return layer.blocks.map(block => {
+    requireProof(object(block) && typeof block.block_id === 'string' && block.block_id.length > 0, 'unknown_rex_block_topology');
+    return block.block_id;
+  });
+};
 
 export function sessionTopology(session) {
   requireProof(object(session) && typeof session.session_id === 'string' && session.session_id.length > 0 && (session.label === undefined || typeof session.label === 'string') && Array.isArray(session.windows), 'unknown_rex_session_topology');
   const windows = session.windows.map(window => {
     requireProof(typeof window.window_id === 'string' && window.window_id.length > 0 && Array.isArray(window.layers), 'unknown_rex_window_topology');
-    return { id: window.window_id, layers: window.layers.map(layer => {
-      requireProof(object(layer) && Array.isArray(layer.blocks), 'unknown_rex_layer_topology');
-      return layer.blocks.map(block => {
-        requireProof(object(block) && typeof block.block_id === 'string' && block.block_id.length > 0, 'unknown_rex_block_topology');
-        return block.block_id;
-      });
-    }) };
+    return { id: window.window_id, layers: window.layers.map(layerBlocks) };
   });
   return { id: session.session_id, label: session.label, windows };
 }
 
+// A reviewer opened as a window in its product agent's session (rex_scope
+// "window") owns only that window; one that opened a session of its own owns
+// that session. Receipts older than scopes are session-scoped.
+export function receiptScope(r) {
+  const scope = r.rex_scope ?? 'session';
+  const named = value => typeof value === 'string' && value.length > 0;
+  requireProof((scope === 'session' && (r.rex_window === undefined || named(r.rex_window)))
+    || (scope === 'window' && named(r.rex_window) && named(r.rex_host)), 'receipt_identity_mismatch');
+  return scope;
+}
+
+export function windowTopology(window) {
+  requireProof(object(window) && typeof window.session_id === 'string' && window.session_id.length > 0 && typeof window.window_id === 'string' && window.window_id.length > 0 && (window.label === undefined || typeof window.label === 'string') && Array.isArray(window.layers), 'unknown_rex_window_topology');
+  return { scope: 'window', session: window.session_id, id: window.window_id, label: window.label, layers: window.layers.map(layerBlocks) };
+}
+
+// The container this reviewer owns, as Rex shows it now: its window, or its
+// session. Only this container's topology takes part in freshness checks -
+// the product agent's own window and its other members' windows change freely.
+function containerTopology(rex, r) {
+  return receiptScope(r) === 'window'
+    ? windowTopology(rex(['window', 'inspect', r.rex_window, '-s', r.rex_session, '--json']))
+    : sessionTopology(rex(['session', 'inspect', r.rex_session, '--json']));
+}
+
+// Exactly one terminal, the receipt's: a block or window anyone added makes
+// the container not only this reviewer's, and it is protected.
+function holdsOnlyItsTerminal(topology, r) {
+  const only = layers => layers.length === 1 && layers[0].length === 1 && layers[0][0] === r.rex_block;
+  if (receiptScope(r) === 'window') return topology.session === r.rex_session && topology.id === r.rex_window && only(topology.layers);
+  return topology.id === r.rex_session && topology.windows.length === 1 && (r.rex_window === undefined || topology.windows[0].id === r.rex_window) && only(topology.windows[0].layers);
+}
+
+// Rex answers a window-scoped call only for a block that is in that window.
+const blockTarget = r => ['-s', r.rex_session, ...(receiptScope(r) === 'window' ? ['-w', r.rex_window] : []), '-b', r.rex_block];
+
+function containerPresent(rex, r) {
+  if (!sessionPresent(rex, r.rex_session)) return false;
+  if (receiptScope(r) !== 'window') return true;
+  const listed = rex(['window', 'ls', '-s', r.rex_session, '--json']);
+  requireProof(object(listed) && Array.isArray(listed.windows) && listed.windows.every(w => object(w) && typeof w.window_id === 'string'), 'unknown_rex_window_roster');
+  return listed.windows.some(w => w.window_id === r.rex_window);
+}
+
+// Never the product agent's session: a window-scoped reviewer closes its own
+// window only, and its absence is seen before anything is recorded.
+function closeContainer(rex, r) {
+  if (receiptScope(r) === 'window') rex(['window', 'close', '-s', r.rex_session, r.rex_window], { json: false });
+  else rex(['kill', r.rex_session], { json: false });
+  requireProof(!containerPresent(rex, r), receiptScope(r) === 'window' ? 'rex_window_still_present' : 'rex_session_still_present');
+}
+
+// What the completion proof records as gone: the session, or - window-scoped -
+// only the reviewer's own window (its product's session stays).
+const containerAbsence = r => receiptScope(r) === 'window'
+  ? { container: 'window', containerAbsent: true, sessionAbsent: false }
+  : { container: 'session', containerAbsent: true, sessionAbsent: true };
+
 function emptyRexContainer(rex, first) {
   const r = first.identity;
-  const session = rex(['session', 'inspect', r.rex_session, '--json']);
-  requireProof(JSON.stringify(sessionTopology(session)) === JSON.stringify(first.session), 'rex_container_replaced_or_extended', 'protected');
-  const info = rex(['block', 'call', 'process', '{}', '-s', r.rex_session, '-b', r.rex_block]);
+  requireProof(JSON.stringify(containerTopology(rex, r)) === JSON.stringify(first.session), 'rex_container_replaced_or_extended', 'protected');
+  const info = rex(['block', 'call', 'process', '{}', ...blockTarget(r)]);
   requireProof(object(info) && info.error == null, 'unknown_stopped_rex_process');
   // Observed supported Rex process API omits child/foreground after exit;
   // explicit null is equivalent ONLY with the successful last_exit receipt.
@@ -551,6 +607,7 @@ export async function retire(options) {
     const parent = fs.lstatSync(path.dirname(receipt));
     requireProof(parent.isDirectory() && parent.uid === uid && (parent.mode & 0o077) === 0, 'unsafe_receipt_directory');
     requireProof(object(r) && r.name === agent && r.repo === repo && String(r.pr) === number && r.pane_id === pane && r.pane_id === `rex/${r.rex_session}/${r.rex_block}` && r.backend === 'rex' && r.role === 'reviewer', 'receipt_identity_mismatch');
+    receiptScope(r);
     requireProof(r.agent === 'pi', 'unsupported_native_runtime', 'protected');
     requireProof(['idle', 'done'].includes(r.agent_status), 'reviewer_not_idle', 'protected');
     requireProof(Number.isInteger(r.pid) && r.pid > 1 && typeof r.pid_start === 'string' && path.isAbsolute(r.cwd) && path.isAbsolute(r.workspace) && path.isAbsolute(r.agent_session?.value || ''), 'incomplete_runtime_receipt');
@@ -573,13 +630,13 @@ export async function retire(options) {
     }
     const role = ownedFile(env.CEL_ROLE_FILE, 1024 * 1024);
     const processes = validatedProcessEvidence(tree, r, declared, env.CEL_ROOT);
-    const session = rex(['session', 'inspect', r.rex_session, '--json']);
-    // Only target topology participates in freshness, not global clients/revision.
-    const topology = sessionTopology(session);
-    requireProof(topology.id === r.rex_session && topology.windows.length === 1 && topology.windows[0].layers.length === 1 && topology.windows[0].layers[0].length === 1 && topology.windows[0].layers[0][0] === r.rex_block, 'extra_or_unknown_rex_terminals', 'protected');
-    const processInfo = rex(['block', 'call', 'process', '{}', '-s', r.rex_session, '-b', r.rex_block]);
+    // Only target topology participates in freshness, not global clients/revision
+    // nor - for a window-scoped reviewer - the rest of its product's session.
+    const topology = containerTopology(rex, r);
+    requireProof(holdsOnlyItsTerminal(topology, r), 'extra_or_unknown_rex_terminals', 'protected');
+    const processInfo = rex(['block', 'call', 'process', '{}', ...blockTarget(r)]);
     requireProof(processInfo.child?.pid === r.pid && processInfo.foreground?.pid === r.pid, 'rex_foreground_repurposed', 'protected');
-    const capture = rex(['block', 'call', 'format', '{"format":"text","trim":true,"unwrap":true,"max_bytes":983040}', '-s', r.rex_session, '-b', r.rex_block]);
+    const capture = rex(['block', 'call', 'format', '{"format":"text","trim":true,"unwrap":true,"max_bytes":983040}', ...blockTarget(r)]);
     emptyComposer(capture, r.cwd);
     const round = durableRound(r, remote);
     const nativePath = r.agent_session.value;
@@ -589,9 +646,9 @@ export async function retire(options) {
     const taskCutoff = inspect ? parsed.finalAt : Date.now();
     if (root.cwd.endsWith(' (deleted)')) requireProof(fs.readdirSync(`/proc/${r.pid}/cwd`).length === 0, 'deleted_cwd_contains_untracked_evidence');
     const tasks = taskMetadata(r.cwd, parsed, r.pid, taskCutoff);
-    const latestProcess = rex(['block', 'call', 'process', '{}', '-s', r.rex_session, '-b', r.rex_block]);
+    const latestProcess = rex(['block', 'call', 'process', '{}', ...blockTarget(r)]);
     requireProof(latestProcess.child?.pid === r.pid && latestProcess.foreground?.pid === r.pid, 'rex_foreground_repurposed', 'protected');
-    emptyComposer(rex(['block', 'call', 'format', '{"format":"text","trim":true,"unwrap":true,"max_bytes":983040}', '-s', r.rex_session, '-b', r.rex_block]), r.cwd);
+    emptyComposer(rex(['block', 'call', 'format', '{"format":"text","trim":true,"unwrap":true,"max_bytes":983040}', ...blockTarget(r)]), r.cwd);
     const count = command('bash', [path.join(env.CEL_ROOT, 'bin/cel'), 'inbox', 'count', '--for', agent, '--all-workspaces', '--workspace', wsname], { json: false }).trim();
     requireProof(/^\d+$/.test(count), 'unknown_mailbox_count');
     requireProof(count === '0', 'pending_reviewer_mail', 'protected');
@@ -604,7 +661,7 @@ export async function retire(options) {
     requireProof(ownedFile(receipt, MAX_NATIVE, true).hash === saved.hash && ownedFile(nativePath).hash === native.hash && liveGeneration(root), 'identity_or_native_tail_changed', 'protected');
     requireProof(currentRoundHash(round) === round.hash && JSON.stringify(taskMetadata(r.cwd, parsed, r.pid, taskCutoff)) === JSON.stringify(tasks), 'round_or_background_state_changed', 'protected');
     requireProof(JSON.stringify(validatedProcessEvidence(descendants(r.pid), r, declared, env.CEL_ROOT)) === JSON.stringify(processes), 'descendant_tree_changed', 'protected');
-    requireProof(JSON.stringify(sessionTopology(rex(['session', 'inspect', r.rex_session, '--json']))) === JSON.stringify(topology), 'rex_terminal_changed', 'protected');
+    requireProof(JSON.stringify(containerTopology(rex, r)) === JSON.stringify(topology), 'rex_terminal_changed', 'protected');
     return evidence;
   };
   try {
@@ -617,7 +674,7 @@ export async function retire(options) {
       // A refusal still names the proof: its holder is retirement debt, not a stale row.
       proofPath = completed;
       completion = jsonFile(completed, true).value;
-      requireProof(completion.version === 1 && completion.stage === 'retired' && completion.processesExited === true && completion.sessionAbsent === true && completion.nativePrefixPreserved === true && (completion.artifactsPreserved === true || completion.recoveredFromPrepared === true) && path.dirname(completion.prepared) === proofDir, 'unknown_retirement_proof');
+      requireProof(completion.version === 1 && completion.stage === 'retired' && completion.processesExited === true && (completion.sessionAbsent === true || (completion.container === 'window' && completion.containerAbsent === true)) && completion.nativePrefixPreserved === true && (completion.artifactsPreserved === true || completion.recoveredFromPrepared === true) && path.dirname(completion.prepared) === proofDir, 'unknown_retirement_proof');
     } else if (fs.existsSync(proofDir)) {
       noSymlinks(proofDir);
       const directory = fs.lstatSync(proofDir), files = fs.readdirSync(proofDir);
@@ -647,7 +704,7 @@ export async function retire(options) {
       const nativeExit = savedExitCommitment(proofPath, original, !dry);
       requireProof(completion.nativeExit === nativeExit.path && completion.nativeExitHash === nativeExit.hash, 'native_exit_commitment_changed');
       requireProof(!retirementProcessesPresent(original), 'process_survived_rex_close');
-      const containerVisible = sessionPresent(rex, original.identity.rex_session);
+      const containerVisible = containerPresent(rex, original.identity);
       let nativeLengthAfter = nativePrefixPreserved(original), artifactsPreserved = false;
       archivedInstructionsPreserved(original);
       if (containerVisible) {
@@ -659,13 +716,12 @@ export async function retire(options) {
         emptyRexContainer(rex, original);
         requireProof(!retirementProcessesPresent(original), 'native_generation_reappeared');
         if (dry) return { status: 'eligible', reason: 'admitted_empty_rex_container_debt', receipt, proof: proofPath, native: original.native.path, checkout: original.checkout.path, verdict: original.round.path };
-        rex(['kill', original.identity.rex_session], { json: false });
-        sessionAbsent(rex, original.identity.rex_session);
+        closeContainer(rex, original.identity);
         nativeLengthAfter = preservedEvidence(original, original.artifacts);
         artifactsPreserved = true;
       }
       if (completion.recoveredFromPrepared && !dry && !fs.existsSync(completed)) {
-        saveProof(completed, { version: 1, stage: 'retired', at: new Date().toISOString(), prepared: proofPath, preparedHash: prepared.hash, nativeExit: nativeExit.path, nativeExitHash: nativeExit.hash, processesExited: true, sessionAbsent: true, nativePrefixPreserved: true, artifactsPreserved, containerRemovalFinished: containerVisible, recoveredFromPrepared: true, nativeLengthAfter });
+        saveProof(completed, { version: 1, stage: 'retired', at: new Date().toISOString(), prepared: proofPath, preparedHash: prepared.hash, nativeExit: nativeExit.path, nativeExitHash: nativeExit.hash, processesExited: true, ...containerAbsence(original.identity), nativePrefixPreserved: true, artifactsPreserved, containerRemovalFinished: containerVisible, recoveredFromPrepared: true, nativeLengthAfter });
       }
       // This is settlement of an ALREADY stopped exact pane, not a new round
       // grant. New verdicts/mail/native suffixes must not strand the old row.
@@ -716,12 +772,11 @@ export async function retire(options) {
     // process is ever killed by this backend, even after an exit acknowledgment.
     emptyRexContainer(rex, first);
     requireProof(!retirementProcessesPresent(first), 'native_generation_reappeared');
-    rex(['kill', first.identity.rex_session], { json: false });
-    sessionAbsent(rex, first.identity.rex_session);
+    closeContainer(rex, first.identity);
     const nativeLengthAfter = preservedEvidence(first, inventory);
     const current = jsonFile(receipt, true);
     requireProof(current.hash === first.receipt.hash && current.dev === first.receipt.dev && current.ino === first.receipt.ino, 'receipt_rebound_during_close');
-    saveProof(completed, { version: 1, stage: 'retired', at: new Date().toISOString(), prepared: proofPath, preparedHash: ownedFile(proofPath, MAX_NATIVE, true).hash, nativeExit: exitProof, nativeExitHash: ownedFile(exitProof, MAX_NATIVE, true).hash, processesExited: true, sessionAbsent: true, nativePrefixPreserved: true, nativeLengthAfter, artifactsPreserved: true });
+    saveProof(completed, { version: 1, stage: 'retired', at: new Date().toISOString(), prepared: proofPath, preparedHash: ownedFile(proofPath, MAX_NATIVE, true).hash, nativeExit: exitProof, nativeExitHash: ownedFile(exitProof, MAX_NATIVE, true).hash, processesExited: true, ...containerAbsence(first.identity), nativePrefixPreserved: true, nativeLengthAfter, artifactsPreserved: true });
     // No broad receipt cleanup: only this exact still-owned generation expires.
     fs.unlinkSync(receipt);
     clearSettledRequest(receipt, nonce);

@@ -559,6 +559,8 @@ test_builder_may_not_open_prs_merge_land_or_start_agents() {
            'herdr agent start x --kind pi' 'herdr worktree create x' 'cel team add login builder' 'cel team retire login x' \
            'cel team cap login 5' 'gh pr comment 3 --body hi' 'gh api -X POST repos/o/r/pulls' 'gh api repos/o/r/issues -f title=x' \
            'curl -XPOST http://forgejo.internal/api/v1/repos/o/r/pulls' 'tea pr create' \
+           'rex new x -- pi' 'rex window close -s session:lead window:lead' 'rex window new -s session:lead x' \
+           'rex block close -s session:lead block:lead' 'rex kill session:lead' 'rex send -s session:lead -b block:lead hi' \
            'cat ~/.config/cel/forge/token' 'cat ../../launch/widget-login-builder.token'; do
     _deny "$(_builder guard_classify member "$c")" "$c" || { rm -rf "$T"; return 1; }
   done
