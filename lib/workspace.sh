@@ -590,10 +590,13 @@ ws_people_json() { # <wsdir> -> the people: list as compact JSON, [] when absent
   _yqr -c '.people // [] | if type == "array" then . else [] end' "$1/workspace.yaml"
 }
 ws_me() { # <wsdir> -> this login's person id, or nothing
-  # A malformed local file is ignored by the merge, which would then answer
-  # from workspace.yaml alone - so no local file that parses, no me.
-  [ -f "$1/workspace.local.yaml" ] && _yaml_json "$1/workspace.local.yaml" >/dev/null 2>&1 || return 0
-  _yqr_ws -r '.me // "" | tostring' "$1"
+  # IDENTITY COMES FROM THIS LOGIN'S OWN FILE AND NOWHERE ELSE. Never the
+  # merged view: when workspace.local.yaml parses but does not merge
+  # (`role_profiles: []`), _ws_effective_json falls back to workspace.yaml
+  # alone, and a committed me: would then name this login. No local file, one
+  # that does not parse, or a me: that is not a string: no me.
+  [ -f "$1/workspace.local.yaml" ] || return 0
+  _yqr -r '.me | if type == "string" then . else "" end' "$1/workspace.local.yaml" 2>/dev/null || true
 }
 ws_person_holds() { # <wsdir> <id> <product> <role> -> 0 when held, workspace-wide or for that product
   [ "$(_yqr -r --arg i "$2" --arg p "$3" --arg r "$4" '

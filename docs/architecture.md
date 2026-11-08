@@ -50,9 +50,11 @@ solo role, which also leads feature teams.
 People are declared in the committed `workspace.yaml` (`people:`: id, forge
 login, roles workspace-wide and per product), and a login names the person
 it is with `me:` in its gitignored `workspace.local.yaml` - the one key that
-file may set besides routing (`_WS_LOCAL_KEYS`, `lib/yaml.sh`; the merge
-takes `me` from the local file only). `lib/workspace.sh` reads them
-(`ws_people_json`, `ws_me`, `ws_person_holds`, `ws_role_holders`). A product
+file may set besides routing (`_WS_LOCAL_KEYS`, `lib/yaml.sh`). `ws_me` reads
+`me` from `workspace.local.yaml` alone, never from the merged view: a local
+file that fails the merge falls back to `workspace.yaml`, and a committed `me`
+must not become this login's. `lib/workspace.sh` also reads
+`ws_people_json`, `ws_person_holds` and `ws_role_holders`. A product
 may name its `home:` (`products[].home`, or `repos[].home` for an implicit
 product; `ws_product_home`), the person whose login runs its agents.
 `ws_product_home_check` is the one test: true with no home or when `me` is

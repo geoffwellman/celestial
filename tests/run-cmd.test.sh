@@ -1062,6 +1062,22 @@ test_run_refuses_a_homed_product_on_a_login_with_no_me() {
   assert_contains "$out" "or pass --force"
   rm -rf "$T"
 }
+# A me: committed to workspace.yaml names nobody's login - not with no local
+# file, not beside a local file without me:, and not when the local file
+# fails the merge and the merged view falls back to workspace.yaml alone.
+test_run_a_committed_me_never_makes_this_the_home_login() {
+  _ws_home -
+  printf 'me: sam\n' >> "$T/workspace.yaml"
+  local local_file out
+  for local_file in - 'role_profiles: { solo: x }' 'role_profiles: []'; do
+    rm -f "$T/workspace.local.yaml"
+    [ "$local_file" = - ] || printf '%s\n' "$local_file" > "$T/workspace.local.yaml"
+    out="$(cd "$T" && _cmd_run_in_subshell solo --product bundle --dry-run 2>&1)" \
+      && { echo "a committed me: started sam's product ($local_file): $out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "this login names no person" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
 test_run_force_and_the_home_login_start_a_homed_product() {
   _ws_home jo
   local out

@@ -215,6 +215,36 @@ test_local_me_overlays_and_a_committed_me_never_counts() {
   rm -rf "$T"
 }
 
+# A LOCAL FILE THAT PARSES BUT DOES NOT MERGE (`role_profiles: []`) costs the
+# override: the merged view is workspace.yaml alone - committed me: included.
+# Identity is never read from that view, so the committed me: still does not
+# count, with or without a me: of its own in the local file.
+test_a_committed_me_never_counts_when_the_local_file_fails_the_merge() {
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  printf 'me: sam\n' >> "$T/alpha/workspace.yaml"
+  printf 'role_profiles: []\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(_yqr_ws -r '.me // ""' "$T/alpha" 2>/dev/null)" "sam"   # the fallback is the base file
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" ""
+  printf 'role_profiles: []\nme: jo\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" "jo"
+  # a me: that is not a person id string is no me
+  printf 'me: [sam]\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" ""
+  printf 'just a string\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" ""
+  rm -rf "$T"
+}
+test_a_committed_me_never_counts_without_a_local_me() {
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  printf 'me: sam\n' >> "$T/alpha/workspace.yaml"
+  assert_eq "$(ws_me "$T/alpha")" ""                       # no local file
+  printf 'role_profiles: { worker: mine }\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha")" ""                       # a local file with no me:
+  rm -rf "$T"
+}
+
 test_me_is_the_only_newly_allowed_local_key() {
   _wl_setup
   source "$CEL_ROOT/lib/workspace.sh"
