@@ -1080,7 +1080,7 @@ whole segment spans any number of directories (`**/*token*` matches
 `token.sh` and `a/b/api_token.ts`; `lib/auth/**` everything under
 `lib/auth/`, not `lib/auth` itself), everything else is literal. Nothing
 malformed is skipped: a bad entry, a `review:` that is not a map, a key in
-it Celestial does not read (workspace-wide `runtime`, `model`, `post`,
+it Celestial does not know (workspace-wide `runtime`, `model`, the retired `post`,
 `extra`; on a repo only `extra` - so `extras:` is an error), and two
 `repos:` entries of one name each refuse `cel run reviewer` and `cel solo
 land` for the repos they reach, and `cel doctor` names them. With a policy, `cel run reviewer --repo r

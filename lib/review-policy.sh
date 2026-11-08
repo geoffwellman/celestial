@@ -25,8 +25,8 @@
 # workspace.local.yaml overlay of _yqr_ws), so a per-person file can neither
 # add nor drop a required reviewer. Nothing malformed is skipped - a typo
 # must not quietly drop a required review: an entry that is not exactly as
-# above, a `review:` that is not a map, a key in it this code does not read
-# (workspace-wide: runtime, model, post, extra; on a repo: extra - so
+# above, a `review:` that is not a map, a key in it Celestial does not know
+# (workspace-wide: runtime, model, the retired post, extra; on a repo: extra - so
 # `extras:` is refused, not ignored), and two `repos:` entries of one name
 # (which of the two holds the policy is unknown) each fail the read. `cel
 # doctor` reports the same errors (review_policy_problems).
@@ -108,7 +108,9 @@ _REVIEW_JQ_GLOB='def review_glob_re:
              + (if $i < $n - 1 then "/" else "" end) end))
   | "^" + . + "$";'
 
-# The `review:` keys this code reads (lib/workspace.sh ws_review; extra here).
+# The `review:` keys Celestial knows (lib/workspace.sh ws_review; extra here).
+# `post` is retired - cel doctor warns about it (doctor_review_post_line) -
+# and is tolerated here so a leftover one does not refuse every land.
 _REVIEW_KEYS_WS='["runtime","model","post","extra"]'
 _REVIEW_KEYS_REPO='["extra"]'
 
