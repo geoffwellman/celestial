@@ -118,7 +118,16 @@ and naming the team's product); a `decision` event and the spend cap
 brief.md included - can grant spend or authority. There is no owner path: a
 process with no agent role (an agent can shed one with `env -u` or `setsid`)
 is refused and the owner asks the lead by `cel inbox` or `cel decide`.
-Members act by their member identity (ack, event, verdict).
+Members act by their member identity (ack, event, verdict). Every writing
+verb also checks that identity against the agent's launch
+(`_team_launch_identity`): the nearest process above `cel` whose
+`/proc/<pid>/environ` - fixed at exec, the marks `cel gc` proves agents by -
+carries `CEL_ROLE` must agree on `CEL_ROLE`, `CEL_PRODUCT`, `CEL_INBOX_ME`,
+`CEL_INBOX_WS` and the `CEL_TEAM*` variables, so a shell re-dressed with
+`export` or a variable-held name is refused, and so is a role with no launch
+above it (detached by `setsid` or a double fork). A process that execs a
+fresh environment carrying `CEL_ROLE` is its own nearest launch; that
+spelling is the guard's to refuse.
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
@@ -360,10 +369,12 @@ shell, or by the native read and edit tools where the guard hook runs); no
 role may source `lib/forge.sh` or call its `_forge_*`/`forge_*` functions
 (also in `bash -c`, `$(...)`, `eval`, or through a variable holding the
 name), which carry the token without `cel forge`'s checks; and no role may
-run `cel forge` on a line that sets a `CEL_*` variable, even to empty
-(`VAR=`, `env VAR=`, `export`, `declare`) - dressing up as another product.
-Shedding one (`unset`, `env -u`, `env -i`, `setsid`) is left to `cel forge`,
-which changes nothing for a process with no agent identity. Like the rest of
+run any `cel` command on a line that sets a `CEL_*` or `HERDR_*` variable,
+even to empty (`VAR=`, `env VAR=`, `export`, `declare`) - dressing up as
+another product, lead, member or mailbox (`CEL_GUARD_ALLOW_ONCE`, the human's
+approval, does not count; `cel inbox send --from` is a flag). Shedding one
+(`unset`, `env -u`, `env -i`, `setsid`) is left to `cel forge` and `cel
+team`, which change nothing for a process with no agent identity. Like the rest of
 the guard these are tripwires matched as text, not a sandbox: a script file
 that sources the library, or a name assembled at run time, still runs -
 which is why `cel forge` checks who is asking itself.

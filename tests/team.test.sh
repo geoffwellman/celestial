@@ -443,6 +443,51 @@ test_a_process_with_no_agent_identity_leads_nothing() {
   rm -rf "$T"
 }
 
+# AN AGENT ACTS AS ITS LAUNCH. The nearest process above cel whose environ
+# (fixed at exec) carries CEL_ROLE is the agent's launch; an identity that
+# differs from it - re-dressed in the shell, however spelled - is refused,
+# and so is a role with no launch above it (setsid, a double fork). The
+# suite's /proc is CEL_PROC_DIR: here, the caller is $PPID.
+test_an_agent_acts_only_as_its_launch_environ_says() {
+  _team_fixture
+  local P="$T/proc" out
+  mkdir -p "$P/$PPID" "$P/4242"
+  _launch() { # <pid> <NUL-free environ entries...>: a process whose parent is 4242's, then init
+    local pid="$1"; shift
+    printf '%s\0' "$@" > "$P/$pid/environ"
+    if [ "$pid" = 4242 ]; then printf '4242 (omp) S 1 1 1' > "$P/4242/stat"; else printf '%s (bash) S 4242 1 1' "$pid" > "$P/$pid/stat"; fi
+  }
+  # the agent's runtime (4242) was launched as tools' agent; its tool shell
+  # ($PPID) carries no role of its own
+  _launch 4242 CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch
+  _launch "$PPID" HOME=/h
+  out="$(CEL_PROC_DIR="$P" _t start login --product shop)" && { echo "a re-dressed agent led another product's team"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "CEL_PRODUCT=shop but its launch (pid 4242) says CEL_PRODUCT=tools" || { rm -rf "$T"; return 1; }
+  [ ! -e "$W/.cel/teams/login" ] || { echo "a refused start left a team"; rm -rf "$T"; return 1; }
+  # the nearest carrier wins: a shell exec'd as shop's agent below it
+  _launch "$PPID" CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch
+  CEL_PROC_DIR="$P" _t start login --product shop >/dev/null || { echo "its own launch was refused"; rm -rf "$T"; return 1; }
+  # an extra mark the launch never had is a re-dressing too
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch CEL_TEAM_MEMBER=shop-login-qa _t cap login spend-10)" && { echo "an added mark passed"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "CEL_TEAM_MEMBER=shop-login-qa but its launch" || { rm -rf "$T"; return 1; }
+  # a member re-dressed as another member
+  _t add login qa --repo web >/dev/null; _t add login platform >/dev/null
+  _launch "$PPID" CEL_ROLE=member CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=shop-login-qa CEL_PRODUCT=shop
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=member CEL_TEAM=login CEL_TEAM_ROLE=platform CEL_TEAM_MEMBER=shop-login-platform CEL_PRODUCT=shop _t ack login)" \
+    && { echo "a member acked as another"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "its launch" || { rm -rf "$T"; return 1; }
+  CEL_PROC_DIR="$P" CEL_ROLE=member CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=shop-login-qa CEL_PRODUCT=shop _t ack login >/dev/null \
+    || { echo "a member was refused its own ack"; rm -rf "$T"; return 1; }
+  # detached (setsid, double fork): no launch above it vouches for the role
+  printf 'HOME=/h\0' > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"
+  out="$(CEL_PROC_DIR="$P" _t cap login spend-10)" && { echo "a detached agent set the cap"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no agent launch above it" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.spend_cap // "none"' "$W/.cel/teams/login/team.json")" none || { rm -rf "$T"; return 1; }
+  # status stays open whatever the caller is
+  CEL_PROC_DIR="$P" _t status login >/dev/null || { echo "status was refused"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # A decision records an owner's answer - only the lead writes one;
 # preview.ready is platform's, qa's or the lead's.
 test_decision_and_preview_events_are_restricted() {

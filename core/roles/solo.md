@@ -47,9 +47,10 @@ How work ships
    with `cel forge pr ready <repo>#<n>`; a PR you abandon is closed with
    `cel forge pr close <repo>#<n> [--comment-file f]` - your own product's
    repos and your account's PRs only (or a migrated one by Ghost). Run
-   `cel forge` as you are: never source lib/forge.sh, call its functions, or
-   set CEL_* variables on its line - the guard refuses each; with your role
-   or product shed, cel forge changes nothing. The owner closes, readies or
+   `cel` as you are: never source lib/forge.sh, call its functions, or set
+   CEL_* or HERDR_* variables on a `cel` line (cel forge, cel team, cel
+   inbox...) - the guard refuses each, and cel team checks you against your
+   launch; with your role or product shed, cel forge changes nothing. The owner closes, readies or
    reruns anything else in the forge's web UI (or gh) - cel forge has no
    owner path, so ask them rather than route around it. Where a
    `pr: none` repo is named, follow that line instead.
