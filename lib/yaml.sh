@@ -39,14 +39,15 @@ _yqr() { # <jq args...> <file>   - the shape every read call here already has
 # needs a local override that does not collide with every sync.
 #
 # workspace.local.yaml, gitignored, sits beside workspace.yaml and is allowed
-# to do three things and nothing else: override role_profiles (workspace-level,
-# and per products[]/repos[] entry, matched by name), add worker_profiles, and
-# override env: keys. The allowed top-level keys are _WS_LOCAL_KEYS below -
+# to do four things and nothing else: override role_profiles (workspace-level,
+# and per products[]/repos[] entry, matched by name), add worker_profiles,
+# override env: keys, and say which person this login is (`me: <people id>`,
+# lib/workspace.sh ws_me). The allowed top-level keys are _WS_LOCAL_KEYS below -
 # the merge, doctor and the docs all read that one list.
 # It cannot add a repo, change policy, or touch anything a teammate reading
 # workspace.yaml would need to know to understand what ships. Local wins,
 # nothing else is merged.
-_WS_LOCAL_KEYS="role_profiles worker_profiles env products repos"
+_WS_LOCAL_KEYS="role_profiles worker_profiles env products repos me"
 _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
   local wsdir="$1" base="$1/workspace.yaml" localf="$1/workspace.local.yaml"
   [ -f "$localf" ] || { _yaml_json "$base"; return; }
@@ -65,10 +66,12 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
   # The merge's cache identity is borrowed from the two inputs' own cache
   # keys (already content+path, see _yaml_json) rather than restated here, so
   # it can't drift from that scheme - and, like them, an input converted
-  # without a content hash is merged afresh on every read.
+  # without a content hash is merged afresh on every read. The merge program
+  # itself is part of the identity too (`v2`: me:), so a box updated to a new
+  # merge never serves a result the old one wrote for the same two files.
   local dir key out
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
-  key="merged-$(basename "$basej" .json)-$(basename "$localj" .json)"
+  key="merged-v2-$(basename "$basej" .json)-$(basename "$localj" .json)"
   out="$dir/$key.json"
   if [ ! -s "$out" ] || [[ "$key" == *nohash-* ]]; then
     mkdir -p "$dir"
@@ -99,6 +102,9 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
       | .repos = (($b.repos // []) | map(
           . as $r | local_role_profiles($r.name; $lrepo) as $o |
           if ($o | length) > 0 then $r + {role_profiles: (($r.role_profiles // {}) * $o)} else $r end))
+      # me: is per login by definition. A committed one would name the same
+      # person on every teammate'"'"'s box, so only the local file'"'"'s counts.
+      | (if $l.me != null then .me = $l.me else del(.me) end)
     ' "$basej" "$localj" > "$out.tmp.$$" 2>/dev/null && mv -f "$out.tmp.$$" "$out" || {
       # Valid YAML of the wrong shape (`role_profiles: []`) fails the merge;
       # like a parse error, it costs the override, not the box's routing.

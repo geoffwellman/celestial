@@ -1022,6 +1022,89 @@ test_run_orchestrator_ignores_a_live_agent_in_another_cwd() {
   rm -rf "$T"
 }
 
+# ONE LOGIN RUNS A PRODUCT (products[].home). On a teammate's login the
+# product's agent - main or lane - is refused with the reason and the way
+# out, a dry run included; --force says "I mean it".
+_ws_home() { # <me|-> -> bundle's home is sam; this login's me: as given
+  _ws_solo bundle
+  yq -y '.people = [{id: "sam", login: "sam-example"}, {id: "jo", login: "jo-example"}]
+    | (.products[] | select(.name == "bundle") | .home) = "sam"' "$T/workspace.yaml" > "$T/w" \
+    && mv "$T/w" "$T/workspace.yaml"
+  [ "$1" = - ] || printf 'me: %s\n' "$1" > "$T/workspace.local.yaml"
+}
+test_run_refuses_a_product_whose_home_is_another_login() {
+  _ws_home jo
+  local role out
+  for role in orchestrator solo; do
+    out="$(cd "$T" && _cmd_run_in_subshell "$role" --product bundle --dry-run 2>&1)" \
+      && { echo "cel run $role started sam's product on jo's login: $out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "cel run: bundle runs on sam's login (products[].home: sam); this login is jo - ask sam, or pass --force" \
+      || { rm -rf "$T"; return 1; }
+  done
+  out="$(cd "$T" && _cmd_run_in_subshell solo --product bundle --lane ui --dry-run 2>&1)" \
+    && { echo "a lane started on the wrong login: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "this login is jo - ask sam, or pass --force"
+  # --repo resolves to the product, and is refused the same way
+  out="$(cd "$T" && _cmd_run_in_subshell orchestrator --repo widget --dry-run 2>&1)" \
+    && { echo "--repo routed around the home: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "products[].home: sam"
+  # an implicit product with no home is untouched
+  out="$(cd "$T" && cmd_run orchestrator --repo lone --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start lone-orch"
+  rm -rf "$T"
+}
+test_run_refuses_a_homed_product_on_a_login_with_no_me() {
+  _ws_home -
+  local out
+  out="$(cd "$T" && _cmd_run_in_subshell solo --product bundle --dry-run 2>&1)" \
+    && { echo "a login with no me: started a homed product: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "bundle runs on sam's login (products[].home: sam)"
+  assert_contains "$out" "or pass --force"
+  rm -rf "$T"
+}
+# A me: committed to workspace.yaml names nobody's login - not with no local
+# file, not beside a local file without me:, and not when the local file
+# fails the merge and the merged view falls back to workspace.yaml alone.
+test_run_a_committed_me_never_makes_this_the_home_login() {
+  _ws_home -
+  printf 'me: sam\n' >> "$T/workspace.yaml"
+  local local_file out
+  for local_file in - 'role_profiles: { solo: x }' 'role_profiles: []'; do
+    rm -f "$T/workspace.local.yaml"
+    [ "$local_file" = - ] || printf '%s\n' "$local_file" > "$T/workspace.local.yaml"
+    out="$(cd "$T" && _cmd_run_in_subshell solo --product bundle --dry-run 2>&1)" \
+      && { echo "a committed me: started sam's product ($local_file): $out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "this login names no person" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+test_run_force_and_the_home_login_start_a_homed_product() {
+  _ws_home jo
+  local out
+  out="$(cd "$T" && cmd_run solo --product bundle --dry-run --force 2>/dev/null)"
+  assert_contains "$out" "agent start bundle-orch"
+  out="$(cd "$T" && cmd_run solo --product bundle --lane ui --dry-run --force 2>/dev/null)"
+  assert_contains "$out" "agent start bundle-ui"
+  printf 'me: sam\n' > "$T/workspace.local.yaml"
+  out="$(cd "$T" && cmd_run solo --product bundle --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start bundle-orch"
+  out="$(cd "$T" && cmd_run solo --product bundle --lane ui --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start bundle-ui"
+  rm -rf "$T"
+}
+# With no people:, home: or me: anywhere, every login starts every product as
+# before - a me: alone changes nothing either.
+test_run_without_home_keys_is_unchanged() {
+  _ws_solo bundle
+  local out
+  out="$(cd "$T" && cmd_run solo --product bundle --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start bundle-orch"
+  printf 'me: jo\n' > "$T/workspace.local.yaml"
+  out="$(cd "$T" && cmd_run solo --product bundle --lane ui --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start bundle-ui"
+  rm -rf "$T"
+}
+
 # ---------------------------------------------------- the reviewer registry
 # A reviewer started by `cel run reviewer --repo r --pr n` gets a registry
 # row; without it no sweep could see a finished reviewer's idle pane. The row

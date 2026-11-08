@@ -572,6 +572,73 @@ ws_build_mode() { # <wsdir> <product> -> solo | fleet | <invalid value>
   printf '%s' "${m:-solo}"
 }
 
+# PEOPLE. A team workspace may name who is in it (workspace.yaml, committed):
+#
+#   people:
+#     - id: sam                     # what homes, decisions and sign-offs name
+#       login: sam-example          # their forge login (GitHub or Forgejo)
+#       roles: [owner, approver]    # held for every product
+#       products: { atlas: [qa] }   # held for one product
+#
+# Roles are a fixed list (_WS_PERSON_ROLES; cel doctor checks it). Which
+# person THIS login is comes from `me: <id>` in its own workspace.local.yaml
+# (lib/yaml.sh merges only the local one). It is self-asserted - doctor checks
+# it against this login's forge account - and it decides who starts what,
+# never who has signed something off. With no people: key nothing changes.
+_WS_PERSON_ROLES="owner product-lead qa design release approver"
+ws_people_json() { # <wsdir> -> the people: list as compact JSON, [] when absent
+  _yqr -c '.people // [] | if type == "array" then . else [] end' "$1/workspace.yaml"
+}
+ws_me() { # <wsdir> -> this login's person id, or nothing
+  # IDENTITY COMES FROM THIS LOGIN'S OWN FILE AND NOWHERE ELSE. Never the
+  # merged view: when workspace.local.yaml parses but does not merge
+  # (`role_profiles: []`), _ws_effective_json falls back to workspace.yaml
+  # alone, and a committed me: would then name this login. No local file, one
+  # that does not parse, or a me: that is not a string: no me.
+  [ -f "$1/workspace.local.yaml" ] || return 0
+  _yqr -r '.me | if type == "string" then . else "" end' "$1/workspace.local.yaml" 2>/dev/null || true
+}
+ws_person_holds() { # <wsdir> <id> <product> <role> -> 0 when held, workspace-wide or for that product
+  [ "$(_yqr -r --arg i "$2" --arg p "$3" --arg r "$4" '
+    [(.people // [])[]? | objects | select(.id == $i)
+     | ((.roles // []) + ((.products // {})[$p] // []))[]?] | index($r) != null' "$1/workspace.yaml")" = true ]
+}
+ws_role_holders() { # <wsdir> <product> <role> -> the ids holding it, one per line
+  _yqr -r --arg p "$2" --arg r "$3" '
+    (.people // [])[]? | objects
+    | select(((.roles // []) + ((.products // {})[$p] // [])) | index($r) != null) | .id' "$1/workspace.yaml"
+}
+
+# THE LOGIN THAT RUNS A PRODUCT'S AGENTS. Two teammates' boxes would otherwise
+# each start `<product>-orch` on the same repos, with disjoint review state.
+# Declared on the product (`products[].home`) or, for an implicit product, on
+# its repo (`repos[].home`), as with mode:. Absent: any login, as before.
+ws_product_home() { # <wsdir> <product> -> a people id, or nothing
+  if ws_product_declared "$1" "$2"; then
+    ws_product_get "$1" "$2" home
+  else
+    ws_repo_get "$1" "$2" home
+  fi
+}
+# Is this login the one that runs <product>? 0 when the product has no home
+# or this login's me: is its home. Otherwise 1, and the reason on stdout -
+# FAIL CLOSED: a login that names no person is not the home of anything.
+# `cel run` refuses with the reason; `cel ws up` and the steward skip the
+# product without a word, because somebody else's product is not a fault.
+ws_product_home_check() { # <wsdir> <product>
+  local home me
+  home="$(ws_product_home "$1" "$2")"
+  [ -n "$home" ] || return 0
+  me="$(ws_me "$1")"
+  [ "$me" != "$home" ] || return 0
+  if [ -z "$me" ]; then
+    printf "%s runs on %s's login (products[].home: %s); this login names no person (no me: in workspace.local.yaml)" "$2" "$home" "$home"
+  else
+    printf "%s runs on %s's login (products[].home: %s); this login is %s" "$2" "$home" "$home" "$me"
+  fi
+  return 1
+}
+
 # Where a solo agent keeps its own git worktrees (its role says so), and the
 # ones that exist: a directory there is a worktree when it carries a `.git`
 # file. Read by fleet (how many), and by gc (which may go).

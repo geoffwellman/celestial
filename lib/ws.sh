@@ -114,6 +114,9 @@ _ws_local_example() {
 # tickets, repos, gates, prefixes, merge and review settings cannot be changed
 # from here. Keys are merged over workspace.yaml; secrets go in env.local.
 #
+# me: sam                        # which person in workspace.yaml's people: this
+#                                # login is; products with home: <you> start here
+#
 # role_profiles:                 # which profile each role launches on
 #   root: mine
 #   orchestrator: mine

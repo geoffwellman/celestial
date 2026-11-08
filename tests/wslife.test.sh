@@ -536,3 +536,54 @@ test_up_names_a_numbered_tab_from_what_is_in_it() {
   assert_contains "$(cat "$STUB_DIR/calls.log")" "tab rename $id:t9 widget-wg-1-x"
   _wslife_teardown
 }
+
+# --- ONE LOGIN RUNS A PRODUCT ----------------------------------------------
+# products[].home names the person whose login runs a product's agents. On
+# any other login - or one that names no person at all (fail closed) - `up`
+# skips that product without a word: it is not this login's to start, which
+# is not a fault. Every other product is reconciled as before.
+_wslife_home() { # <me|-> -> bundle's home is sam
+  _wslife_ws_yaml | sed 's/^    orchestrator: auto$/    orchestrator: auto\n    home: sam/' >"$T/alpha/workspace.yaml"
+  printf 'people:\n  - { id: sam, login: sam-example }\n  - { id: jo, login: jo-example }\n' >>"$T/alpha/workspace.yaml"
+  [ "$1" = - ] || printf 'me: %s\n' "$1" >"$T/alpha/workspace.local.yaml"
+}
+test_up_skips_a_product_whose_home_is_another_login_silently() {
+  _wslife_setup
+  local me out
+  for me in jo -; do
+    _wslife_home "$me"
+    assert_eq "$(wslife_orchestrators "$T/alpha")" ""
+    out="$(cmd_ws_up alpha 2>&1)"
+    ! grep -q 'agent start bundle-orch' "$STUB_DIR/calls.log" \
+      || { echo "up started sam's product on the $me login"; _wslife_teardown; return 1; }
+    ! printf '%s' "$out" | grep -q 'bundle' \
+      || { echo "up said something about a product that is not this login's: $out"; _wslife_teardown; return 1; }
+    # the dry run is where the operator asks why: it says whose it is
+    out="$(cmd_ws_up alpha --dry-run 2>&1)"
+    assert_contains "$out" "bundle runs on sam's login (products[].home: sam)"
+    ! printf '%s' "$out" | grep -q 'would start' \
+      || { echo "the dry run would start it: $out"; _wslife_teardown; return 1; }
+    out="$(cmd_ws_status alpha 2>&1)"
+    ! printf '%s' "$out" | grep -q 'would start' \
+      || { echo "status says it would start: $out"; _wslife_teardown; return 1; }
+  done
+  _wslife_teardown
+}
+test_up_starts_a_product_on_its_home_login() {
+  _wslife_setup
+  _wslife_home sam
+  assert_eq "$(wslife_orchestrators "$T/alpha")" "bundle"
+  cmd_ws_up alpha >/dev/null
+  assert_contains "$(cat "$STUB_DIR/calls.log")" "agent start bundle-orch"
+  _wslife_teardown
+}
+# With no people:, home: or me: the auto product starts on any login, as
+# before; a me: alone changes nothing.
+test_up_without_home_keys_is_unchanged() {
+  _wslife_setup
+  printf 'me: jo\n' >"$T/alpha/workspace.local.yaml"
+  assert_eq "$(wslife_orchestrators "$T/alpha")" "bundle"
+  cmd_ws_up alpha >/dev/null
+  assert_contains "$(cat "$STUB_DIR/calls.log")" "agent start bundle-orch"
+  _wslife_teardown
+}

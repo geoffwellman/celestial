@@ -472,3 +472,82 @@ test_ws_repo_pr_overrides_workspace_policy_per_repo() {
   if (ws_repo_pr "$tmp" gadget) >/dev/null 2>&1; then fail "invalid pr value accepted"; fi
   rm -rf "$tmp"
 }
+
+# PEOPLE. `people:` names who is in a team workspace and which roles each
+# holds, workspace-wide or per product; `products[].home` names the person
+# whose login runs a product's agents, and `me:` in workspace.local.yaml
+# says which person this login is.
+_ws_people() {
+  T="$(mktemp -d)"
+  cat > "$T/workspace.yaml" <<'YAML'
+name: acme
+kind: team
+people:
+  - id: sam
+    login: sam-example
+    roles: [owner, approver]
+    products: { atlas: [qa] }
+  - id: jo
+    login: jo-example
+    products: { atlas: [product-lead], billing: [qa] }
+products:
+  - name: atlas
+    repos: [atlas-web]
+    home: sam
+repos:
+  - { name: atlas-web, prefix: ATL }
+  - { name: billing, prefix: BIL, home: jo }
+  - { name: notes, prefix: NOT }
+YAML
+}
+test_ws_people_helpers() {
+  _ws_people
+  assert_eq "$(ws_people_json "$T" | jq -r 'map(.id) | join(",")')" "sam,jo"
+  ws_person_holds "$T" sam atlas owner     || fail "a workspace-wide role holds for every product"
+  ws_person_holds "$T" sam billing approver || fail "a workspace-wide role holds for every product"
+  ws_person_holds "$T" sam atlas qa        || fail "a per-product role holds for its product"
+  ! ws_person_holds "$T" sam billing qa    || fail "a per-product role leaked to another product"
+  ws_person_holds "$T" jo atlas product-lead || fail "jo leads atlas"
+  ! ws_person_holds "$T" nobody atlas qa   || fail "an unknown id holds nothing"
+  assert_eq "$(ws_role_holders "$T" atlas qa | paste -sd, -)" "sam"
+  assert_eq "$(ws_role_holders "$T" billing qa | paste -sd, -)" "jo"
+  assert_eq "$(ws_role_holders "$T" atlas owner | paste -sd, -)" "sam"
+  assert_eq "$(ws_role_holders "$T" atlas design)" ""
+  rm -rf "$T"
+}
+# A declared product's home is products[].home; a repo in no product is its
+# own product and says it on its repos[] entry (as with mode:).
+test_ws_product_home_reads_the_product_then_the_implicit_repo() {
+  _ws_people
+  assert_eq "$(ws_product_home "$T" atlas)" "sam"
+  assert_eq "$(ws_product_home "$T" billing)" "jo"
+  assert_eq "$(ws_product_home "$T" notes)" ""
+  rm -rf "$T"
+}
+test_ws_product_home_check_admits_only_the_home_login() {
+  _ws_people
+  local why
+  # no me: in a workspace that sets home - fail closed
+  why="$(ws_product_home_check "$T" atlas)" && fail "a login with no me: was admitted to a product with a home"
+  assert_contains "$why" "atlas runs on sam's login (products[].home: sam)"
+  assert_contains "$why" "me:"
+  printf 'me: jo\n' > "$T/workspace.local.yaml"
+  why="$(ws_product_home_check "$T" atlas)" && fail "jo's login was admitted to sam's product"
+  assert_eq "$why" "atlas runs on sam's login (products[].home: sam); this login is jo"
+  ws_product_home_check "$T" billing >/dev/null || fail "jo's login was refused its own product"
+  # a product with no home is anybody's, as before
+  ws_product_home_check "$T" notes >/dev/null || fail "a product with no home was refused"
+  printf 'me: sam\n' > "$T/workspace.local.yaml"
+  assert_eq "$(ws_product_home_check "$T" atlas)" ""
+  ws_product_home_check "$T" atlas || fail "sam's login was refused sam's product"
+  rm -rf "$T"
+}
+# With none of the keys set nothing changes: no people, no home, every login
+# may run every product.
+test_ws_people_helpers_are_inert_without_the_keys() {
+  assert_eq "$(ws_people_json "$WSA")" "[]"
+  assert_eq "$(ws_me "$WSA")" ""
+  assert_eq "$(ws_product_home "$WSA" widget)" ""
+  assert_eq "$(ws_role_holders "$WSA" widget owner)" ""
+  ws_product_home_check "$WSA" widget >/dev/null || fail "a workspace with no home refused a product"
+}

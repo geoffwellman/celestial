@@ -192,3 +192,89 @@ test_a_wrongly_typed_local_key_falls_back_to_the_committed_routing() {
   assert_eq "$(role_profile "$T/alpha" worker 2>/dev/null)" "team"
   rm -rf "$T"
 }
+
+# --- 6: me: - which person this login is -----------------------------------
+# `me:` is the one key the local file may set besides routing. It is read
+# from the local file only: a `me:` committed to workspace.yaml would name the
+# same person on every teammate's box, so the merge drops it.
+test_local_me_overlays_and_a_committed_me_never_counts() {
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  assert_eq "$(ws_me "$T/alpha")" ""
+  printf 'me: sam\n' >> "$T/alpha/workspace.yaml"
+  assert_eq "$(ws_me "$T/alpha")" ""
+  printf 'me: jo\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha")" "jo"
+  assert_eq "$(_yqr_ws -r .me "$T/alpha")" "jo"
+  printf 'env: { A: b }\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha")" ""
+  assert_eq "$(_yqr_ws -r '.me // "none"' "$T/alpha")" "none"
+  # a malformed local file never lets the committed me through either
+  printf 'me: [unclosed\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" ""
+  rm -rf "$T"
+}
+
+# A LOCAL FILE THAT PARSES BUT DOES NOT MERGE (`role_profiles: []`) costs the
+# override: the merged view is workspace.yaml alone - committed me: included.
+# Identity is never read from that view, so the committed me: still does not
+# count, with or without a me: of its own in the local file.
+test_a_committed_me_never_counts_when_the_local_file_fails_the_merge() {
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  printf 'me: sam\n' >> "$T/alpha/workspace.yaml"
+  printf 'role_profiles: []\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(_yqr_ws -r '.me // ""' "$T/alpha" 2>/dev/null)" "sam"   # the fallback is the base file
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" ""
+  printf 'role_profiles: []\nme: jo\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" "jo"
+  # a me: that is not a person id string is no me
+  printf 'me: [sam]\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" ""
+  printf 'just a string\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha" 2>/dev/null)" ""
+  rm -rf "$T"
+}
+test_a_committed_me_never_counts_without_a_local_me() {
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  printf 'me: sam\n' >> "$T/alpha/workspace.yaml"
+  assert_eq "$(ws_me "$T/alpha")" ""                       # no local file
+  printf 'role_profiles: { worker: mine }\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_me "$T/alpha")" ""                       # a local file with no me:
+  rm -rf "$T"
+}
+
+test_me_is_the_only_newly_allowed_local_key() {
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  assert_eq "$_WS_LOCAL_KEYS" "role_profiles worker_profiles env products repos me"
+  printf 'me: sam\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(doctor_ws_local_lines "$T/alpha" alpha 2>&1)" ""
+  # people: and a product's home stay team-only: the merge drops them and
+  # doctor says so
+  yq -y '.products = [{name: "bundle", repos: ["widget"]}]' "$T/alpha/workspace.yaml" > "$T/w" \
+    && mv "$T/w" "$T/alpha/workspace.yaml"
+  cat > "$T/alpha/workspace.local.yaml" <<'YAML'
+me: sam
+people:
+  - { id: sam, login: sam-example }
+products:
+  - name: bundle
+    home: sam
+YAML
+  assert_eq "$(ws_people_json "$T/alpha")" "[]"
+  assert_eq "$(ws_product_home "$T/alpha" bundle)" ""
+  assert_eq "$(_yqr_ws -r '.people // "none"' "$T/alpha")" "none"
+  local out; out="$(doctor_ws_local_lines "$T/alpha" alpha 2>&1)" || true
+  assert_contains "$out" "'people'"
+  assert_contains "$out" "'home'"
+  rm -rf "$T"
+}
+
+test_ws_new_local_example_offers_me() {
+  _wl_setup
+  printf '' | cmd_ws new t3 --kind team --org o --merge self --path "$T/t3" --no-remote >/dev/null
+  assert_contains "$(cat "$T/t3/workspace.local.example.yaml")" "# me: "
+  rm -rf "$T"
+}

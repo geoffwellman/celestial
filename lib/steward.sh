@@ -477,6 +477,15 @@ _steward_orchestrators() { # <agents-json>
           "$ws/$p is set to manual; nothing will start it automatically ($mode via $src)"
         continue
       fi
+      # NOT THIS LOGIN'S TO START (products[].home names another person, or
+      # this login names none): somebody else's product is not a fault, so
+      # nothing is said or raised - and a start fault raised before the home
+      # was set comes down.
+      if ! ws_product_home_check "$wsdir" "$p" >/dev/null; then
+        _steward_clear "$ws" "orch-ensure-$p" \
+          "$ws/$p runs on another login (products[].home: $(ws_product_home "$wsdir" "$p")) - this box does not start $want"
+        continue
+      fi
       live="$(printf '%s' "$agents_json" | jq -r --arg n "$want" \
         '[.result.agents[]? | select(.name == $n)] | length')"
       # It came back: whatever the steward raised about it is no longer true.

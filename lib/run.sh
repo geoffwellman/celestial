@@ -2412,6 +2412,16 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
         _run_lane_name_free "$wsdir" "$product" "$lane"
         cwd="$(ws_solo_dir "$wsdir" "$product")/lane-$lane"
       fi
+      # ONE LOGIN RUNS A PRODUCT (products[].home): on a teammate's login its
+      # agent - main or lane - would be a second builder over the same repos
+      # with review state of its own. Refused here, dry runs too, unless the
+      # operator says they mean it. Recording a live lane's model starts
+      # nothing, so it is not asked.
+      if [ "$force" -eq 0 ] && [ -z "$remember_model_pid" ]; then
+        local home_why
+        home_why="$(ws_product_home_check "$wsdir" "$product")" \
+          || die "cel run: $home_why - ask $(ws_product_home "$wsdir" "$product"), or pass --force"
+      fi
       ;;
     reviewer)
       [ -n "$pr" ] || die "cel run reviewer: --pr is required"
@@ -3287,8 +3297,10 @@ run_orchestrator_rows() { # [only-ws] [roster-json] [record-sessions 1|0] [wsdir
       if [ "$live" != live ]; then
         # A product that should have an orchestrator and has none is a row
         # too: the view is for "which of mine are not right", and absent is
-        # the least right of all.
+        # the least right of all. A product another login runs
+        # (products[].home) is not missing here: it is not this box's.
         [ "$mode" = auto ] || continue
+        [ "$role" != orchestrator ] || ws_product_home_check "$wsdir" "$p" >/dev/null || continue
         printf '%s\t%s\t-\tgone\t0\t-\tmissing\tmode auto, no live agent\t%s\t%s\t%s\n' \
           "$name" "$ws" "cel run orchestrator --product $p --workspace $ws" "$role" "$p"
         continue

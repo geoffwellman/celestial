@@ -47,6 +47,27 @@ for the agent to leave its turn before `cel run orchestrator --restart`;
 (`core/roles/project-orchestrator.md`) carries no body: the orchestrator is the
 solo role, which also leads feature teams.
 
+People are declared in the committed `workspace.yaml` (`people:`: id, forge
+login, roles workspace-wide and per product), and a login names the person
+it is with `me:` in its gitignored `workspace.local.yaml` - the one key that
+file may set besides routing (`_WS_LOCAL_KEYS`, `lib/yaml.sh`). `ws_me` reads
+`me` from `workspace.local.yaml` alone, never from the merged view: a local
+file that fails the merge falls back to `workspace.yaml`, and a committed `me`
+must not become this login's. `lib/workspace.sh` also reads
+`ws_people_json`, `ws_person_holds` and `ws_role_holders`. A product
+may name its `home:` (`products[].home`, or `repos[].home` for an implicit
+product; `ws_product_home`), the person whose login runs its agents.
+`ws_product_home_check` is the one test: true with no home or when `me` is
+the home, false otherwise - including a login with no `me` (fail closed). `cel
+run orchestrator|solo` and lanes die on false unless `--force`; `cel ws up`
+(`wslife_orchestrators`), the steward (`_steward_orchestrators`) and the
+missing-orchestrator rows (`run_orchestrator_rows`) skip the product without
+raising anything. `me` is self-asserted and drives only who starts what;
+`cel doctor` (`doctor_people_lines`) checks the schema and warns when
+`people_forge_login` (`lib/people.sh`: GitHub's active account without the
+workspace's `github.user` token, or the login's own Forgejo token) differs
+from the person's `login`. `cel people` prints the same data.
+
 Launch environment is scoped to the launched process: `_run_launch_env` is the
 single construction (used by every `cel run` launch) and renders role
 marks, gateway credentials, the per-agent `CEL_SESSION_ID` and the agent root as
