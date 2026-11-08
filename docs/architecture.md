@@ -333,6 +333,46 @@ Git/herdr writers. Keep independent backups of important work.
 - **`cel update`** runs the agent and gateway components on every update (agents.yaml `update:`), each through the agent's own installer, with an honest per-component report. A component that fails, or that is still behind the published latest after its updater ran, makes the update a non-success; rerun is the recovery.
 - **Runtime retirement is not worktree deletion.** `cel gc` closes the pane of an idle, clean, pushed agent proven to be this plane's own (exact pid, birth, pane, role; foreground group = the runtime plus its declared direct helper only). Worktree, branch and session file are untouched.
 
+### Gateway client key rotation (`cel gateway rotate-key`, `lib/gateway-rotate.sh`)
+
+The client key (`<gateway state>/api-key`, 0600) reaches an agent once, at
+launch, as `OMP_GATEWAY_TOKEN`, and a running process's environment cannot be
+changed. A key replaced in place would 401 every agent already running, so
+rotation relies on CLIProxyAPI accepting a list of `api-keys` and reloading
+`config.yaml` when it changes. `_gateway_config_write` lists every key file
+present, oldest first: `api-key.previous`, `api-key`, `api-key.next`. A refresh
+during a rotation (`cel update`) therefore keeps both keys.
+
+1. `--stage` (owner) mints `api-key.next`, rewrites the config with old and
+   new, and waits until `/v1/models` answers 200 to both. Then it writes the
+   old key to `api-key.previous` and renames `api-key.next` over `api-key`.
+   Both writes are atomic and 0600. From here every launch gets the new key.
+   If either key is not accepted in time, `api-key.next` is removed and the
+   config goes back to the old key alone.
+2. `--status` (open to agents) shows the keys the config accepts, by sha256
+   fingerprint. It lists every live process of this user whose environ
+   carries the old key, matched by sha256, grouped into launches: the topmost
+   holder stands for the children that inherited it. For each launch it names
+   the restart: `cel run orchestrator|solo ... --restart` for product agents
+   and lanes, a note for reviewers (they finish their round; a later round
+   starts a fresh one), and `cel run root` and `cel core --restart` last.
+3. `--finish` (owner) is refused while any launch still holds the old key.
+   `--force` cuts those launches off. It then drops the old key from the
+   config, waits for old 401 and new 200, and deletes `api-key.previous`. If
+   the gateway does not drop the old key in time, `api-key.previous` and the
+   two-key config are restored, and the rotation stays staged.
+4. `--abort` (owner, before `--finish`) restores the old key as the only key.
+   Like `--finish`, it is refused while launches started since `--stage` hold
+   the new key, unless `--force`. It also clears an interrupted `--stage`.
+
+Owner only: `--stage`, `--finish` and `--abort` refuse a process that carries
+an agent launch's marks (`CEL_ROLE`, `CEL_INBOX_ME`, `CEL_SESSION_ID`,
+`OMP_GATEWAY_TOKEN`, `CLAUDECODE`, `OMPCODE` and similar). They also refuse a
+process with such a launch among its ancestors, so shedding the variables does
+not help. Separately, `lib/guard.sh` denies those three verbs to every agent
+pane. No key value is printed or put in an argv. Keys move through 0600 files
+and curl's stdin, and are named by the first 12 hex digits of their sha256.
+
 ## Source-control forges
 
 A repo's forge is chosen per repo, never per workspace. `forge_repo`

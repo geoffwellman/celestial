@@ -237,6 +237,12 @@ cel - the celestial plane
                                 account; --json for the QUOTA view
   cel gateway login <provider>  sign another subscription in (claude or codex;
                                 --no-browser for a headless box)
+  cel gateway rotate-key [--status|--stage|--finish|--abort]
+                                replace the gateway client key with no
+                                downtime: stage accepts old + new, status
+                                lists old-key holders and their restarts
+                                (root/core last), finish drops the old key;
+                                owner only except --status
   cel publish <file> [name]     host an HTML doc on this box; prints its URL
                                 (--public [--include page.html]...: a share
                                 link carrying the page's own assets)

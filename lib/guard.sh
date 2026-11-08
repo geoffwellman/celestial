@@ -368,6 +368,23 @@ _guard_suite_tamper() { # <command> -> 0 when it does
 }
 _GUARD_SUITE_TAMPER_DENY='deny the suite trusts every process beneath tests/run.sh with its test seams, so it does not run under a hook - a line that runs tests/run.sh while setting or exporting BASH_ENV, ENV or PATH, or handing it an exported function (BASH_FUNC_*, export -f, declare -fx), is refused for every agent; run the suite from a plain environment (bash tests/run.sh <file>.test.sh)'
 
+# THE GATEWAY CLIENT KEY IS ROTATED BY THE OWNER (`cel gateway rotate-key`,
+# lib/gateway-rotate.sh): --stage, --finish and --abort are refused to every
+# agent pane, whatever its role; reading the rotation (bare, or --status) is
+# open. The verb refuses an agent's process on its own as well - this is the
+# earlier, clearer no. Matched anywhere in a piece, not only at its start: a
+# wrapper the segmenter does not strip (`env -u CEL_ROLE cel ...`) leaves
+# words in front of `cel`, and a false deny here costs a read, nothing more.
+_guard_gateway_rotate() { # <command> -> 0 when a piece changes a key rotation
+  local seg
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    [[ "$seg" =~ (^|[\ /])cel\ gateway\ rotate-key( |$) ]] || continue
+    [[ "${seg#*gateway rotate-key}" =~ (^|\ )--(stage|finish|abort|force)(=|\ |$) ]] && return 0
+  done < <(_guard_segments "$1")
+  return 1
+}
+_GUARD_GATEWAY_ROTATE_DENY='deny rotating the gateway client key (cel gateway rotate-key --stage|--finish|--abort) is the owner'"'"'s action, from the owner'"'"'s own shell - an agent reads it with cel gateway rotate-key --status and asks the owner'
+
 # A TEAM MEMBER'S LAUNCH TOKEN IS NOBODY'S TO READ EITHER: cel team add writes
 # <ws>/.cel/teams/<feature>/launch/<alias>.token and `cel run member` spends
 # it, both inside one process. An agent that could read or write one could
@@ -1027,6 +1044,7 @@ guard_classify() { # <role> <command>
   if _guard_forge_lib "$cmd"; then printf '%s' "$_GUARD_FORGE_LIB_DENY"; return 0; fi
   if _guard_cel_env_tamper "$cmd"; then printf '%s' "$_GUARD_CEL_ENV_DENY"; return 0; fi
   if _guard_suite_tamper "$cmd"; then printf '%s' "$_GUARD_SUITE_TAMPER_DENY"; return 0; fi
+  if _guard_gateway_rotate "$cmd"; then printf '%s' "$_GUARD_GATEWAY_ROTATE_DENY"; return 0; fi
   if _guard_cmd_reaches_launch "$cmd"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
   # cel team add's launcher is not a door any agent opens by hand - `other`
   # (a reviewer) included: a member is added, and admitted against the box
