@@ -1049,9 +1049,15 @@ named `<repo>-pr-<n>-review-<focus>` (`atlas-web-pr-41-review-security`; a
 name cut to 32 characters into another reviewer's is refused), has its own
 pane, checkout and mailbox, and counts against the box's helper budget like
 any reviewer. It records with `cel solo review atlas-web#41 approved|changes
---head <sha> --by <its alias> --focus security`, and only from its own pane:
-a focus verdict needs the launch's `CEL_ROLE=reviewer` and `CEL_INBOX_ME` of
-that alias. A focus with no pack is refused, naming the packs there are.
+--head <sha> --by <its alias> --focus security`. A caller launched as a
+reviewer signs only as itself, on the plain slot as on a focus one: `--by`
+must equal the mailbox its launch line gave it (`CEL_INBOX_ME`, with
+`CEL_ROLE=reviewer`), and a focus verdict needs exactly that. In a Herdr
+pane this identity is the launch environment - the same trust as the guard
+that stops the solo agent recording its own verdict, which another process
+on the box could imitate; a Rex reviewer is bound to its alias, repo and PR
+by its receipt (`cel_assert_reviewer_identity`). A focus with no pack is
+refused, naming the packs there are.
 
 The workspace can require them instead, by the files a PR touches -
 `review.extra` workspace-wide and under a `repos[]` entry, read from
@@ -1072,8 +1078,12 @@ is the only kind. Globs match repo-relative paths, both sides of a rename,
 and the whole path: `*` and `?` stay inside one directory level, `**` as a
 whole segment spans any number of directories (`**/*token*` matches
 `token.sh` and `a/b/api_token.ts`; `lib/auth/**` everything under
-`lib/auth/`, not `lib/auth` itself), everything else is literal. A malformed
-entry is refused, never skipped. With a policy, `cel run reviewer --repo r
+`lib/auth/`, not `lib/auth` itself), everything else is literal. Nothing
+malformed is skipped: a bad entry, a `review:` that is not a map, a key in
+it Celestial does not read (workspace-wide `runtime`, `model`, `post`,
+`extra`; on a repo only `extra` - so `extras:` is an error), and two
+`repos:` entries of one name each refuse `cel run reviewer` and `cel solo
+land` for the repos they reach, and `cel doctor` names them. With a policy, `cel run reviewer --repo r
 --pr n` starts (or reuses) the plain reviewer and then every extra reviewer
 whose paths match a file the PR touches now, saying which and why.
 
@@ -1081,7 +1091,9 @@ whose paths match a file the PR touches now, saying which and why.
 every reviewer the policy requires for that PR - the plain one and each
 matching extra one, computed from the PR's files at land time - and counts an
 extra one only by a verdict its own alias recorded. A missing or stale one is
-refused by name, with the command that starts it. A focus reviewer started
+refused by name, with the command that starts it; one that can never start
+(its name cut to 32 characters is another reviewer's) is named with what to
+change instead. A focus reviewer started
 by hand that the policy does not require is **advisory**: its approval adds
 nothing and a verdict for an older head holds nothing up, but its `changes`
 at the head being merged blocks the land, as a red check does - a finding at

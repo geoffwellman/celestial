@@ -2424,7 +2424,6 @@ test_reviewer_focus_gets_its_pack_alias_checkout_and_row() {
   assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-review-security --kind pi" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -c '^agent start' "$HERDR_LOG")" 1 || { echo "--focus started more than its own reviewer"; rm -rf "$T"; return 1; }
   assert_contains "$(cat "$HERDR_LOG")" "CEL_INBOX_ME=widget-pr-12-review-security" || { rm -rf "$T"; return 1; }
-  assert_contains "$(cat "$HERDR_LOG")" "CEL_REVIEW_FOCUS=security" || { rm -rf "$T"; return 1; }
   local body; body="$(cat "$T/.cel/reviews/pr-12/security.role-reviewer.md")" || { rm -rf "$T"; return 1; }
   assert_contains "$body" "## Focus: security" || { rm -rf "$T"; return 1; }
   assert_contains "$body" "# reviewer focus: security" || { rm -rf "$T"; return 1; }

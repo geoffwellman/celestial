@@ -637,15 +637,21 @@ whose path globs match a file the PR touches - both sides of a rename, as
 `forge_pr_files` lists them (GitHub refuses a list at its 3000-file cap,
 Forgejo is read page by page). The policy is read with `_yqr` from
 `workspace.yaml` alone, never through the `workspace.local.yaml` overlay,
-and a malformed entry fails the read; a repo with no entry asks the forge
-nothing. An entry's `kind` (default and only value `review`) is the seam for
-other kinds of required agent.
+and nothing malformed is skipped: a bad entry, a `review:` that is not a map
+or carries a key nothing reads (workspace-wide `runtime`, `model`, `post`,
+`extra`; per repo `extra`), or two `repos:` entries of one name fail the
+read, and `cel doctor` reports the same errors (`review_policy_problems`). A
+repo with no entry asks the forge nothing. An entry's `kind` (default and
+only value `review`) is the seam for other kinds of required agent.
 
 An extra reviewer is a reviewer row of its own: alias, checkout
 (`<reviews>/<repo>-pr-<n>-review-<focus>`), registry row (`focus` beside
 workspace, repo and PR in the key), and verdict slot (`<repo>#<n>/review-<focus>`
-in `.cel/solo-reviews.json`, writable only from the process launched as that
-alias). `reviewers_discover` reads the focus from the checkout a pane stands
+in `.cel/solo-reviews.json`, written only by a caller whose launch says it is
+that alias: `CEL_ROLE=reviewer` and `CEL_INBOX_ME`, which also binds `--by` on
+the plain slot. On Herdr that is the launch environment, the same trust as
+the author guard; a Rex reviewer is bound by its receipt through
+`cel_assert_reviewer_identity`). `reviewers_discover` reads the focus from the checkout a pane stands
 in, so a name cut to 32 characters still says which. `cel gc` closes it on the
 same facts as the plain reviewer - its PR closed, or its own slot approving
 the current head - and `tools/reviewers/retire.mjs` finds a Rex one's round

@@ -2897,8 +2897,7 @@ $(_run_reviewer_focus_brief "$repo" "$pr" "$review_focus")"
       [ -z "$lane" ] || LAUNCH_ENV_EXTRA+=("CEL_LANE=$lane") ;;
     # Pane alias is the reader identity, passed explicitly so delivery never
     # depends on the pane's cwd.
-    reviewer) inbox_me="$agent_name"
-      [ -z "$review_focus" ] || LAUNCH_ENV_EXTRA=("CEL_REVIEW_FOCUS=$review_focus") ;;
+    reviewer) inbox_me="$agent_name" ;;
     # A team member: its alias is its mailbox, and the guard reads its team
     # and role from these.
     member) inbox_me="$agent_name"

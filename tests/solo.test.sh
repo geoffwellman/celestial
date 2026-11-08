@@ -608,6 +608,34 @@ test_solo_extra_review_is_recorded_only_by_its_own_reviewer() {
   ! _merged || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+# A REVIEWER SIGNS ONLY AS ITSELF: a focus reviewer that leaves --focus off
+# and names the plain alias does not write the plain verdict. (Herdr identity
+# is the launch environment, as for the author guard.)
+test_solo_review_plain_slot_takes_only_the_callers_own_alias() {
+  _solo_setup; _solo_policy
+  local out
+  out="$( (export CEL_ROLE=reviewer CEL_INBOX_ME="$SEC"; _review widget#7 approved --head "$H" --by widget-pr-7-review) 2>&1)" \
+    && { echo "a focus reviewer wrote the plain verdict"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "you are $SEC, not 'widget-pr-7-review'" || { rm -rf "$T"; return 1; }
+  assert_eq "$(solo_review_get "$T" widget 7)" "" || { rm -rf "$T"; return 1; }
+  ( export CEL_ROLE=reviewer CEL_INBOX_ME=widget-pr-7-review; _review widget#7 approved --head "$H" --by widget-pr-7-review ) >/dev/null \
+    || { echo "the plain reviewer could not record its own verdict"; rm -rf "$T"; return 1; }
+  assert_eq "$(solo_review_get "$T" widget 7 | jq -r .by)" widget-pr-7-review || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A required extra reviewer whose alias is cut into another reviewer's can
+# never be started; land says so and what to change, instead of a start
+# command that would be refused.
+test_solo_land_names_an_extra_reviewer_that_can_never_start() {
+  _solo_setup; _solo_policy
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  review_alias_free() { printf "the %s reviewer's name 'x' is the plain reviewer's (names are cut to 32 characters)" "$3"; return 1; }
+  local out; out="$(_land widget#7 2>&1)" && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "can never be started, so this PR cannot land: the security reviewer's name 'x' is the plain reviewer's" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "drop security from review.extra" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 # THE ADVISORY REVIEWER. One started by hand (--focus) that the policy does
 # not require is advisory: its approval adds nothing land needs and a stale
 # verdict holds nothing up - but its `changes` at the head being merged is a

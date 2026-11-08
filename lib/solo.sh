@@ -104,7 +104,7 @@ solo_plain_approval() { # <wsdir> <repo> <pr> <head> -> approved|changes|stale|n
 # A policy, file list or verdict file that cannot be read fails (status 1,
 # the reason on stderr): absence of evidence is not an approval.
 solo_extra_approvals() { # <wsdir> <repo> <pr> <head> -> JSON
-  local wsdir="$1" repo="$2" pr="$3" head="$4" req f verdicts='{}' slots s aliases='{}'
+  local wsdir="$1" repo="$2" pr="$3" head="$4" req f verdicts='{}' slots s aliases='{}' clash clashes='{}'
   req="$(_solo_forge review_extra_required "$wsdir" "$repo" "$pr")" || return 1
   f="$(_solo_reviews "$wsdir")"
   if [ -s "$f" ]; then
@@ -116,15 +116,20 @@ solo_extra_approvals() { # <wsdir> <repo> <pr> <head> -> JSON
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     aliases="$(jq -c --arg s "$s" --arg a "$(review_alias "$repo" "$pr" "${s#review-}")" '.[$s] = $a' <<<"$aliases")"
+    # A reviewer whose alias is cut into another's can never be started
+    # (cel run reviewer refuses it), so nothing can ever satisfy its slot.
+    clash="$(review_alias_free "$repo" "$pr" "${s#review-}")" \
+      || clashes="$(jq -c --arg s "$s" --arg c "$clash" '.[$s] = $c' <<<"$clashes")"
   done <<<"$slots"
-  jq -nc --argjson req "$req" --argjson v "$verdicts" --argjson al "$aliases" \
+  jq -nc --argjson req "$req" --argjson v "$verdicts" --argjson al "$aliases" --argjson cl "$clashes" \
     --arg k "$(_solo_review_key "$repo" "$pr")/" --arg h "$head" '
     def st($r; $a): if ($r | type) != "object" or ($r.by // "") != $a then "missing"
       elif $r.head != $h then "stale"
       elif $r.verdict == "approved" then "approved"
       elif $r.verdict == "changes" then "changes" else "missing" end;
     ([$req[].slot]) as $rs
-    | { required: [$req[] | ($v[$k + .slot]) as $r | . + {alias: $al[.slot], verdict: $r, state: st($r; $al[.slot])}],
+    | { required: [$req[] | ($v[$k + .slot]) as $r | . + {alias: $al[.slot], verdict: $r, state: st($r; $al[.slot])}
+                   + (if $cl[.slot] then {unstartable: $cl[.slot]} else {} end)],
         advisory: [$v | to_entries[] | select(.key | startswith($k)) | (.key | ltrimstr($k)) as $s
                    | select($rs | index($s) | not)
                    | {slot: $s, focus: ($s | ltrimstr("review-")), alias: $al[$s], verdict: .value, state: st(.value; $al[$s])}] }
@@ -139,7 +144,8 @@ solo_extra_gaps() { # <extra-approvals-json> <repo> <pr> <head>
     "cel run reviewer --repo \($repo) --pr \($n) --focus " as $start
     | (.required[] | select(.state != "approved")
        | "\(.alias) (focus \(.focus); \(review_why)) "
-         + (if .state == "changes" then "asked for changes at \($h) - address its findings, push, and ask it to re-review the new head (cel inbox send \(.alias))"
+         + (if .unstartable then "can never be started, so this PR cannot land: \(.unstartable). Shorten the repo name in workspace.yaml (or move the PR to a repo with a shorter one), or drop \(.focus) from review.extra for these paths"
+            elif .state == "changes" then "asked for changes at \($h) - address its findings, push, and ask it to re-review the new head (cel inbox send \(.alias))"
             elif .state == "stale" then "has a verdict for head \((.verdict.head // "?")[0:12]), not \($h) - ask it to re-review the current head, or start it: \($start)\(.focus)"
             elif (.verdict | type) == "object" then "has no verdict of its own (the one on record is by \(.verdict.by // "nobody")) - start it: \($start)\(.focus)"
             else "has recorded no verdict - start it: \($start)\(.focus)" end)),
@@ -246,11 +252,14 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--focu
     || die "cel solo review: caller does not match the reviewer identity - nothing recorded"
   # AN EXTRA REVIEWER'S VERDICT IS ITS OWN, from the reviewer launched for
   # that focus: `cel solo land` counts it only from exactly that alias, so it
-  # is recorded only by the process `cel run reviewer --focus` started under
-  # that alias (its launch line's CEL_ROLE and CEL_INBOX_ME) - a verdict for a
-  # reviewer that was never started cannot be written. The plain reviewer's
-  # slot takes no specialist's verdict either: a focus reviewer that leaves
-  # --focus off is refused, not filed as the plain review.
+  # is recorded only by a caller whose launch line said it is that reviewer
+  # (CEL_ROLE=reviewer, CEL_INBOX_ME the alias). AND A REVIEWER SIGNS ONLY AS
+  # ITSELF: on the plain slot too, a caller launched as a reviewer must give
+  # --by equal to its own mailbox, so a focus reviewer cannot write the plain
+  # verdict under the plain alias. On herdr this identity is the launch
+  # environment - the same trust as the author guard above, which any process
+  # on the box could imitate; a Rex reviewer is bound to its PR and alias by
+  # cel_assert_reviewer_identity (its receipt).
   local slot="" f
   if [ -n "$focus" ]; then
     review_focus_valid "$focus" || die "cel solo review: $(review_focus_refusal "$focus") - nothing recorded"
@@ -265,6 +274,10 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--focu
       [ "$by" != "$(review_alias "$SOLO_REPO" "$SOLO_PR" "$f")" ] \
         || die "cel solo review: $by is the $f reviewer - record its verdict with --focus $f. Nothing recorded"
     done < <(review_focus_names)
+    if [ "${CEL_ROLE:-}" = reviewer ] && [ -n "${CEL_INBOX_ME:-}" ]; then
+      [ "$by" = "$CEL_INBOX_ME" ] \
+        || die "cel solo review: you are $CEL_INBOX_ME, not '$by' - a reviewer records only its own verdict (an extra reviewer's with --focus). Nothing recorded"
+    fi
   fi
 
   if [ "$verdict" = approved ]; then

@@ -91,6 +91,46 @@ test_review_extra_entries_refuse_a_malformed_policy() {
   rm -rf "$T"
 }
 
+# A BLOCK THAT DOES NOT READ AS POLICY FAILS: a typo'd key, a `review:` that
+# is not a map, or a list where the map belongs would otherwise read as "no
+# extra reviewer" - at the workspace and at a repo alike. So do two repos of
+# one name, and `cel doctor` reports each (review_policy_problems).
+test_review_policy_typos_and_wrong_shapes_fail_closed_at_both_levels() {
+  T="$(mktemp -d)"
+  local ws repo out
+  for ws in "review:\n  extras:\n    - focus: security\n      paths: [a]|review: unknown key(s) extras" \
+            "review: oops|review: must be a map" \
+            "review:\n  - focus: security\n    paths: [a]|review: must be a map" \
+            "review:\n  model: sonnet\n  post: inbox\n  runtime: pi|"; do
+    printf 'name: t\n%b\nrepos:\n  - name: widget\n' "${ws%%|*}" > "$T/workspace.yaml"
+    if [ -z "${ws#*|}" ]; then
+      assert_eq "$(review_extra_entries "$T" widget)" '[]' || { rm -rf "$T"; return 1; }
+      continue
+    fi
+    out="$(review_extra_entries "$T" widget 2>&1)" && { echo "accepted: ${ws%%|*}"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "${ws#*|}" || { rm -rf "$T"; return 1; }
+    assert_contains "$(review_policy_problems "$T")" "${ws#*|}" || { rm -rf "$T"; return 1; }
+  done
+  for repo in "    review:\n      extras:\n        - focus: security\n          paths: [a]|repos[widget].review: unknown key(s) extras" \
+              "    review: oops|repos[widget].review: must be a map" \
+              "    review:\n      model: sonnet|repos[widget].review: unknown key(s) model" \
+              "    review:\n      - focus: security|repos[widget].review: must be a map"; do
+    printf 'name: t\nrepos:\n  - name: widget\n%b\n  - name: gadget\n' "${repo%%|*}" > "$T/workspace.yaml"
+    out="$(review_extra_entries "$T" widget 2>&1)" && { echo "accepted: ${repo%%|*}"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "${repo#*|}" || { rm -rf "$T"; return 1; }
+    assert_contains "$(review_policy_problems "$T")" "${repo#*|}" || { rm -rf "$T"; return 1; }
+    # another repo's block is not this repo's policy
+    assert_eq "$(review_extra_entries "$T" gadget)" '[]' || { rm -rf "$T"; return 1; }
+  done
+  printf 'name: t\nrepos:\n  - name: widget\n  - name: widget\n    review:\n      extra:\n        - focus: security\n          paths: [a]\n' > "$T/workspace.yaml"
+  out="$(review_extra_entries "$T" widget 2>&1)" && { echo "two widgets read as one"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "2 entries are named widget" || { rm -rf "$T"; return 1; }
+  assert_eq "$(review_policy_problems "$T" | grep -c 'entries are named widget')" 1 || { rm -rf "$T"; return 1; }
+  printf 'name: t\nreview: { model: sonnet }\nrepos:\n  - name: widget\n' > "$T/workspace.yaml"
+  assert_eq "$(review_policy_problems "$T")" "" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # THE POLICY IS NOT A LOCAL SETTING: workspace.local.yaml may override
 # role_profiles, worker_profiles and env, and nothing it says about review -
 # workspace-wide or on a repo entry - adds or drops an extra reviewer.
