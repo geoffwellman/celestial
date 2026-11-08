@@ -228,6 +228,24 @@ test('only an approved round of the current head retires a reviewer; a changes r
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('an extra reviewer is retired by its own round in its own slot, never by the plain reviewer\'s', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'widget-rounds-'));
+  try {
+    const head = 'a'.repeat(40), pr = { headRefOid: head };
+    const r = { workspace: ws, repo: 'widget', pr: 7, name: 'widget-pr-7-review-security' };
+    fs.mkdirSync(path.join(ws, '.cel'), { mode: 0o700 });
+    const file = path.join(ws, '.cel', 'solo-reviews.json');
+    const save = (ledger) => { fs.rmSync(file, { force: true }); fs.writeFileSync(file, JSON.stringify(ledger), { mode: 0o600 }); };
+    const plain = { verdict: 'approved', by: 'widget-pr-7-review', head, at: at(3) };
+    save({ 'widget#7': plain, 'widget#70/review-security': { verdict: 'approved', by: r.name, head, at: at(3) } });
+    refusal(() => durableRound(r, pr), 'no_completed_current_head_round');
+    save({ 'widget#7': plain, 'widget#7/review-security': { verdict: 'approved', by: r.name, head, at: at(4) } });
+    const own = durableRound(r, pr);
+    assert.equal(own.selector.key, 'widget#7/review-security');
+    assert.equal(durableRound({ ...r, name: 'widget-pr-7-review' }, pr).selector.key, 'widget#7');
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('archived role bytes remain verifiable after a later round rewrites the canonical role', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'widget-role-'));
   try {

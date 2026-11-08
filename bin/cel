@@ -176,12 +176,17 @@ cel - the celestial plane
                                 `fleet` is refused). Setting it writes
                                 workspace.yaml and restarts the live agent on
                                 the same session once its turn ends
-  cel solo review <repo>#<pr> approved|changes --head <sha> --by <alias> [--note t]
+  cel solo review <repo>#<pr> approved|changes --head <sha> --by <alias> [--focus f] [--note t]
                                 a reviewer's verdict on a solo product's PR,
-                                bound to the exact head it read
+                                bound to the exact head it read (--focus: an
+                                extra reviewer's, from its own pane)
   cel solo land <repo>#<pr>     merge a solo product's PR: policy self, own
-                                PR, approved at its current head, no red
+                                PR, approved at its current head by every
+                                reviewer review.extra requires, no red
                                 check, every protected check green there
+  cel solo approvals <repo>#<pr>... [--json]
+                                every reviewer a PR needs and its word on the
+                                current head, by land's rule
   cel team start|add|ack|event|verdict|status|retire|close <feature> ...
                                 a feature team under the product's lead: the
                                 lead starts it and adds scoped members (each
@@ -215,7 +220,11 @@ cel - the celestial plane
                                 product agent on its own product's repos)
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
-                                and cel gc closes it when the PR closes
+                                plus every extra reviewer workspace.yaml's
+                                review.extra requires for the files the PR
+                                touches; cel gc closes them when the PR closes
+                                --focus f: one extra reviewer with the focus
+                                pack core/roles/focus/reviewer/<f>.md
                                 --profile p / --model m / --thinking l:
                                 launch on a different CLI, model or effort
                                 a NEW reviewer starts only inside the box

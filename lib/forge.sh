@@ -26,6 +26,10 @@
 #   forge_pr_reviews <wsdir> <repo> <number>
 #       {decision: approved|changes_requested|review_required|none,
 #        reviews: [{author, state, head_sha, submitted_at}]}
+#   forge_pr_files  <wsdir> <repo> <number>
+#       {files: [path, ...]} - every repo-relative path the PR touches, both
+#       sides of a rename, sorted and unique. A list the forge cannot give in
+#       full (GitHub stops at 3000 files) is refused, never a partial answer.
 #   forge_pr_merge  <wsdir> <repo> <number> <expected-head-sha> [body]
 #       {merged: true, number, head_sha} - a squash merge of exactly that
 #       head, branch deleted; the forge refuses if the head moved.
@@ -108,6 +112,7 @@ forge_pr_view()    { _forge_call pr_view "$@"; }
 forge_pr_list()    { _forge_call pr_list "$@"; }
 forge_pr_checks()  { _forge_call pr_checks "$@"; }
 forge_pr_reviews() { _forge_call pr_reviews "$@"; }
+forge_pr_files()   { _forge_call pr_files "$@"; }
 forge_pr_merge()   { _forge_call pr_merge "$@"; }
 forge_pr_close()   { _forge_call pr_close "$@"; }
 forge_pr_ready()   { _forge_call pr_ready "$@"; }
@@ -390,6 +395,19 @@ _forge_github_pr_reviews() { # <wsdir> <slug> <number>
                                          state: (.state | _s | if . == null then null else ascii_downcase end),
                                          head_sha: (.commit.oid | _s),
                                          submitted_at: (.submittedAt | _s) }] }'
+}
+
+# GitHub lists at most 3000 files of a PR, and a list cut there looks
+# complete: at that length the answer is refused instead.
+_forge_github_pr_files() { # <wsdir> <slug> <number>
+  _forge_number_ok pr_files "${3:-}" || return 1
+  local out
+  out="$(_forge_gh "$1" api "repos/$2/pulls/$3/files" --paginate --slurp)" || return 1
+  printf '%s' "$out" | jq -ce '
+    if type == "array" and all(.[]; type == "array") then add // [] else error("not file pages") end
+    | if length >= 3000 then error("GitHub lists at most 3000 files") else . end
+    | {files: ([.[] | .filename, (.previous_filename // empty) | strings] | unique)}' 2>/dev/null \
+    || { printf 'forge pr_files: GitHub did not answer a complete file list for #%s\n' "$3" >&2; return 1; }
 }
 
 # Squash exactly the head that was checked: --match-head-commit makes GitHub
@@ -768,6 +786,14 @@ _forge_forgejo_pr_reviews() { # <wsdir> <desc> <number>
     | {decision: ($r | fj_decision($h)),
        reviews: [$r[] | {author: (.user.login | _s), state: fj_review_state,
                          head_sha: (.commit_id | _s), submitted_at: (.submitted_at | _s)}]}'
+}
+
+_forge_forgejo_pr_files() { # <wsdir> <desc> <number>
+  _forge_number_ok pr_files "${3:-}" || return 1
+  local files
+  files="$(_forge_fj_pages pr_files "$(_forge_fj_host "$2")" "$(_forge_fj_api "$2")/pulls/$3/files" .)" || return 1
+  printf '%s' "$files" | jq -ce '{files: ([.[] | .filename, (.previous_filename // empty) | strings | select(length > 0)] | unique)}' 2>/dev/null \
+    || { printf 'forge pr_files: Forgejo did not answer a file list for #%s\n' "$3" >&2; return 1; }
 }
 
 # Squash exactly the expected head. Forgejo checks head_commit_id itself;

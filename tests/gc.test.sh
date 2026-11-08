@@ -1419,6 +1419,28 @@ test_gc_closes_a_finished_reviewer_whose_verdict_is_for_the_current_head() {
   rm -rf "$T"
 }
 
+# An extra reviewer (--focus) is finished by ITS verdict, in its own slot -
+# the plain reviewer's approval of the same head is not its review.
+test_gc_closes_a_finished_extra_reviewer_on_its_own_verdict_only() {
+  _gc_rv_fixture aaa111 aaa111
+  reviewers_write "$(reviewers_rows | jq 'map(.focus = "security" | .agent = "widget-pr-71-review-security")')"
+  _gc_reviewer_agents() {
+    jq -n --arg s "$GC_REVIEW_STATUS" \
+      '{result:{agents:[{pane_id:"w1:p3",name:"widget-pr-71-review-security",cwd:"/w/reviews/widget-pr-71-review-security",agent_status:$s}]}}'
+  }
+  reviewer_checkout_release() { printf 'release %s %s\n' "$2" "${4:-}" >> "$GC_SINK"; }
+  _gc_rv_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "" || { echo "closed on the plain reviewer's approval"; rm -rf "$T"; return 1; }
+  jq '."widget#71/review-security" = {verdict:"approved", by:"widget-pr-71-review-security", head:"aaa111", at:"2026-01-01T00:00:00Z"}' \
+    "$GC_WS/.cel/solo-reviews.json" > "$T/v" && mv "$T/v" "$GC_WS/.cel/solo-reviews.json"
+  rm -f "$CEL_GC_REVIEWER_STOP_STATE"
+  local out; out="$(_gc_rv_run 30)"
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "closed the security reviewer for widget#71" || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
 test_gc_waits_out_the_reviewer_window() {
   _gc_rv_fixture aaa111 aaa111
   _gc_rv_run 29 >/dev/null

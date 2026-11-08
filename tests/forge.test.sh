@@ -65,6 +65,11 @@ case "$1 $2" in
       garbage) echo '{"message":"Server Error"}' ;;
       *) cat "$FX/rules-${STUB_RULES:-none}.json" ;;
     esac ;;
+  # a PR's files, as `gh api --paginate --slurp` answers them: one array per
+  # page; STUB_FILES replaces the two pages below (a rename and two edits)
+  "api repos/acme/widget/pulls/12/files")
+    if [ -n "${STUB_FILES:-}" ]; then printf '%s\n' "$STUB_FILES"
+    else printf '%s\n' '[[{"sha":"1","filename":"db/migrate/001.sql","status":"renamed","previous_filename":"migrations/001.sql"},{"sha":"2","filename":"lib/auth/login.ts","status":"modified"}],[{"sha":"3","filename":"README.md","status":"modified"}]]'; fi ;;
   *) echo "unexpected gh call: $*" >&2; exit 9 ;;
 esac
 SH
@@ -257,6 +262,21 @@ test_forge_pr_reviews_normalises_decision_and_reviewed_heads() {
     "{\"author\":\"reviewer-two\",\"state\":\"changes_requested\",\"head_sha\":\"$H\",\"submitted_at\":\"2026-11-07T15:00:09Z\"}" \
     || { rm -rf "$T"; return 1; }
   assert_eq "$(printf '%s' "$out" | jq -r '.reviews[0] | "\(.state) \(.head_sha)"')" "approved 2d910406c690af0ce2ad39f79f948a713321c2b1" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Every path a PR touches, every page, both sides of a rename - and a list
+# GitHub may have cut short (it stops at 3000 files) is refused, never read
+# as complete.
+test_forge_pr_files_lists_every_page_and_both_sides_of_a_rename() {
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  local out; out="$(forge_pr_files "$T" widget 12)" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  _json_eq "$out" '{"files":["README.md","db/migrate/001.sql","lib/auth/login.ts","migrations/001.sql"]}' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "api repos/acme/widget/pulls/12/files --paginate --slurp" || { rm -rf "$T"; return 1; }
+  local many; many="$(jq -nc '[[range(3000) | {filename: "f\(.)"}]]')"
+  STUB_FILES="$many" assert_fails forge_pr_files "$T" widget 12 || { rm -rf "$T"; return 1; }
+  STUB_FILES='{"message":"Server Error"}' assert_fails forge_pr_files "$T" widget 12 || { rm -rf "$T"; return 1; }
+  assert_fails forge_pr_files "$T" widget nope || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
@@ -506,6 +526,17 @@ test_forgejo_pr_list_reads_every_page_and_filters_like_github() {
   assert_contains "$(cat "$FJ_LOG")" "pulls?state=open&poster=geoff&limit=50&page=1" || { rm -rf "$T"; return 1; }
   assert_eq "$(forge_pr_list "$T" widget all --head docs-mixer | jq -r 'map(.number) | join(" ")')" 29 || { rm -rf "$T"; return 1; }
   assert_fails forge_pr_list "$T" widget opened || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A Forgejo PR's files: every page (the stub serves one file a page), both
+# sides of a rename, an empty previous_filename dropped.
+test_forgejo_pr_files_reads_every_page_and_both_sides_of_a_rename() {
+  _fj_ws
+  local out; out="$(forge_pr_files "$T" widget 31)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  _json_eq "$out" '{"files":["README.md","db/migrate/002.sql","migrations/002.sql"]}' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/files?limit=50&page=2" || { rm -rf "$T"; return 1; }
   _fj_no_gh || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }

@@ -338,12 +338,19 @@ function currentRoundHash(proof) {
 
 // Only an APPROVED round of the current head ends a reviewer's job, as in gc:
 // a reviewer that asked for changes must stay alive to re-review the fix.
+// The plain reviewer's round is `<repo>#<n>`, an extra reviewer's
+// `<repo>#<n>/<slot>` (lib/solo.sh); only a round signed by this reviewer's
+// own alias counts, whichever key holds it.
 export function durableRound(r, pr) {
   const solo = path.join(r.workspace, '.cel', 'solo-reviews.json');
   const candidates = [];
   if (fs.existsSync(solo)) {
-    const selector = { kind: 'solo', key: `${r.repo}#${r.pr}` }, saved = jsonFile(solo);
-    if (saved.value[selector.key]) candidates.push({ path: solo, selector, ...selectedRound(saved.value, selector) });
+    const saved = jsonFile(solo), own = `${r.repo}#${r.pr}`;
+    for (const key of object(saved.value) ? Object.keys(saved.value) : []) {
+      if (!saved.value[key] || (key !== own && !key.startsWith(`${own}/`))) continue;
+      const selector = { kind: 'solo', key };
+      candidates.push({ path: solo, selector, ...selectedRound(saved.value, selector) });
+    }
   }
   const matches = candidates.filter(c => c.round.verdict === 'approved' && c.round.head === pr.headRefOid && c.round.by === r.name && Number.isFinite(timestamp(c.round.at)));
   requireProof(matches.length > 0, 'no_completed_current_head_round', 'protected');

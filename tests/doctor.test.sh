@@ -410,6 +410,38 @@ test_doctor_check_workspaces_runs_github_account_check() {
   _doctor_teardown
 }
 
+# The review policy is read as land reads it, and what would refuse a land is
+# a doctor error: a typo'd key, at the workspace or on a repo.
+test_doctor_reports_a_review_policy_land_would_refuse() {
+  _doctor_setup
+  mkdir -p "$T/ws"
+  printf 'name: alpha\nreview:\n  extras:\n    - focus: security\n      paths: [a]\nrepos:\n  - name: widget\n    review: oops\n' >"$T/ws/workspace.yaml"
+  printf 'repos/\nspikes/\n.cel/\n' >"$T/ws/.gitignore"
+  local out
+  out="$(
+    (
+      registry_names() { printf 'alpha\n'; }
+      registry_path() { printf '%s' "$T/ws"; }
+      registry_remote() { printf 'https://example.invalid/alpha'; }
+      fleet_mail_doctor_line() { return 0; }
+      doctor_pi_anthropic_lines() { return 0; }
+      doctor_github_account() { return 0; }
+      ws_repo_names() { return 0; }
+      ws_layout() { return 0; }
+      doctor_setup_lines() { return 0; }
+      doctor_ws_local_summary() { return 0; }
+      doctor_ws_local_lines() { return 0; }
+      doctor_ws_contract_lines() { return 0; }
+      ws_runtime() { printf 'bash'; }
+      agent_get() { printf 'bash'; }
+      check_workspaces || true   # it fails, as it should; the lines are what is asserted
+    ) 2>&1
+  )"
+  assert_contains "$out" "alpha: workspace.yaml review: unknown key(s) extras" || { _doctor_teardown; return 1; }
+  assert_contains "$out" "cel solo land refuses its PRs until it is fixed" || { _doctor_teardown; return 1; }
+  _doctor_teardown
+}
+
 # A workspace still setting the retired review.post is told it posts nothing.
 test_doctor_says_review_post_no_longer_posts_verdicts() {
   local w; w="$(mktemp -d)"

@@ -27,6 +27,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/reviewer-retirement.sh"
 # shellcheck source=lib/budget.sh
 . "${BASH_SOURCE[0]%/*}/budget.sh"     # budget_admit: the box-wide live agent budget
+# shellcheck source=lib/review-policy.sh
+. "${BASH_SOURCE[0]%/*}/review-policy.sh"   # review.extra: the extra reviewers a PR needs
 
 # PANE LABELS. The agent name is sanitised and cut to 32 characters, which
 # is unreadable in the sidebar, so every pane the plane starts also gets
@@ -474,8 +476,10 @@ _run_tab_pane() { # <tab-label> <cwd> <who: reviewer|member> -> pane id
 # has no branch to push.
 _run_review_dir() { printf '%s' "${CEL_REVIEW_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/reviews}"; }
 
-reviewer_checkout_path() { # <repo> <pr>
-  printf '%s/%s-pr-%s' "$(_run_review_dir)" "$1" "$2"
+# An extra reviewer (--focus) has a checkout of its own beside the plain
+# one's: <repo>-pr-<n>-review-<focus>, the slot its alias ends in.
+reviewer_checkout_path() { # <repo> <pr> [focus]
+  printf '%s/%s-pr-%s%s' "$(_run_review_dir)" "$1" "$2" "${3:+-review-$3}"
 }
 
 # What the repo's forge says this PR is, asked once at launch: the head we
@@ -492,9 +496,9 @@ _run_reviewer_pr_facts() { # <wsdir> <repo> <pr> -> head<TAB>base
 # The PR head reaches a fork's commits too, which is why this fetches
 # `pull/<n>/head` rather than the branch name: a contributor's branch does not
 # exist in origin at all. GitHub and Forgejo both serve that ref.
-reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
+reviewer_checkout_make() { # <repodir> <repo> <pr> <head> [focus] -> path
   local repodir="$1" repo="$2" pr="$3" head="$4" path reserved=0 who
-  path="$(reviewer_checkout_path "$repo" "$pr")"
+  path="$(reviewer_checkout_path "$repo" "$pr" "${5:-}")"
   # A new pathname is not duplicate admission. Check the whole retained
   # round namespace even when the original checkout no longer exists.
   if who="$(_reviewer_checkout_occupant "$path")"; then
@@ -566,18 +570,19 @@ _reviewer_worktree_drop() { # <repodir> <path>; fails, deleting nothing, while a
 # this - `cel gc` does, right after the pane goes, naming the pane so the row
 # is the one it closed whichever workspace recorded it. More than one row
 # answering is not a checkout anyone can name, so nothing is dropped.
-reviewer_checkout_release() { # <repo> <pr> [pane]
+reviewer_checkout_release() { # <repo> <pr> [pane] [focus]
   local rows row path repodir
   rows="$(reviewers_rows)" || return 0
-  row="$(printf '%s' "$rows" | jq -c --arg r "$1" --arg p "$2" --arg pane "${3:-}" \
-    '[.[] | select(.repo == $r and ((.pr | tostring) == $p) and ($pane == "" or .pane == $pane))]
+  row="$(printf '%s' "$rows" | jq -c --arg r "$1" --arg p "$2" --arg pane "${3:-}" --arg f "${4:-}" \
+    '[.[] | select(.repo == $r and ((.pr | tostring) == $p) and ($pane == "" or .pane == $pane)
+                   and ($pane != "" or (.focus // "") == $f))]
      | if length == 1 then .[0] else empty end')" || return 0
   [ -n "$row" ] || return 0
   path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
   repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
-  # A row `cel gc` adopted carries no checkout; the path is derived from repo
-  # and PR alone. Retained Rex evidence and occupants still veto the drop.
-  [ -n "$path" ] || path="$(reviewer_checkout_path "$1" "$2")"
+  # A row `cel gc` adopted carries no checkout; the path is derived from repo,
+  # PR and focus alone. Retained Rex evidence and occupants still veto the drop.
+  [ -n "$path" ] || path="$(reviewer_checkout_path "$1" "$2" "$(printf '%s' "$row" | jq -r '.focus // ""')")"
   [ -e "$path" ] || return 0
   # Kept while anything stands in it; the next sweep releases it once the
   # pane has gone. The row may already be dropped by then - the gone-pane
@@ -614,18 +619,19 @@ EOF
 # WHOSE PR THIS IS AND HOW IT SHIPS: the product's solo agent wrote it, so
 # the reviewer's verdict and findings go to that agent, and the PR lands with
 # `cel solo land` on exactly the head that verdict approved.
-_run_reviewer_solo_brief() { # <wsdir> <repo> <pr>
+_run_reviewer_solo_brief() { # <wsdir> <repo> <pr> [focus]
   local product; product="$(ws_product_of_repo "$1" "$2")"
   # Findings go to the solo agent that asked for this reviewer: the product's
   # main agent, or the lane that opened the PR.
-  local author="$product-orch"
+  local author="$product-orch" me="<your alias>" fflag=""
   [ "${CEL_ROLE:-}" = solo ] && [ -n "${CEL_INBOX_ME:-}" ] && author="$CEL_INBOX_ME"
+  [ -z "${4:-}" ] || { me="$(review_alias "$2" "$3" "$4")"; fflag=" --focus $4"; }
   cat <<EOF
 
 ## Whose PR this is
 \`$product\` is built by its solo agents. This PR is \`$author\`'s. So:
 - record your verdict with
-  \`cel solo review $2#$3 <approved|changes> --head <reviewed-sha> --by <your alias> --note "<one line>"\`
+  \`cel solo review $2#$3 <approved|changes> --head <reviewed-sha> --by $me$fflag --note "<one line>"\`
   (the full 40-character SHA you read; an approval must equal
   the PR's current head);
 - send findings and your verdict to \`$author\` by \`cel inbox send\`.
@@ -633,6 +639,59 @@ It merges with \`cel solo land $2#$3\`, which honours only your recorded
 approval of the exact head it merges.
 EOF
 }
+
+# AN EXTRA REVIEWER IS TOLD WHAT IT IS: one specialist beside the PR's plain
+# reviewer, under its own alias, with its focus pack
+# (core/roles/focus/reviewer/<focus>.md, front matter dropped).
+_run_reviewer_focus_brief() { # <repo> <pr> <focus>
+  local me plain
+  me="$(review_alias "$1" "$2" "$3")"; plain="$(review_alias "$1" "$2")"
+  cat <<EOF
+
+## Focus: $3
+You are an EXTRA reviewer of this pull request, started for one focus. The
+PR's plain reviewer, \`$plain\`, reviews the whole change; you judge it through
+the focus below, and your verdict is about that. Your alias is \`$me\`, not
+\`$plain\`: sign with it, and record your verdict with \`--focus $3\` - land
+counts it only from you, at the head you name.
+
+EOF
+  awk 'NR == 1 && $0 == "---" { fm = 1; next } fm && $0 == "---" { fm = 0; next } !fm' "$(review_focus_dir)/$3.md"
+}
+
+# A PR'S REVIEWERS, PLAIN AND EXTRA. `cel run reviewer --repo r --pr n`
+# starts (or reuses) the plain reviewer, then every extra reviewer the review
+# policy requires for the files the PR touches now (lib/review-policy.sh) -
+# each through the same single launch as `--focus`, so each is admitted
+# against the box budget, reused when live and recorded like any reviewer -
+# and says which extra ones it started and why. A malformed policy refuses
+# before anything starts; a dry run asks the forge nothing, so it previews
+# the plain reviewer and names what the policy could add.
+_run_reviewer_set() { # <wsdir> <repo> <pr> <dry-run> <cel run reviewer args...>
+  local wsdir="$1" repo="$2" pr="$3" dry="$4" entries req f why rc=0
+  shift 4
+  entries="$(review_extra_entries "$wsdir" "$repo" 2>&1)" \
+    || die "cel run reviewer: $entries - nothing started"
+  ( _run_reviewer_one "$@" ) || return $?
+  [ "$entries" != '[]' ] || return 0
+  if [ "$dry" = 1 ]; then
+    printf "extra reviewers: review.extra may add %s - which ones %s#%s needs is read from the files it touches at launch (a dry run asks the forge nothing)\n" \
+      "$(jq -r '[.[].focus] | join(", ")' <<<"$entries")" "$repo" "$pr"
+    return 0
+  fi
+  req="$(review_extra_required "$wsdir" "$repo" "$pr" 2>&1)" \
+    || die "cel run reviewer: the plain reviewer is up, but $req; start them with --focus once it answers"
+  if [ "$req" = '[]' ]; then
+    c_ok "no extra reviewer for $repo#$pr: no file it touches matches review.extra ($(jq -r '[.[].focus] | join(", ")' <<<"$entries"))"
+    return 0
+  fi
+  while IFS=$'\t' read -r f why; do
+    c_ok "$f reviewer for $repo#$pr: $why"
+    ( _run_reviewer_one "$@" --focus "$f" ) || rc=$?
+  done < <(jq -r "$_REVIEW_JQ_WHY"'.[] | [.focus, review_why] | @tsv' <<<"$req")
+  return "$rc"
+}
+_run_reviewer_one() { local _run_review_one=1; _cmd_run reviewer "$@"; }
 
 # A LANE'S NAME MUST BE ITS OWN. The pane name and mailbox are
 # `<product>-<lane>` after cel_alias_norm, which truncates at 32 characters -
@@ -652,7 +711,7 @@ _run_lane_name_free() { # <wsdir> <product> <lane>
   while IFS= read -r r; do
     [ -n "$r" ] || continue
     case "$name" in
-      "$r-direct"|"$r"-pr-*-review) die "cel run solo --lane: '$name' is the name of $r's $( [ "$name" = "$r-direct" ] && echo direct pane || echo reviewer) - pick another lane name" ;;
+      "$r-direct"|"$r"-pr-*-review|"$r"-pr-*-review-*) die "cel run solo --lane: '$name' is the name of $r's $( [ "$name" = "$r-direct" ] && echo direct pane || echo reviewer) - pick another lane name" ;;
     esac
   done < <(ws_repo_names "$1")
   return 0
@@ -758,13 +817,15 @@ reviewers_rows() { # -> JSON array; 2 = the file exists and is not a registry
 # workspace without it cannot have launched the reviewer, and with two
 # candidates the row is nobody's - never matched, never replaced by a record,
 # left for `cel gc` to attribute from the live process.
+# A ROW IS ONE REVIEWER: workspace, repo, PR and focus ("" for the plain
+# reviewer, the focus of an extra one - `cel run reviewer --focus`).
 _REVIEWERS_JQ_SCOPE='
   def rv_ws: . as $x | ("/repos/" + ($x.repo // "")) as $tail
     | if (($x.workspace // "") | type == "string" and length > 0) then $x.workspace
       elif (($x.repodir // "") | type == "string" and endswith($tail) and length > ($tail | length))
         then ($x.repodir | .[0:(length - ($tail | length))])
       else null end;
-  def rv_key($ws; $here; $r; $p): .repo == $r and ((.pr | tostring) == $p)
+  def rv_key($ws; $here; $r; $p; $f): .repo == $r and ((.pr | tostring) == $p) and ((.focus // "") == $f)
     and (rv_ws as $w | if $w == null then $here else $w == $ws end);'
 
 _reviewers_here() { # <wsdir> <repo> -> true|false: may a workspace-less row be this workspace's?
@@ -912,69 +973,78 @@ reviewers_update() { # [--recover] [jq-args...] <filter>
   return "$rc"
 }
 
-# 0 with the row; 1 when this workspace has no reviewer recorded for the PR;
-# 2 when the registry cannot be read - which is not "none".
-reviewers_find() { # <wsdir> <repo> <pr> -> the row
+# 0 with the row; 1 when this workspace has no reviewer recorded for the PR
+# (and focus); 2 when the registry cannot be read - which is not "none".
+reviewers_find() { # <wsdir> <repo> <pr> [focus] -> the row
   local rows row
   rows="$(reviewers_rows)" || return 2
   row="$(printf '%s' "$rows" | jq -c --arg ws "$1" --argjson here "$(_reviewers_here "$1" "$2")" \
-    --arg r "$2" --arg p "$3" "$_REVIEWERS_JQ_SCOPE"'
-    [.[] | select(rv_key($ws; $here; $r; $p))][0] // empty')" || return 2
+    --arg r "$2" --arg p "$3" --arg f "${4:-}" "$_REVIEWERS_JQ_SCOPE"'
+    [.[] | select(rv_key($ws; $here; $r; $p; $f))][0] // empty')" || return 2
   [ -n "$row" ] || return 1
   printf '%s' "$row"
 }
 
-# Replaces any row for the same workspace+repo+PR rather than appending: one
-# pull request has one reviewer, and two rows for it are two panes nobody can
-# tell apart. A legacy row for the same key is replaced too - that is its
-# migration - while another workspace's row is never touched.
+# Replaces any row for the same workspace+repo+PR+focus rather than
+# appending: one pull request has one reviewer per focus, and two rows for it
+# are two panes nobody can tell apart. A legacy row for the same key is
+# replaced too - that is its migration - while another workspace's row is
+# never touched.
 #
 # The checkout, the clone it was cut from and the head it was cut at are
 # carried with the row because the sweep that closes the reviewer is the only
 # thing left that can remove the worktree, and it knows nothing else about it.
-reviewers_record() { # <wsdir> <repo> <pr> <pane> <agent> [checkout] [repodir] [head]
+reviewers_record() { # <wsdir> <repo> <pr> <pane> <agent> [checkout] [repodir] [head] [focus]
   reviewers_update --arg ws "$1" --argjson here "$(_reviewers_here "$1" "$2")" \
     --arg r "$2" --arg p "$3" --arg pane "$4" --arg a "$5" \
-    --arg co "${6:-}" --arg rd "${7:-}" --arg head "${8:-}" \
+    --arg co "${6:-}" --arg rd "${7:-}" --arg head "${8:-}" --arg f "${9:-}" \
     --argjson t "$(date +%s)" \
     "$_REVIEWERS_JQ_SCOPE"'
-    map(select(rv_key($ws; $here; $r; $p) | not))
+    map(select(rv_key($ws; $here; $r; $p; $f) | not))
      + [{workspace:$ws, repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t,
-         checkout:$co, repodir:$rd, head:$head} + (if ($pane | startswith("rex/")) then {backend:"rex"} else {} end)]'
+         checkout:$co, repodir:$rd, head:$head} + (if ($pane | startswith("rex/")) then {backend:"rex"} else {} end)
+        + (if $f != "" then {focus:$f} else {} end)]'
 }
 
-reviewers_drop() { # <wsdir> <repo> <pr>
+reviewers_drop() { # <wsdir> <repo> <pr> [focus]
   reviewers_update --arg ws "$1" --argjson here "$(_reviewers_here "$1" "$2")" \
-    --arg r "$2" --arg p "$3" "$_REVIEWERS_JQ_SCOPE"'
-    map(select(rv_key($ws; $here; $r; $p) | not))'
+    --arg r "$2" --arg p "$3" --arg f "${4:-}" "$_REVIEWERS_JQ_SCOPE"'
+    map(select(rv_key($ws; $here; $r; $p; $f) | not))'
 }
 
 # THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. A reviewer with no
 # row still has the NAME `cel run reviewer` gave it (_run_agent_name of
-# "<repo>/pr-<n>-review"), so the roster says which panes are reviewers and for
-# which pull request.
+# "<repo>/pr-<n>-review", or "<repo>/pr-<n>-review-<focus>" for an extra
+# one), so the roster says which panes are reviewers and for which pull
+# request.
 #
 # The repo comes from the pane's cwd when there is one: the agent name has
 # been through the herdr name sanitiser (lowercased, truncated to 32) and is
 # not reliably the repo's real name, while a reviewer's cwd is its checkout.
-reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>status<TAB>backend
-  local name pane cwd status pr repo backend
+# So does an extra reviewer's focus, which a cut name may have lost the end of.
+reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>status<TAB>backend<TAB>focus
+  local name pane cwd status pr repo backend focus
   while IFS=$'\t' read -r name pane cwd status backend; do
     [ -n "$name" ] && [ -n "$pane" ] || continue
-    pr="${name##*-pr-}"; pr="${pr%-review}"
+    pr="${name##*-pr-}"; pr="${pr%%-review*}"
     case "$pr" in ''|*[!0-9]*) continue;; esac
+    focus="${name#*-pr-"$pr"-review}"; focus="${focus#-}"
     cwd="$(pane_cwd "$cwd")"
     repo="${cwd##*/}"
-    # A reviewer's own checkout is <reviews>/<repo>-pr-<n>: the folder
-    # name carries the PR, and the repo is what precedes it.
+    # A reviewer's own checkout is <reviews>/<repo>-pr-<n>, an extra one's
+    # <reviews>/<repo>-pr-<n>-review-<focus>: the folder name carries the PR
+    # (and focus), and the repo is what precedes it.
     case "$repo" in
+      *-pr-"$pr"-review-*)
+        focus="${repo##*-pr-"$pr"-review-}"; focus="${focus%%.round.*}"
+        repo="${repo%-pr-"$pr"-review-*}" ;;
       *-pr-"$pr".round.*) repo="${repo%-pr-"$pr".round.*}" ;;
       *-pr-"$pr") repo="${repo%-pr-"$pr"}" ;;
     esac
     [ -n "$repo" ] || repo="${name%-pr-*}"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status" "${backend:-herdr}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status" "${backend:-herdr}" "$focus"
   done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
-    | select(((.name // "") | test("^.+-pr-[0-9]+-review$")) and ((.pane_id // "") != ""))
+    | select(((.name // "") | test("^.+-pr-[0-9]+-review(-[a-z0-9_-]*)?$")) and ((.pane_id // "") != ""))
     | [(.name // ""), .pane_id, (.cwd // ""), (.agent_status // "unknown"), (.backend // "herdr")] | @tsv' 2>/dev/null)
   return 0
 }
@@ -2229,6 +2299,10 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   local session_backend="${CEL_SESSION_BACKEND:-}" backend_opt=""
   local team="" member="" MEMBER_DIR="" MEMBER_PRODUCT="" MEMBER_ROLE="" MEMBER_FOCUS=""
   local MEMBER_REPO="" MEMBER_BRANCH="" MEMBER_WT="" MEMBER_BASE="" MEMBER_MODEL=""
+  local review_focus=""
+  # The call as made: a plain `cel run reviewer` relaunches itself once per
+  # reviewer the PR needs (_run_reviewer_set).
+  local -a _run_argv=("$@")
 
   if [ $# -gt 0 ]; then
     case "$1" in
@@ -2268,9 +2342,12 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       --team)    team="$2"; shift 2 ;;
       --member)  member="$2"; shift 2 ;;
       --handoff) handoff="$2"; shift 2 ;;
+      --focus)   review_focus="$2"; shift 2 ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
+  [ -z "$review_focus" ] || [ "$role" = reviewer ] \
+    || die "cel run: --focus names an extra PR reviewer's focus (cel run reviewer --repo r --pr n --focus f); a team member's comes from cel team add"
   # What was NAMED, before defaults fill it in: a Rex receipt's relaunch line
   # (_run_rex_relaunch) repeats only the owner's explicit choices.
   local profile_opt="$profile"
@@ -2425,6 +2502,13 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       ;;
     reviewer)
       [ -n "$pr" ] || die "cel run reviewer: --pr is required"
+      # AN EXTRA REVIEWER (--focus) is one of the packs there are, under a
+      # name no other reviewer of the PR answers to.
+      if [ -n "$review_focus" ]; then
+        review_focus_valid "$review_focus" || die "cel run reviewer: $(review_focus_refusal "$review_focus") - nothing started"
+        local alias_clash
+        alias_clash="$(review_alias_free "$repo" "$pr" "$review_focus")" || die "cel run reviewer: $alias_clash - nothing started"
+      fi
       # Reviewers ALWAYS run on pi: its inbox extension wakes an idle session
       # on incoming mail, which is how a re-review request reaches a reviewer
       # nobody is typing to. The workspace review block owns the model only;
@@ -2434,9 +2518,21 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       review_runtime="$(ws_review "$wsdir" runtime)"
       [ -n "$review_runtime$(ws_review "$wsdir" model)" ] \
         || die "cel run reviewer: workspace '$(ws_name "$wsdir")' declares no review: block"
+      # A PLAIN `cel run reviewer` IS THE PR'S WHOLE SET: the plain reviewer,
+      # then each extra one the review policy requires (_run_reviewer_set),
+      # every one of them through the single launch below.
+      if [ -z "$review_focus" ] && [ -z "${_run_review_one:-}" ]; then
+        _run_reviewer_set "$wsdir" "$repo" "$pr" "$dry_run" "${_run_argv[@]:1}"
+        return $?
+      fi
       [ -z "$review_runtime" ] || [ "$review_runtime" = pi ] \
         || c_warn "cel run reviewer: workspace '$(ws_name "$wsdir")' sets review.runtime: $review_runtime, which is ignored - reviewers run on pi, the runtime that delivers mail to an idle reviewer; review.model still applies (set review.runtime: pi, or remove it)"
       alias_name="$repo/pr-$pr-review"
+      local rv_who="reviewer for $repo#$pr"
+      if [ -n "$review_focus" ]; then
+        alias_name="$repo/pr-$pr-$(review_slot "$review_focus")"
+        rv_who="$review_focus reviewer for $repo#$pr"
+      fi
       cwd="$wsdir/repos/$repo"
       rolefile="$CEL_ROOT/core/roles/pr-reviewer.md"
       # ONE PULL REQUEST, ONE REVIEWER. Asking for a reviewer that is already
@@ -2448,15 +2544,15 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       printf '%s' "$reviewer_roster" | jq -e '.result.agents | type == "array"' >/dev/null \
         || die 'cel run reviewer: native inventory is invalid; no checkout changed'
       local find_rc=0
-      existing="$(reviewers_find "$wsdir" "$repo" "$pr")" || find_rc=$?
-      [ "$find_rc" != 2 ] || die "cel run reviewer: the reviewer registry $(_reviewers_state) does not parse - whether $repo#$pr already has a reviewer is unknown, so none is started; cel gc rebuilds it from the live roster"
+      existing="$(reviewers_find "$wsdir" "$repo" "$pr" "$review_focus")" || find_rc=$?
+      [ "$find_rc" != 2 ] || die "cel run reviewer: the reviewer registry $(_reviewers_state) does not parse - whether $repo#$pr already has a ${review_focus:+$review_focus }reviewer is unknown, so none is started; cel gc rebuilds it from the live roster"
       if [ "$find_rc" = 0 ]; then
         recorded_pane="$(printf '%s' "$existing" | jq -r .pane)"
         recorded_agent="$(printf '%s' "$existing" | jq -r '.agent // ""')"
         [ -n "$recorded_agent" ] || die 'cel run reviewer: recorded reviewer identity is incomplete'
         recorded_live="$(printf '%s' "$reviewer_roster" | jq -r --arg p "$recorded_pane" --arg a "$recorded_agent" '[.result.agents[] | select(.pane_id == $p and .name == $a)] | length')"
-        [ "$recorded_live" = 1 ] || die "cel run reviewer: recorded reviewer for $repo#$pr is not confirmed live; reconcile its canonical retirement before relaunching"
-        c_ok "reviewer for $repo#$pr is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $recorded_pane - reusing it"
+        [ "$recorded_live" = 1 ] || die "cel run reviewer: recorded $rv_who is not confirmed live; reconcile its canonical retirement before relaunching"
+        c_ok "$rv_who is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $recorded_pane - reusing it"
         return 0
       fi
       # Registry loss must not create a duplicate when a preserved round uses
@@ -2470,32 +2566,32 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
         IFS=$'\t' read -r alias_pane alias_cwd < <(printf '%s' "$alias_rows" | jq -r '.[0] | [.pane_id,.cwd] | @tsv')
         [ -n "$alias_pane" ] && [ -n "$alias_cwd" ] || die 'cel run reviewer: matching native reviewer has incomplete identity'
         alias_cwd="$(pane_cwd "$alias_cwd")"
-        alias_base="$(reviewer_checkout_path "$repo" "$pr")"
+        alias_base="$(reviewer_checkout_path "$repo" "$pr" "$review_focus")"
         case "$alias_cwd" in "$alias_base"|"$alias_base".round.*) scoped_alias=1 ;; esac
         if printf '%s' "$alias_rows" | jq -e --arg r "$repo" --arg p "$pr" --arg ws "$wsdir" \
           '.[0] | .backend == "rex" and .role == "reviewer" and .repo == $r and (.pr|tostring) == $p and .workspace == $ws' >/dev/null; then scoped_alias=1; fi
         [ "$scoped_alias" = 1 ] || die 'cel run reviewer: matching alias is not bound to this review scope; no checkout changed'
         _run_reviewer_owned "$reviewer_roster" "$alias_pane" "$wsdir" "$repo" "$pr"
-        [ "$dry_run" = 1 ] || reviewers_record "$wsdir" "$repo" "$pr" "$alias_pane" "$reviewer_alias" "$alias_cwd" "$cwd" "" \
+        [ "$dry_run" = 1 ] || reviewers_record "$wsdir" "$repo" "$pr" "$alias_pane" "$reviewer_alias" "$alias_cwd" "$cwd" "" "$review_focus" \
           || die 'cel run reviewer: could not retain the existing native reviewer identity'
-        c_ok "reviewer for $repo#$pr is already running as $reviewer_alias in pane $alias_pane - reusing it"
+        c_ok "$rv_who is already running as $reviewer_alias in pane $alias_pane - reusing it"
         return 0
       fi
       # A LIVE REVIEWER WITH NO ROW IS STILL THE REVIEWER: its row may have been
       # pruned or dropped under a stale pane id. The roster finds it by the
       # directory it stands in, and the row is written back.
       local live_path live
-      live_path="$(reviewer_checkout_path "$repo" "$pr")"
+      live_path="$(reviewer_checkout_path "$repo" "$pr" "$review_focus")"
       if live="$(_reviewer_checkout_occupant "$live_path")" \
          && [ "${live%%$'\t'*}" != unknown ]; then
         local lpane lname live_checkout
         IFS=$'\t' read -r lpane lname live_checkout <<< "$live"
         _run_reviewer_owned "$reviewer_roster" "$lpane" "$wsdir" "$repo" "$pr"
         if [ "$dry_run" -eq 0 ]; then
-          reviewers_record "$wsdir" "$repo" "$pr" "$lpane" "$lname" "$live_checkout" "$cwd" "" \
-            || c_warn "could not record the reviewer for $repo#$pr"
+          reviewers_record "$wsdir" "$repo" "$pr" "$lpane" "$lname" "$live_checkout" "$cwd" "" "$review_focus" \
+            || c_warn "could not record the $rv_who"
         fi
-        c_ok "reviewer for $repo#$pr is already running as $lname in pane $lpane (found by its checkout) - reusing it"
+        c_ok "$rv_who is already running as $lname in pane $lpane (found by its checkout) - reusing it"
         return 0
       fi
       # A NEW REVIEWER IS ADMITTED against the box agent budget; reusing a
@@ -2507,7 +2603,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       # asks the forge nothing and creates nothing: it is a preview of a launch,
       # and a preview that fetches is a side effect.
       repodir="$cwd"
-      review_path="$(reviewer_checkout_path "$repo" "$pr")"
+      review_path="$(reviewer_checkout_path "$repo" "$pr" "$review_focus")"
       if [ "$dry_run" -eq 0 ]; then
         have jq || die "cel run reviewer: jq is not on PATH"
         local facts
@@ -2516,7 +2612,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
         IFS=$'\t' read -r review_head review_base <<< "$facts"
         [ -n "$review_head" ] \
           || die "cel run reviewer: the forge returned no head SHA for $repo#$pr"
-        review_path="$(reviewer_checkout_make "$repodir" "$repo" "$pr" "$review_head")" \
+        review_path="$(reviewer_checkout_make "$repodir" "$repo" "$pr" "$review_head" "$review_focus")" \
           || die "cel run reviewer: could not check out $repo#$pr at $review_head (is $repodir a clone of $repo?)"
         cwd="$review_path"
       fi
@@ -2552,7 +2648,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
     "")           label="$(pane_label direct "$repo")" ;;
     root)         label="$(pane_label root "$(ws_name "$wsdir")")" ;;
     orchestrator) label="$(pane_label solo "$product${lane:+/$lane}")" ;;
-    reviewer)     label="$(pane_label reviewer "$repo" "$pr")" ;;
+    reviewer)     label="$(pane_label reviewer "$repo" "$pr${review_focus:+ $review_focus}")" ;;
     member)       label="$(_pane_label_cap "$member · $MEMBER_ROLE${MEMBER_FOCUS:+/$MEMBER_FOCUS}")" ;;
   esac
 
@@ -2721,8 +2817,12 @@ $(_run_lane_brief "$product" "$lane" "$agent_name")"
   # waiting for an orchestrator to type them.
   if [ "$role" = "reviewer" ] && [ "$dry_run" -eq 0 ]; then
     RUN_BODY="$RUN_BODY
-$(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path")$(_run_reviewer_solo_brief "$wsdir" "$repo" "$pr")"
+$(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path")$(_run_reviewer_solo_brief "$wsdir" "$repo" "$pr" "$review_focus")"
   fi
+  # An extra reviewer's focus pack rides on the same role, after it: the
+  # pack narrows what it judges, never what it may do.
+  [ -z "$review_focus" ] || RUN_BODY="$RUN_BODY
+$(_run_reviewer_focus_brief "$repo" "$pr" "$review_focus")"
 
   local AGENT_ARGS=() AGENT_ROLE_FILE="" bodyfile
   bodyfile="$(_run_role_file "$wsdir" "$tag" "${product:-}")"
@@ -2733,7 +2833,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # $ws/.cel/role-reviewer.md would have two reviewers reading each other's
   # brief. The name still ENDS in role-reviewer.md: lib/gc.sh tells a
   # long-lived agent from a stray one by that substring.
-  [ "$role" = "reviewer" ] && bodyfile="$wsdir/.cel/reviews/pr-$pr/role-reviewer.md"
+  [ "$role" = "reviewer" ] && bodyfile="$wsdir/.cel/reviews/pr-$pr/${review_focus:+$review_focus.}role-reviewer.md"
   [ "$role" = member ] && bodyfile="$MEMBER_DIR/members/$member.role-member.md"
   if [ "$runtime" = opencode ] && [ "${PROFILE_VIA:-}" = gateway ]; then
     # Do not overwrite another implicit product's shared role file.
@@ -2917,7 +3017,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || return $?
     [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run" || return $?
     if [ "$role" = reviewer ]; then
-      reviewers_record "$wsdir" "$repo" "$pr" "$_REX_PANE" "$agent_name" "$review_path" "$repodir" "$review_head"
+      reviewers_record "$wsdir" "$repo" "$pr" "$_REX_PANE" "$agent_name" "$review_path" "$repodir" "$review_head" "$review_focus"
     fi
     # A member is reported up only once the inventory shows that exact agent
     # in that terminal; exit 3 as for herdr below.
@@ -2976,8 +3076,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # Recorded AFTER the launch: a row for a pane that never started is a row
     # `cel gc` would carry forever. A failed record is a warning, not a
     # failure - the reviewer is alive and reviewing either way.
-    reviewers_record "$wsdir" "$repo" "$pr" "$pane_id" "$agent_name" "$review_path" "$repodir" "$review_head" \
-      || c_warn "could not record the reviewer for $repo#$pr - cel gc will not close it, and its checkout at $review_path will outlive it"
+    reviewers_record "$wsdir" "$repo" "$pr" "$pane_id" "$agent_name" "$review_path" "$repodir" "$review_head" "$review_focus" \
+      || c_warn "could not record the $rv_who - cel gc will not close it, and its checkout at $review_path will outlive it"
     return 0
   fi
 

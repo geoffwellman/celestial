@@ -22,6 +22,8 @@
 #                      the default) | none (genuine 404, no rule at all) |
 #                      glob | unreadable-glob | unnamed | denied | broken-404 |
 #                      error | list-denied (genuine 404, rule list refused)
+#   STUB_FJ_FILES      a JSON array of ChangedFile for /pulls/<n>/files
+#                      (default: a rename out of migrations/ and a README edit)
 #   STUB_FJ_MERGE      ok (default) | conflict
 #   STUB_FJ_WRITE      ok (default) | denied: a PATCH or comment POST answers 403
 # The token is minted per harness from /dev/urandom - a synthetic value, never
@@ -83,6 +85,13 @@ case "$method $path" in
     say 201 "$(jq -c --argjson b "$body" '.number = 32 | .title = $b.title | .head.ref = $b.head | .base.ref = $b.base
       | .draft = ($b.title | test("^(wip:|\\[wip\\])"; "i")) | .html_url = "http://forgejo.internal/geoff/gizmo/pulls/32"' "$FJX/pull.json")" ;;
   "GET $R/pulls/"*/reviews) [ "$page" = 1 ] && say 200 "$(cat "$FJX/reviews.json")"; say 200 '[]' ;;
+  # a PR's changed files (ChangedFile: filename, previous_filename, status),
+  # one per page so a reader that stops after page one is caught; the shape
+  # is the API's, the list is STUB_FJ_FILES (a JSON array) or a rename
+  "GET $R/pulls/"*/files)
+    files='[{"filename":"db/migrate/002.sql","previous_filename":"migrations/002.sql","status":"renamed"},{"filename":"README.md","previous_filename":"","status":"modified"}]'
+    [ -z "${STUB_FJ_FILES:-}" ] || files="$STUB_FJ_FILES"
+    say 200 "$(jq -c --argjson p "$page" '.[$p - 1:$p]' <<<"$files")" ;;
   "POST $R/pulls/"*/merge) [ "${STUB_FJ_MERGE:-ok}" = ok ] && say 200 ''; say 409 "$(cat "$FJX/merge-conflict.json")" ;;
   "GET $R/pulls/"*) say 200 "$(pr "${path##*/}")" ;;
   # Forgejo answers an edit with the edited PR (201): a state, or a title -

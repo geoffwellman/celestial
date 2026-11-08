@@ -483,6 +483,14 @@ check_workspaces() {
     remote="$(registry_remote "$n")"
     [ -n "$remote" ] || c_warn "$n is local-only (cel ws push $n to publish)"
     doctor_github_account "$n" "$path" || fail=1
+    # The review policy, read exactly as `cel solo land` reads it: an error
+    # here is a land that refuses (lib/review-policy.sh).
+    local rp_line rp_out
+    rp_out="$(. "$CEL_ROOT/lib/review-policy.sh" && review_policy_problems "$path")"
+    while IFS= read -r rp_line; do
+      [ -n "$rp_line" ] || continue
+      c_err "$n: $rp_line - cel solo land refuses its PRs until it is fixed"; fail=1
+    done <<<"$rp_out"
 
     # A MAILBOX WITH NO READER IS A FAULT, NOT SILENCE. `root` is a name - the
     # top, whoever is listening - and a console that is not running listens to

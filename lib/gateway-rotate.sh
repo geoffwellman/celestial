@@ -30,6 +30,8 @@
 _CEL_GATEWAY_ROTATE=1
 # shellcheck source=lib/gateway.sh
 . "${BASH_SOURCE[0]%/*}/gateway.sh"
+# shellcheck source=lib/review-policy.sh
+. "${BASH_SOURCE[0]%/*}/review-policy.sh"   # review_focus_valid: an extra reviewer's focus
 
 # How long the gateway gets to pick up a rewritten config.yaml, in seconds.
 _gwr_wait() { printf '%s' "${CEL_GATEWAY_ROTATE_WAIT:-30}"; }
@@ -235,9 +237,16 @@ _gwr_plan_row() { # role name ws product team cwd comm
         printf '1\tcel run orchestrator --product %s%s --restart' "$p" "$wsopt"
       fi ;;
     reviewer)
-      repo="${name%-pr-*-review}"; pr="${name##*-pr-}"; pr="${pr%-review}"
-      printf '2\t# finishes its round on its own - cel gc closes it once its verdict is recorded; a later round on %s#%s gets a fresh reviewer (cel run reviewer --repo %s --pr %s%s) after it has closed' \
-        "$repo" "$pr" "$repo" "$pr" "$wsopt" ;;
+      # an extra reviewer is <repo>-pr-<n>-review-<focus> (cut to 32), and
+      # its focus is named only when the name still spells a whole one
+      local core="$name" focus=""
+      if [[ "$name" =~ ^(.+-pr-[0-9]+-review)-(.+)$ ]]; then
+        core="${BASH_REMATCH[1]}"
+        ! review_focus_valid "${BASH_REMATCH[2]}" || focus=" --focus ${BASH_REMATCH[2]}"
+      fi
+      repo="${core%-pr-*-review}"; pr="${core##*-pr-}"; pr="${pr%-review}"
+      printf '2\t# finishes its round on its own - cel gc closes it once its verdict is recorded; a later round on %s#%s gets a fresh reviewer (cel run reviewer --repo %s --pr %s%s%s) after it has closed' \
+        "$repo" "$pr" "$repo" "$pr" "$focus" "$wsopt" ;;
     member)
       printf '3\t# a team member never resumes: its lead retires it and adds it again (cel team retire %s %s, then cel team add %s <role>)' \
         "$team" "$name" "$team" ;;
