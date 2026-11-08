@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The classifier as a command, so every runtime adapter asks the SAME rules:
 #   guard-classify.sh command <cwd> <shell command>   -> allow | deny <reason>
+#                     (a human's CEL_GUARD_ALLOW_ONCE=1 one-off is decided here too)
 #   guard-classify.sh path    <cwd> <file path>       -> allow | deny <reason>  (a write)
 #   guard-classify.sh read    <cwd> <file path>       -> allow | deny <reason>
 # The claude adapter (orchestrator-guard.sh) sources lib/guard.sh directly; the
@@ -24,7 +25,7 @@ role="$(guard_role_of "$cwd")"
 # are resolved against it (lib/guard.sh).
 _GUARD_CWD="$cwd"
 case "$mode" in
-  command) guard_classify "$role" "$arg" ;;
+  command) if guard_override_honoured "$role" "$arg"; then printf allow; else guard_classify "$role" "$arg"; fi ;;
   path)    guard_classify_path "$role" "$arg" ;;
   read)    guard_classify_read "$role" "$arg" ;;
 esac

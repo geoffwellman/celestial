@@ -48,7 +48,7 @@ test_orchestrator_may_use_the_mechanism() {
 }
 test_orchestrator_may_comment_and_review() {
   assert_eq "$(guard_classify orchestrator 'gh pr comment 12 --body "looks right"')" allow
-  assert_eq "$(guard_classify orchestrator 'gh pr review 12 --approve')" allow
+  assert_eq "$(guard_classify orchestrator 'gh pr review 12 --comment --body "looks right"')" allow
 }
 test_orchestrator_may_write_its_own_notes() {
   assert_eq "$(guard_classify orchestrator 'cat > .cel/spec-WG-1.md <<EOF')" allow
@@ -894,4 +894,115 @@ test_product_agent_may_run_cel_team() {
       assert_eq "$(guard_classify "$r" "$c")" allow || { echo "$r refused: $c"; return 1; }
     done
   done
+}
+
+# --- a forge review verdict is a person's -----------------------------------
+# No agent posts an approval or a request for changes to a forge, in any role
+# and in any spelling the guard parses (gh pr review, gh api at a PR's
+# reviews, curl at a forge API, tea): an agent's verdict is recorded with
+# `cel solo review`. A comment stays wherever it was allowed.
+_FV_ROLES=( "core|repos/widget" "console|" "solo|repos/widget" "worker|repos/widget" "scout|repos/widget"
+            "spike|repos/widget" "member|TD" "lane|.cel/solo/widget/x" "lead|.cel/products/widget/lead"
+            "reviewer|/tmp" "|repos/widget" "|" "|/tmp" )
+_fv() { # <CEL_ROLE> <cwd: relative to $T, TD, or absolute> <command> -> its verdict for that pane
+  local r="$1" cwd="$2"
+  case "$cwd" in TD) cwd="$TD" ;; /*) ;; "") cwd="$T" ;; *) cwd="$T/$cwd" ;; esac
+  if [ "$r" = member ]; then
+    CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=widget-login-qa \
+      _GUARD_CWD="$cwd" guard_classify member "$3"
+  else
+    CEL_ROLE="$r" _GUARD_CWD="$cwd" guard_classify "$(CEL_ROLE="$r" guard_role_of "$cwd")" "$3"
+  fi
+}
+test_no_role_posts_a_forge_review_verdict() {
+  _team_ws
+  local e c v
+  for e in "${_FV_ROLES[@]}"; do
+    for c in 'gh pr review 3 --approve' 'gh pr review --approve 3' 'gh pr review 3 -a' 'gh pr review -a 3' \
+             'gh pr review 3 --approve=true' 'gh pr review 3 --request-changes -b "fix it"' 'gh pr review 3 -r -b x' \
+             'gh pr review 3 --request-changes=true --body x' 'gh pr review 3 -b "looks right" -a' 'gh pr review 3 -cr' \
+             'gh pr review -R o/r 3 -a' 'gh -R o/r pr review 3 --approve' 'gh pr review 3 --repo=o/r --approve' \
+             'gh pr review https://github.com/o/r/pull/3 --approve' '/usr/bin/gh pr review 3 --approve' \
+             'cd /x && gh pr review 3 -a' 'bash -c "gh pr review 3 --approve"' 'GH_REPO=o/r gh pr review 3 -a' \
+             'gh api repos/o/r/pulls/3/reviews -f event=APPROVE' 'gh api -X POST /repos/o/r/pulls/3/reviews' \
+             'gh api --method=POST repos/{owner}/{repo}/pulls/3/reviews --input body.json' \
+             'gh api repos/o/r/pulls/3/reviews/77/events -f event=REQUEST_CHANGES' \
+             'gh api -X PUT repos/o/r/pulls/3/reviews/77/dismissals -f message=x' \
+             'gh api https://api.github.com/repos/o/r/pulls/3/reviews -F event=APPROVE' \
+             'gh api graphql -f query="mutation { addPullRequestReview(input: {pullRequestId: \"x\", event: APPROVE}) { clientMutationId } }"' \
+             'gh api graphql -f query="mutation { submitPullRequestReview(input: {pullRequestReviewId: \"x\", event: APPROVE}) { clientMutationId } }"' \
+             'curl -X POST http://forgejo.internal/api/v1/repos/o/r/pulls/3/reviews -d {"event":"APPROVED"}' \
+             'curl -s -d @body.json https://api.github.com/repos/o/r/pulls/3/reviews' \
+             'curl -XPOST http://forgejo.internal/api/v1/repos/o/r/pulls/3/reviews/9/dismissals' \
+             'tea pr approve 3' 'tea pulls lgtm 3' 'tea pr reject 3 no' 'tea pr review 3' 'tea --repo o/r pr a 3' \
+             'tea api -X POST repos/o/r/pulls/3/reviews -f event=APPROVED'; do
+      v="$(_fv "${e%%|*}" "${e#*|}" "$c")"
+      case "$v" in deny*cel\ solo\ review*) ;; *) echo "CEL_ROLE=${e%%|*} at ${e#*|}: '$c' -> $v"; rm -rf "$T"; return 1 ;; esac
+    done
+  done
+  rm -rf "$T"
+}
+# A comment, a comment-only review and every read of reviews are not
+# verdicts: no role is refused them as one, and the roles that comment today
+# still may.
+test_forge_review_comments_and_reads_are_not_verdicts() {
+  _team_ws
+  local e c v r
+  for e in "${_FV_ROLES[@]}"; do
+    r="${e%%|*}"
+    for c in 'gh pr review 3 --comment -b "looks right"' 'gh pr review 3 -c -b x' 'gh pr review 3 -ba' \
+             'gh pr review 3 --comment --body-file notes.md' 'gh pr comment 3 --body "please --approve -a"' \
+             'gh pr view 3 --json reviews' 'gh api repos/o/r/pulls/3/reviews' 'gh api repos/o/r/pulls/3/reviews/77' \
+             'curl -s https://api.github.com/repos/o/r/pulls/3/reviews' 'tea api repos/o/r/pulls/3/reviews' \
+             'cel forge pr reviews widget#3'; do
+      v="$(_fv "$r" "${e#*|}" "$c")"
+      case "$v" in *cel\ solo\ review*) echo "CEL_ROLE=$r at ${e#*|}: '$c' refused as a verdict"; rm -rf "$T"; return 1 ;; esac
+      case "$r:$c" in member:gh\ pr\ *|member:cel\ *|member:tea\ *|member:curl\ *) continue ;; esac
+      assert_eq "$v" allow || { echo "CEL_ROLE=$r at ${e#*|}: '$c'"; rm -rf "$T"; return 1; }
+    done
+  done
+  rm -rf "$T"
+}
+# THE HUMAN'S ONE-OFF does not cover a forge verdict: a person approves on
+# the forge themselves, so no adapter honours CEL_GUARD_ALLOW_ONCE=1 for one,
+# or offers it. The override is spelled exactly (`=11` is not it).
+test_hook_override_does_not_cover_a_forge_verdict() {
+  _gws
+  _hook "$T/repos/widget" Bash '{"command":"CEL_GUARD_ALLOW_ONCE=1 gh pr review 3 --approve"}' \
+    && { echo "the override posted an approval"; rm -rf "$T"; return 1; }
+  assert_contains "$HOOK_ERR" "cel solo review" || { rm -rf "$T"; return 1; }
+  case "$HOOK_ERR" in *"prefix it"*) echo "the override was offered for a verdict"; rm -rf "$T"; return 1;; esac
+  _hook /tmp Bash '{"command":"CEL_GUARD_ALLOW_ONCE=1 tea pr approve 3"}' \
+    && { echo "a pane outside the plane approved"; rm -rf "$T"; return 1; }
+  _hook "$T/repos/widget" Bash '{"command":"CEL_GUARD_ALLOW_ONCE=11 git commit -m x"}' \
+    && { echo "CEL_GUARD_ALLOW_ONCE=11 was taken as the override"; rm -rf "$T"; return 1; }
+  _hook "$T/repos/widget" Bash '{"command":"CEL_GUARD_ALLOW_ONCE=1 gh pr review 3 --comment -b x"}' \
+    || { echo "the override refused a comment: $HOOK_ERR"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The omp/pi adapter asks the same classifier, override included.
+_omp_guard() { # <cwd> <command> -> the adapter's tool_call result as JSON (null: allowed)
+  (cd "$1" && HOOK="$CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts" CMD="$2" node --no-warnings - <<'JS'
+(async () => {
+  let handler;
+  (await import(process.env.HOOK)).default({ on(_e, f) { handler = f; } });
+  console.log(JSON.stringify((await handler({ toolName: "bash", input: { command: process.env.CMD } })) ?? null));
+  process.exit(0);
+})();
+JS
+  )
+}
+test_omp_adapter_refuses_a_forge_verdict_and_override() {
+  _gws
+  local out
+  out="$(CEL_ROLE=solo _omp_guard "$T/repos/widget" 'gh pr review 3 --approve')"
+  assert_contains "$(jq -r .reason <<<"$out")" "cel solo review" || { rm -rf "$T"; return 1; }
+  out="$(CEL_ROLE=solo _omp_guard "$T/repos/widget" 'CEL_GUARD_ALLOW_ONCE=1 gh pr review 3 -a')"
+  assert_eq "$(jq -r .block <<<"$out")" true || { rm -rf "$T"; return 1; }
+  case "$(jq -r .reason <<<"$out")" in *"prefix it"*) echo "omp offered the override for a verdict"; rm -rf "$T"; return 1;; esac
+  out="$(CEL_ROLE=reviewer _omp_guard /tmp 'gh api -X POST repos/o/r/pulls/3/reviews -f event=APPROVE')"
+  assert_eq "$(jq -r .block <<<"$out")" true || { rm -rf "$T"; return 1; }
+  assert_eq "$(CEL_ROLE= _omp_guard "$T/repos/widget" 'CEL_GUARD_ALLOW_ONCE=1 git commit -m x')" null || { rm -rf "$T"; return 1; }
+  assert_eq "$(CEL_ROLE=solo _omp_guard "$T/repos/widget" 'gh pr review 3 --comment -b x')" null || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
 }

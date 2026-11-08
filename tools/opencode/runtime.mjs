@@ -225,7 +225,8 @@ export async function createPlugin(context, deps = {}) {
   async function classify(mode, arg) {
     if (env.CEL_GUARD === '0') return;
     if (typeof arg !== 'string' || !arg.trim()) throw new Error(`celestial guard: cannot classify ${mode}`);
-    if (mode === 'command' && /^CEL_GUARD_ALLOW_ONCE=1(?:\s|$)/.test(arg)) return;
+    // The human's CEL_GUARD_ALLOW_ONCE=1 one-off is decided by the shared
+    // classifier, as in the other adapters: never for a member or a forge verdict.
     if (mode === 'path') arg = path.resolve(directory, arg);
     let verdict;
     // Exit 2 is the classifier reporting its own error (bad mode or policy).

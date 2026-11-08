@@ -526,6 +526,20 @@ the guard these are tripwires matched as text, not a sandbox: a script file
 that sources the library, or a name assembled at run time, still runs -
 which is why `cel forge` checks who is asking itself.
 
+A forge review verdict is a person's. No role - reviewers and panes outside
+any workspace included - posts an approval or a request for changes: `gh pr
+review` with `--approve`/`-a`/`--request-changes`/`-r` (flags after the PR,
+`--approve=...`, short groups), a `gh api` write to
+`repos/<o>/<r>/pulls/<n>/reviews` or below it (events, dismissals) or a
+graphql add/submit/dismiss of a `PullRequestReview`, curl writing there on a
+forge API, and tea's `approve|lgtm|reject|review` or `tea api` writing there.
+An agent's verdict is recorded with `cel solo review`; comments
+(`gh pr review --comment`, `gh pr comment`) stay where they were allowed.
+The human's one-off `CEL_GUARD_ALLOW_ONCE=1 <command>` (spelled exactly)
+is decided in one place, `guard_override_honoured` in lib/guard.sh, which
+every adapter - claude, omp/pi and OpenCode - asks: it never covers a forge
+verdict and never a team member.
+
 The binaries that see a token or decide a write are not the caller's to
 choose. Every forge operation (`cel forge`, and the library under `cel solo
 land`, the reviewer's PR facts and the steward) and every `cel team` verb runs

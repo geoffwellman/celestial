@@ -39,12 +39,13 @@ cmd="$(printf '%s' "$in" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 path="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null)"
 
 # Panes outside the plane (`other`: a reviewer, a scratch session) go through
-# the same classifiers, which refuse them only the tokens and `cel run member`.
-# A team member has no one-off: nobody stands over its pane to approve one.
+# the same classifiers, which refuse them only the tokens, `cel run member`
+# and forge review verdicts. Whether a one-off is honoured is lib/guard.sh's
+# (guard_override_honoured): never for a member, never for a forge verdict.
 verdict=allow
 case "$tool" in
   Bash)
-    case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) [ "$role" = member ] || exit 0;; esac
+    if guard_override_honoured "$role" "$cmd"; then exit 0; fi
     verdict="$(guard_classify "$role" "$cmd")" ;;
   Read) verdict="$(guard_classify_read "$role" "$path")" ;;
   Edit|Write|MultiEdit|NotebookEdit) verdict="$(guard_classify_path "$role" "$path")" ;;
@@ -54,8 +55,10 @@ case "$verdict" in
   allow) exit 0;;
   deny*)
     printf 'celestial guard (%s pane): %s\n' "$role" "${verdict#deny }" >&2
-    [ "$role" = member ] \
-      || printf 'If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>\n' >&2
+    # no one-off is offered to a member, nor for a refusal that rules it out
+    case "$role:$verdict" in member:*|*CEL_GUARD_ALLOW_ONCE*) ;;
+      *) printf 'If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>\n' >&2 ;;
+    esac
     exit 2;;
 esac
 exit 0

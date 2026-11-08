@@ -321,6 +321,29 @@ test('v2 shell/write/edit/patch inputs reach the real shared guard, including re
   } finally { await f.cleanup(); await rm(temp, { recursive: true, force: true }); }
 });
 
+// The one-off override is the shared classifier's to honour, as in the claude
+// and omp adapters: never for a team member, never for a forge review verdict
+// (whose refusal names `cel solo review`), and only spelled exactly.
+test('the override is decided by the shared guard: no member override, no forge verdict, comments still pass', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-guard-'));
+  let role = 'solo';
+  const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async (bin, args) => {
+    assert.equal(bin, 'bash');
+    return (await execute(bin, args, { env: { ...process.env, CEL_ROOT: repo, CEL_ROLE: role } })).stdout;
+  } } });
+  try {
+    await f.emit(created());
+    for (const command of ['gh pr review 3 --approve', 'CEL_GUARD_ALLOW_ONCE=1 gh pr review 3 -a', 'gh pr review 3 --request-changes=true -b x',
+      'gh api -X POST repos/o/r/pulls/3/reviews -f event=APPROVE', 'tea pr approve 3']) {
+      await assert.rejects(f.shell(command), /cel solo review/, command);
+    }
+    await f.shell('gh pr review 3 --comment -b x');
+    await f.shell(`CEL_GUARD_ALLOW_ONCE=1 touch ${temp}/marker`);
+    role = 'member';
+    await assert.rejects(f.shell(`CEL_GUARD_ALLOW_ONCE=1 touch ${temp}/marker`), /celestial guard/);
+  } finally { await f.cleanup(); await rm(temp, { recursive: true, force: true }); }
+});
+
 test('a classifier that reports its own error (exit 2) allows as before; other classifier failures still refuse', async () => {
   let failure;
   const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async () => { throw failure; } } });

@@ -50,9 +50,8 @@ export default function celestialGuard(pi): void {
       case "powershell":
         mode = "command";
         arg = String(input.command ?? "");
-        // the human-approved one-off, same spelling as the claude adapter;
-        // a team member has none - nobody stands over its pane to approve one
-        if (arg.startsWith("CEL_GUARD_ALLOW_ONCE=1") && !member) return;
+        // the human-approved one-off (CEL_GUARD_ALLOW_ONCE=1 <command>) is the
+        // classifier's to honour: never for a member, never for a forge verdict
         break;
       case "edit":
       case "write":
@@ -72,7 +71,7 @@ export default function celestialGuard(pi): void {
         block: true,
         reason:
           "celestial guard: " + verdict.slice(5).trim() +
-          (member ? "" : " If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>"),
+          (member || verdict.includes("CEL_GUARD_ALLOW_ONCE") ? "" : " If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>"),
       };
     }
   });
