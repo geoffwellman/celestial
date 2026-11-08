@@ -740,18 +740,20 @@ _reviewers_here() { # <wsdir> <repo> -> true|false: may a workspace-less row be 
 # that carries this pane's HERDR_PANE_ID and the expected CEL_ROLE counts.
 # Prints the named variables' values, tab-separated, when every such pid
 # carries all of them and they agree; nothing otherwise (no proof, or two
-# different answers).
+# different answers). The proc root is CEL_PROC_DIR only under this
+# checkout's own suite (cel_under_suite).
 _run_pane_launch_env() { # <pane> <role> <VAR...> -> values<TAB>..., or nothing
-  local pane="$1" role="$2" info pid item k v line found=""; shift 2
+  local pane="$1" role="$2" info pid item k v line found="" proc=/proc; shift 2
   local -A env
   have herdr || return 0
   info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || return 0
+  if [ -n "${CEL_PROC_DIR:-}" ] && cel_under_suite; then proc="$CEL_PROC_DIR"; fi
   for pid in $(printf '%s' "$info" | jq -r --arg p "$pane" \
       '.result.process_info | select(.pane_id == $p) | .foreground_processes[]?.pid | select(type == "number")' 2>/dev/null); do
     env=()
     while IFS= read -r -d '' item; do
       case "$item" in *=*) env["${item%%=*}"]="${item#*=}" ;; esac
-    done < <({ cat "${CEL_PROC_DIR:-/proc}/$pid/environ"; } 2>/dev/null)
+    done < <({ cat "$proc/$pid/environ"; } 2>/dev/null)
     [ "${env[HERDR_PANE_ID]:-}" = "$pane" ] && [ "${env[CEL_ROLE]:-}" = "$role" ] || continue
     line=""
     for k in "$@"; do

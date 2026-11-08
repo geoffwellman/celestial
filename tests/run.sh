@@ -9,6 +9,20 @@
 #
 # A file that fails to source is reported as a failure, never skipped: a suite
 # that can silently run nothing is worse than no suite at all.
+
+# NO SUITE RUNS UNDER A HOOK. Every process beneath this runner is trusted
+# with the test seams (lib/common.sh cel_under_suite: CEL_PROC_DIR, whose
+# /proc proves an identity, and CEL_FORGE_CURL, which receives the forge
+# token), and a BASH_ENV or ENV file would run in every bash the suite
+# starts, inside that trust. Such a file has already run once in this
+# process by now; the runner stops here rather than go on to run tests under
+# it. Run the suite from a plain environment. (The guard also refuses an
+# agent line that runs the suite with BASH_ENV, ENV, PATH or exported
+# functions set; both are tripwires - see cel_under_suite for the limit.)
+if [ -n "${BASH_ENV+x}${ENV+x}" ]; then
+  printf 'tests/run.sh: refusing to run with BASH_ENV or ENV set - every bash the suite starts would source it inside the trust the test seams get; unset it and run the suite from a plain environment. No test ran.\n' >&2
+  exit 2
+fi
 set -uo pipefail
 
 CEL_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"

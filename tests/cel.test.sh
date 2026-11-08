@@ -103,3 +103,22 @@ SH
   [ ! -e "$tmp/home/dispatched" ]
   rm -rf "$tmp"
 }
+
+# CEL RUNS IN A CLEAN PROCESS. Shell code smuggled in through the environment
+# - an exported function, a BASH_ENV file - is gone before bin/cel's first
+# command: it re-executes itself without it. A BASH_ENV file runs once, in
+# the process that is replaced (it cannot be stopped), and never again; an
+# exported `uname` that would fake the platform never reaches the check.
+test_cel_reexecutes_without_smuggled_shell_code() {
+  local tmp out; tmp="$(mktemp -d)"
+  printf 'echo ran >> %q\nexit() { return 0; }\n' "$tmp/bash-env.log" > "$tmp/bash-env.sh"
+  out="$(BASH_ENV="$tmp/bash-env.sh" "$CEL" help 2>&1)" || { echo "$out"; rm -rf "$tmp"; return 1; }
+  assert_contains "$out" "cel ws new" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(wc -l < "$tmp/bash-env.log")" 1 || { echo "BASH_ENV ran in the clean process too"; rm -rf "$tmp"; return 1; }
+  out="$(bash -c 'uname() { echo Darwin; }; export -f uname; "$1" help' _ "$CEL" 2>&1)" || { echo "$out"; rm -rf "$tmp"; return 1; }
+  assert_contains "$out" "cel ws new" || { rm -rf "$tmp"; return 1; }
+  # a forged loop marker never lets a dirty process run: it refuses instead
+  out="$(_CEL_CLEAN_EXEC=1 BASH_ENV="$tmp/bash-env.sh" "$CEL" help 2>&1)" && { echo "a forged marker ran cel: $out"; rm -rf "$tmp"; return 1; }
+  assert_contains "$out" "refusing to run" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+}

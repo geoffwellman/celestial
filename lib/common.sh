@@ -16,6 +16,50 @@ c_hd()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
 die()    { c_err "$*"; exit 1; }
 
+# IS THIS PROCESS UNDER ITS OWN CHECKOUT'S TEST SUITE? The test seams that
+# redirect what cel trusts - CEL_PROC_DIR (whose /proc an identity is proven
+# from) and CEL_FORGE_CURL (which binary the forge token goes to) - are
+# honoured only then, and the environment alone never says so: an agent can
+# export anything (`X=CEL_TESTING; export $X=1` included) but cannot change
+# which processes are its ancestors. So the answer is read from the kernel:
+# some ancestor is the same bash as this shell (its /proc/<pid>/exe) running,
+# as its script, this file's own tests/run.sh - located from where this
+# function was defined, never from CEL_ROOT, which common.sh inherits. Only
+# `bash <that run.sh>` counts: an argument elsewhere (`bash -c '...' run.sh`,
+# `find run.sh -exec ...`) or another program renamed with `exec -a` does not.
+# Reads only, no forks.
+#
+# THE LIMIT, PLAINLY: the seams are trusted for EVERY process beneath this
+# checkout's tests/run.sh, not only for its tests. Any agent code the suite
+# runs - a test file, or a tool a test calls that a PATH put first - can
+# point CEL_PROC_DIR at a tree that vouches for a forged identity, or
+# CEL_FORGE_CURL at a binary that then receives the forge token. That is
+# accepted: agents run as the owner's Unix user, so they can read the token
+# file and call the forge API directly anyway; nothing in-process stops a
+# determined one. What this does stop is the easy route - an exported
+# variable, from anywhere, outside the suite. tests/run.sh refuses to start
+# with BASH_ENV or ENV set, and the guard refuses an agent line that runs the
+# suite with BASH_ENV, ENV, PATH or exported functions; both are tripwires,
+# not a boundary.
+cel_under_suite() {
+  local runner="${BASH_SOURCE[0]%/*}/../tests/run.sh" pid="$$" n=0 stat arg
+  local -a argv
+  [ -f "$runner" ] || return 1
+  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
+    argv=()
+    { mapfile -d '' -t argv < "/proc/$pid/cmdline"; } 2>/dev/null
+    if [ "${#argv[@]}" -ge 2 ] && [ "/proc/$pid/exe" -ef "/proc/$$/exe" ]; then
+      arg="${argv[1]}"
+      case "$arg" in /*) ;; *) arg="/proc/$pid/cwd/$arg" ;; esac
+      [ "$arg" -ef "$runner" ] && return 0
+    fi
+    { read -r stat < "/proc/$pid/stat"; } 2>/dev/null || return 1
+    stat="${stat##*) }"; stat="${stat#* }"; pid="${stat%% *}"
+    n=$((n + 1))
+  done
+  return 1
+}
+
 # The owner's Hermes desktop starts per-profile SSH servers, not previews or
 # abandoned fixtures. Match executable ownership plus an actual argv option;
 # code/prompt text mentioning the option is not evidence. Never open its token.

@@ -1,6 +1,10 @@
 # shellcheck shell=bash
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/team.sh"
+source "$CEL_ROOT/tests/lib/launch-mirror.sh"
+# cel team's writing verbs check the caller against its launch: every call
+# gets one that carries exactly its identity, unless a test builds its own.
+launch_mirror_wrap cmd_team
 
 # T1 (budget + launcher + retirement) is stubbed here: budget_admit,
 # `cel run member` (behind _team_cel) and member_retire. Nothing touches the
@@ -9,7 +13,7 @@ HA=1111111111111111111111111111111111111111
 HB=2222222222222222222222222222222222222222
 
 _team_fixture() {
-  T="$(mktemp -d)"; W="$T/ws"
+  T="$(mktemp -d)"; W="$T/ws"; launch_mirror_at "$T/launch-proc"
   mkdir -p "$W"
   export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
   cat > "$W/workspace.yaml" <<'EOS'
@@ -51,10 +55,13 @@ EOS
   cel_agent_list() { printf '{"result":{"agents":%s}}\n' "${TEAM_AGENTS:-[]}"; }
 }
 # cel team as shop's lead (shop-orch) unless the caller already names a role
-# or a member; _noid runs it with no agent identity at all.
+# or a member; a member named without a role is launched as one (CEL_ROLE=
+# member, as `cel run member` does), since its launch must carry a role.
+# _noid runs it with no agent identity at all.
 _t() {
   ( cd "$W"
     if [ -z "${CEL_ROLE+x}" ] && [ -z "${CEL_TEAM_MEMBER:-}" ]; then export CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch; fi
+    if [ -z "${CEL_ROLE+x}" ]; then export CEL_ROLE=member; fi
     cmd_team "$@" ) 2>&1
 }
 _noid() { ( cd "$W"; unset CEL_ROLE CEL_PRODUCT CEL_INBOX_ME CEL_TEAM_MEMBER CEL_TEAM; cmd_team "$@" ) 2>&1; }
@@ -462,7 +469,7 @@ test_an_agent_acts_only_as_its_launch_environ_says() {
   _launch 4242 CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch
   _launch "$PPID" HOME=/h
   out="$(CEL_PROC_DIR="$P" _t start login --product shop)" && { echo "a re-dressed agent led another product's team"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "CEL_PRODUCT=shop but its launch (pid 4242) says CEL_PRODUCT=tools" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel team start: this process says CEL_PRODUCT=shop but its launch (pid 4242) says CEL_PRODUCT=tools" || { rm -rf "$T"; return 1; }
   [ ! -e "$W/.cel/teams/login" ] || { echo "a refused start left a team"; rm -rf "$T"; return 1; }
   # the nearest carrier wins: a shell exec'd as shop's agent below it
   _launch "$PPID" CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch
@@ -606,7 +613,7 @@ test_refused_launch_cleans_up_and_reserved_rows_count() {
 # whose roster shows what `agent start` started (the pane probes go to the
 # shared tests/lib/fake-herdr).
 _team_e2e_fixture() {
-  T="$(mktemp -d)"; W="$T/ws"
+  T="$(mktemp -d)"; W="$T/ws"; launch_mirror_at "$T/launch-proc"
   mkdir -p "$W/repos" "$T/bin" "$T/rex" "$T/claude" "$T/inbox"
   cat > "$W/workspace.yaml" <<'EOS'
 name: alpha

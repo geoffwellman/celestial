@@ -120,14 +120,40 @@ process with no agent role (an agent can shed one with `env -u` or `setsid`)
 is refused and the owner asks the lead by `cel inbox` or `cel decide`.
 Members act by their member identity (ack, event, verdict). Every writing
 verb also checks that identity against the agent's launch
-(`_team_launch_identity`): the nearest process above `cel` whose
+(`cel_launch_identity`, lib/identity.sh): the nearest process above `cel` whose
 `/proc/<pid>/environ` - fixed at exec, the marks `cel gc` proves agents by -
 carries `CEL_ROLE` must agree on `CEL_ROLE`, `CEL_PRODUCT`, `CEL_INBOX_ME`,
 `CEL_INBOX_WS` and the `CEL_TEAM*` variables, so a shell re-dressed with
 `export` or a variable-held name is refused, and so is a role with no launch
 above it (detached by `setsid` or a double fork). A process that execs a
 fresh environment carrying `CEL_ROLE` is its own nearest launch; that
-spelling is the guard's to refuse.
+spelling is the guard's to refuse. `cel forge`'s writes run the same check.
+Nothing in the environment skips or redirects it: its test seam, a fixture
+proc root in `CEL_PROC_DIR` (also read by lib/inbox.sh and lib/run.sh), is
+honoured only for a process under that checkout's own `tests/run.sh`
+(`cel_under_suite`, lib/common.sh), decided from the process's ancestry in
+`/proc` - an ancestor that is the same bash running that `run.sh` as its
+script - which no exported variable changes. The forge's curl seam
+(`CEL_FORGE_CURL`) is gated the same way. The check reads `/proc` with shell
+builtins only, so a `PATH` with other binaries first cannot feed it a forged
+environ, and it runs in a clean process: before loading anything, `bin/cel`
+re-executes itself without `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS` and
+every exported function (`BASH_FUNC_*`) unless the environ it started with
+carries none of them, so smuggled shell code (an exported `exit` that
+returns, a function that shadows the check) never reaches cel's checks.
+
+The limit, plainly: `CEL_PROC_DIR` and `CEL_FORGE_CURL` are trusted for every
+process beneath that checkout's `tests/run.sh`, not only for its tests. Agent
+code the suite runs - a test file, or a tool a test calls that a `PATH` put
+first - can point them at a tree that vouches for a forged identity, or at a
+binary that then receives the forge token. The gh stub seams
+(`CEL_FORGE_GH`, `CEL_WS_GH_BIN`) are still honoured from the environment
+everywhere. This is accepted: agents run as the owner's Unix user, so they can
+read the token file and call the forge API directly; nothing in-process stops a
+determined one. What the checks stop is the easy route. `tests/run.sh` refuses
+to start with `BASH_ENV` or `ENV` set, and the guard refuses an agent line that
+runs the suite with `BASH_ENV`, `ENV`, `PATH` or an exported function set.
+Like the rest of the guard, these are tripwires, not a boundary.
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
@@ -350,7 +376,10 @@ orchestrator) alone, refused to core, root, members and reviewers.
 `cel forge` itself decides who is asking (`_forge_cli_authorise`), and only
 positively: `CEL_ROLE` solo or orchestrator AND a product - `CEL_PRODUCT`
 and/or its `<product>-orch` mailbox, agreeing when both are set - that owns
-the repo; anything missing or contradictory is refused. There is NO owner
+the repo, and that identity must be its launch's (`cel_launch_identity`,
+lib/identity.sh - the check `cel team` makes), so an agent that exports
+another product's `CEL_PRODUCT` is refused; anything missing or
+contradictory is refused. There is NO owner
 path: the absence of an agent's marks proves nothing (an agent can shed them
 with `env -u`, `setsid` or a fresh environment), so a process with no agent
 identity is refused every write and told to use the forge's web UI (Forgejo
@@ -370,9 +399,13 @@ role may source `lib/forge.sh` or call its `_forge_*`/`forge_*` functions
 (also in `bash -c`, `$(...)`, `eval`, or through a variable holding the
 name), which carry the token without `cel forge`'s checks; and no role may
 run any `cel` command on a line that sets a `CEL_*` or `HERDR_*` variable,
-even to empty (`VAR=`, `env VAR=`, `export`, `declare`) - dressing up as
+even to empty (`VAR=`, `env VAR=`, `export`, `declare`), or any variable
+whose name the guard cannot read - an expansion (`export $X=1`, `eval
+"$X=1"`, `printf -v "$X"`) or a nameref (`declare -n`) - dressing up as
 another product, lead, member or mailbox (`CEL_GUARD_ALLOW_ONCE`, the human's
-approval, does not count; `cel inbox send --from` is a flag). Shedding one
+approval, does not count; `cel inbox send --from` is a flag), or that hands
+`cel`'s own bash shell code (`BASH_ENV=`, `ENV=`, `SHELLOPTS=`, `BASHOPTS=`,
+a `BASH_FUNC_` spelling, `export -f`, `declare -fx`). Shedding one
 (`unset`, `env -u`, `env -i`, `setsid`) is left to `cel forge` and `cel
 team`, which change nothing for a process with no agent identity. Like the rest of
 the guard these are tripwires matched as text, not a sandbox: a script file

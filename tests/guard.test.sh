@@ -351,7 +351,9 @@ test_cel_forge_runs_are_everyones_and_close_ready_the_product_agents() {
 # another product, lead, member or mailbox. Shedding marks (unset, env -u,
 # env -i) gains nothing: cel forge and cel team refuse a process with no
 # agent identity, so the guard leaves those lines to them. The human's
-# CEL_GUARD_ALLOW_ONCE is not an identity and does not count.
+# CEL_GUARD_ALLOW_ONCE is not an identity and does not count. A name the
+# guard cannot read - an expansion (`X=CEL_TESTING; export $X=1`), a
+# nameref - is refused on a cel line the same way.
 test_cel_with_a_tampered_cel_environment_is_refused() {
   local role c
   for role in orchestrator root core solo other member; do
@@ -363,7 +365,19 @@ test_cel_with_a_tampered_cel_environment_is_refused() {
              'export CEL_PRODUCT=other; cel team cap login "x"' 'CEL_TEAM_MEMBER=other-login-qa cel team verdict login --repo web --head x pass' \
              'CEL_INBOX_ME=widget-orch cel inbox read' 'env CEL_INBOX_WS=other cel inbox send root hi' \
              'HERDR_PANE_ID=p9 cel run reviewer --repo r --pr 1' 'typeset -x HERDR_PANE_ID=p9; cel status' \
-             'CEL_WORKSPACE=/w cel team status' 'CEL_GUARD_ALLOW_ONCE=1 CEL_PRODUCT=other cel team start x --product other'; do
+             'CEL_WORKSPACE=/w cel team status' 'CEL_GUARD_ALLOW_ONCE=1 CEL_PRODUCT=other cel team start x --product other' \
+             'X=CEL_TESTING; export $X=1; cel forge pr close gizmo#3' 'X=CEL_TESTING; export "$X=1"; cel forge pr close gizmo#3' \
+             'X=CEL_PROC_DIR; export ${X}=/tmp/p; cel team cap login 5' 'X=CEL_PROC_DIR; declare -x "$X"=/tmp/p && cel forge pr ready gizmo#3' \
+             'export $(printf CEL_TESTING)=1; cel forge run rerun gizmo 15' 'typeset -gx "${X}=1"; cel forge pr close gizmo#3' \
+             'readonly $X=1; cel team status' 'X=CEL_PRODUCT; declare -x "$X=tools"; cel forge pr close gizmo#3' \
+             'declare -n r=$X; r=1; cel forge pr close gizmo#3' 'local -n r; cel team status' \
+             'X=CEL_TESTING; eval "$X=1"; cel forge pr close gizmo#3' 'env "$X=1" cel forge pr close gizmo#3' \
+             'printf -v "$X" 1; cel forge pr close gizmo#3' 'read -r "$X" <<< 1; cel forge pr close gizmo#3' \
+             'eval "${X}=1" && cel forge run rerun gizmo 15' \
+             'BASH_ENV=/tmp/e.sh cel forge pr close gizmo#3' 'export BASH_ENV=/tmp/e.sh; cel forge pr close gizmo#3' \
+             'ENV=/tmp/e.sh cel team status' 'env SHELLOPTS=xtrace PS4=x cel forge pr close gizmo#3' 'BASHOPTS=extdebug cel status' \
+             'exit() { return 0; }; export -f exit; cel forge pr close gizmo#3' 'declare -fx exit && cel forge pr ready gizmo#3' \
+             'typeset -xf cat; cel team cap login 5' "env 'BASH_FUNC_exit%%=() { return 0; }' cel forge pr close gizmo#3"; do
       case "$(guard_classify "$role" "$c")" in "deny cel reads who is asking"*) ;; *) echo "$role allowed: $c"; return 1;; esac
     done
   done
@@ -371,8 +385,32 @@ test_cel_with_a_tampered_cel_environment_is_refused() {
            'env -u CEL_ROLE cel forge pr close gizmo#3' 'unset CEL_INBOX_ME CEL_ROLE && cel forge run list gizmo' \
            'env -i PATH=/usr/bin cel forge pr close gizmo#3' 'cel team status login' \
            'cel inbox send celestial-orch "done" --from celestial-pr-1-review --workspace plane' \
-           'CEL_GUARD_ALLOW_ONCE=1 cel team status' 'grep -r CEL_ROLE= lib/' 'X=1 make -C ~/.cel/solo/x'; do
+           'CEL_GUARD_ALLOW_ONCE=1 cel team status' 'grep -r CEL_ROLE= lib/' 'X=1 make -C ~/.cel/solo/x' \
+           'export PATH="$HOME/bin:$PATH"; cel status' 'for x in a b; do cel inbox send "$x" hi; done' \
+           'cel inbox send root "a=$b" --workspace plane' 'X=CEL_TESTING; export $X=1; make test' \
+           'NODE_ENV=test cel status' 'BASH_ENV=/tmp/e.sh make test' 'cel forge pr view gizmo#3 --json | jq -r .state'; do
     case "$(guard_classify solo "$c")" in "deny cel reads who is asking"*) echo "refused: $c"; return 1;; esac
+  done
+}
+# The suite trusts every process beneath tests/run.sh with its test seams, so
+# no agent runs it under a hook: BASH_ENV, ENV or PATH set or exported on the
+# line, or an exported function handed to it - however the runner is reached.
+test_the_suite_does_not_run_under_a_hook() {
+  local role c
+  for role in orchestrator root core solo other member; do
+    for c in 'BASH_ENV=/tmp/h.sh bash tests/run.sh forge.test.sh' 'ENV=/tmp/h.sh ./tests/run.sh' \
+             'PATH=/tmp/evil:$PATH bash tests/run.sh' 'env PATH=/tmp/evil:/usr/bin bash /w/celestial/tests/run.sh guard.test.sh' \
+             'export BASH_ENV=/tmp/h.sh; bash tests/run.sh' 'export PATH; timeout 600 bash tests/run.sh' \
+             'declare -x ENV=/tmp/h.sh && exec bash tests/run.sh' 'sh -c "PATH=/x:\$PATH tests/run.sh"' \
+             'jq() { :; }; export -f jq; bash tests/run.sh forge.test.sh' 'declare -fx jq; bash tests/run.sh' \
+             "env 'BASH_FUNC_jq%%=() { :; }' bash tests/run.sh"; do
+      case "$(guard_classify "$role" "$c")" in "deny the suite trusts every process"*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+  done
+  for c in 'bash tests/run.sh forge.test.sh' 'bash tests/run.sh' './tests/run.sh --no-lock guard.test.sh' \
+           'CEL_TEST_JOBS=1 bash tests/run.sh' 'NODE_ENV=test bash tests/run.sh' 'cat tests/run.sh' \
+           'export PATH="$HOME/bin:$PATH"; make test' 'BASH_ENV=/tmp/h.sh make test' 'grep -n BASH_ENV tests/run.sh'; do
+    case "$(guard_classify solo "$c")" in "deny the suite trusts every process"*) echo "refused: $c"; return 1;; esac
   done
 }
 # ...and the hook enforces it where it runs: a reviewer pane outside any

@@ -75,8 +75,10 @@
 # line - never in argv, a log or an error. A repo declared on plain http://
 # says so on stderr for every request that sends its token: it crosses the
 # network unencrypted. CEL_FORGE_CURL names the curl binary - that backend's one
-# stub seam, honoured only under CEL_TESTING (set by tests/run.sh), so a
-# stray variable cannot hand the token to another binary. The token's
+# stub seam, honoured only under CEL_TESTING inside this checkout's own suite
+# (cel_under_suite, lib/common.sh: the process's ancestry, which no exported
+# variable changes), so a stray or forged variable cannot hand the token to
+# another binary. The token's
 # directory follows XDG_CONFIG_HOME, the standard per-user config root.
 # Where Forgejo cannot say what GitHub says, the answer is the conservative
 # one, never a guess:
@@ -98,6 +100,8 @@ _CEL_FORGE=1
 . "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/workspace.sh
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
+# shellcheck source=lib/identity.sh
+. "${BASH_SOURCE[0]%/*}/identity.sh"   # cel_launch_identity: a write acts as its launch
 
 forge_pr_view()    { _forge_call pr_view "$@"; }
 forge_pr_list()    { _forge_call pr_list "$@"; }
@@ -525,7 +529,7 @@ _forge_fj() { # <host> <METHOD> <url> [json-body]
     args+=(--header 'Content-Type: application/json' --data-binary "@$bodyf")
   fi
   local curl=curl
-  [ -z "${CEL_TESTING:-}" ] || curl="${CEL_FORGE_CURL:-curl}"
+  if [ -n "${CEL_TESTING:-}" ] && [ -n "${CEL_FORGE_CURL:-}" ] && cel_under_suite; then curl="$CEL_FORGE_CURL"; fi
   out="$(printf 'header = "Authorization: token %s"\n' "$tok" | "$curl" "${args[@]}" "$url")" || rc=$?
   [ -z "$bodyf" ] || rm -f -- "$bodyf"
   [ "$rc" -eq 0 ] || { printf 'forge: %s failed (curl exit %s)\n' "$FJ_REQ" "$rc" >&2; return 1; }
@@ -951,7 +955,8 @@ _forge_cli_agent_product() {
 # product (CEL_PRODUCT or its <product>-orch mailbox, agreeing when both are
 # set) that owns <repo>; for a PR, only one its workspace's account authored
 # or a migrated Forgejo PR (author Ghost, the placeholder for an imported
-# PR's author). Anything missing or contradictory is refused. There is no
+# PR's author). The identity must also be the one the agent's launch fixed
+# (cel_launch_identity). Anything missing or contradictory is refused. There is no
 # owner path: the absence of an agent's marks proves nothing (an agent can
 # shed them - env -u, setsid, a fresh environment), so a process with no
 # identity is refused and the owner uses the forge's web UI or gh. Every
@@ -964,6 +969,9 @@ _forge_cli_authorise() { # <wsdir> <repo> <verb> [pr-number]
     "") die "cel forge $3: only the product's own agent (CEL_ROLE solo or orchestrator) changes a forge, and this process carries no agent role - a missing role proves nothing, so it is refused. At your own shell, use the forge's web UI (Forgejo or GitHub) or gh directly; nothing changed" ;;
     *) die "cel forge $3: a ${role} does not do this - the product's own agent does (the owner uses the forge's web UI or gh); nothing changed" ;;
   esac
+  # ...and that identity is the one its launch fixed (lib/identity.sh), so an
+  # exported CEL_PRODUCT cannot steer a write to another product.
+  cel_launch_identity "cel forge $3"
   product="$(_forge_cli_agent_product)" \
     || die "cel forge $3: this agent's CEL_PRODUCT ($CEL_PRODUCT) and mailbox ($CEL_INBOX_ME) name different products - nothing changed"
   [ -n "$product" ] || die "cel forge $3: cannot tell which product this agent is (no CEL_PRODUCT, no <product>-orch mailbox) - nothing changed"

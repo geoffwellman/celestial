@@ -6,6 +6,47 @@
 # prerequisites, so it cannot have any of its own beyond git and curl.
 #
 # This file is dispatch only. Logic lives in lib/.
+
+# CEL RUNS ITS CHECKS IN A CLEAN PROCESS. Bash takes code from its
+# environment before this line runs: exported functions (BASH_FUNC_<name>%%)
+# and a BASH_ENV file, either of which can shadow what cel's checks call (an
+# `exit` that returns turns every refusal into a pass), and SHELLOPTS/
+# BASHOPTS (xtrace with a PS4 that assigns). So unless the environ this
+# process was started with - read from /proc, which no code in it can change
+# - carries none of them, and the shell is not interactive (an rc file ran),
+# cel re-executes itself without them (and without ENV) before it loads
+# anything. Only shell keywords, expansions and assignments decide that,
+# because any command may be a smuggled function; a failed `${var:?}`
+# expansion ends the script even if `exit` and `exec` are functions.
+# _CEL_CLEAN_EXEC only stops a loop: it never lets a process proceed, so a
+# forged one gains nothing - a process that is still not clean with it set
+# refuses to run (a variable whose VALUE holds one of those names cannot be
+# cleaned and is refused too). Code a BASH_ENV file runs here, once, before
+# this line, is the agent's own code - it could run anything anyway; what
+# this buys is that cel's own checks run in a process it never touched.
+{ _cel_environ=$(< "/proc/$$/environ"); } 2>/dev/null
+if [[ $_cel_environ == *BASH_FUNC_*%%=* || $_cel_environ == *BASH_ENV=* || $_cel_environ == *SHELLOPTS=* \
+      || $_cel_environ == *BASHOPTS=* || $- == *i* ]]; then
+  _cel_stop=
+  if [[ -n ${_CEL_CLEAN_EXEC-} ]]; then
+    : "${_cel_stop:?cel: refusing to run - this environment still carries shell code or options after cleaning (BASH_FUNC_*, BASH_ENV, SHELLOPTS or BASHOPTS, perhaps inside another variable value); nothing ran}"
+  fi
+  _cel_unset=(-u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS)
+  _cel_rest=$_cel_environ
+  while [[ $_cel_rest == *BASH_FUNC_*%%=* ]]; do
+    _cel_rest=${_cel_rest#*BASH_FUNC_}
+    _cel_unset+=(-u "BASH_FUNC_${_cel_rest%%\%\%=*}%%")
+    _cel_rest=${_cel_rest#*%%=}
+  done
+  exec /usr/bin/env "${_cel_unset[@]}" _CEL_CLEAN_EXEC=1 "$BASH" "$0" "$@"
+  : "${_cel_stop:?cel: could not re-execute itself without the shell code in its environment; nothing ran}"
+fi
+# Clean: nothing was imported, so these are the real builtins. The marker
+# goes (a cel this one starts decides for itself), and any function defined
+# by now - none is expected - goes with it.
+unset _CEL_CLEAN_EXEC _cel_environ
+for _cel_f in $(compgen -A function); do unset -f "$_cel_f"; done
+unset _cel_f
 set -euo pipefail
 
 # Check before loading runtime modules or using GNU-only path operations.

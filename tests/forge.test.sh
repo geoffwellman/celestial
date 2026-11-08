@@ -1,11 +1,15 @@
 # shellcheck shell=bash
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/forge.sh"
+source "$CEL_ROOT/tests/lib/launch-mirror.sh"
+# cel forge's writes check the caller against its launch: every call gets one
+# that carries exactly its identity, unless a test builds its own proc tree.
+launch_mirror_wrap cmd_forge
 
 # A workspace with one repo, `widget`, whose url and per-repo forge keys a
 # test sets; `extra` is appended at the top level (a github: block).
 _forge_ws() { # <url-or-empty> [forge] [host] [extra-yaml]
-  T="$(mktemp -d)"
+  T="$(mktemp -d)"; launch_mirror_at "$T/launch-proc"
   printf 'name: forgetest\n%s\nrepos:\n  - name: widget\n    prefix: WG\n' "${4:-}" > "$T/workspace.yaml"
   [ -z "$1" ] || printf '    url: %s\n' "$1" >> "$T/workspace.yaml"
   [ -z "${2:-}" ] || printf '    forge: %s\n' "$2" >> "$T/workspace.yaml"
@@ -582,6 +586,131 @@ test_forge_writes_refuse_a_process_with_no_agent_identity() {
   ( cd "$T" && cmd_forge run list widget ) >/dev/null || { echo "no identity could not list runs"; rm -rf "$T"; return 1; }
   ( cd "$T" && cmd_forge whoami widget ) >/dev/null || { echo "no identity could not whoami"; rm -rf "$T"; return 1; }
   ( cd "$T" && CEL_ROLE=reviewer cmd_forge pr reviews widget#31 ) >/dev/null || { echo "a reviewer could not read reviews"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# AN AGENT WRITES AS ITS LAUNCH (lib/identity.sh). A product agent that
+# re-dresses its shell - `export CEL_PRODUCT=other` through any indirection -
+# keeps its launch's environ, fixed at exec; the nearest process above cel
+# carrying CEL_ROLE must agree, so the forged product is refused before any
+# write and the agent's own product still works. The suite's /proc is
+# CEL_PROC_DIR: here, the caller is $PPID, its runtime 4242.
+test_forge_writes_act_only_as_the_launch_environ_says() {
+  _fj_ws $'products:\n  - name: shop\n    repos: [web]\n  - name: tools\n    repos: [widget]'
+  local P="$T/proc" out
+  mkdir -p "$P/$PPID" "$P/4242"
+  printf '%s\0' CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch > "$P/4242/environ"
+  printf '4242 (omp) S 1 1 1' > "$P/4242/stat"
+  printf '%s\0' HOME=/h > "$P/$PPID/environ"
+  printf '%s (bash) S 4242 1 1' "$PPID" > "$P/$PPID/stat"
+  # shop's agent exports tools as its product (and mailbox, so they agree)
+  out="$(cd "$T" && X=CEL_PRODUCT; declare -x "$X=tools"; CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 2>&1)" \
+    && { echo "a forged product closed another product's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel forge pr close: this process says CEL_PRODUCT=tools but its launch (pid 4242) says CEL_PRODUCT=shop" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  # the agent's real product: tools' agent, launched as tools, closes its own PR
+  printf '%s\0' CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch > "$P/4242/environ"
+  ( cd "$T" && CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 ) >/dev/null \
+    || { echo "its own launch was refused"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "PATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
+  # detached: a role with no launch above it changes nothing
+  : > "$FJ_LOG"
+  printf 'HOME=/h\0' > "$P/4242/environ"
+  out="$(cd "$T" && CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch cmd_forge run rerun widget 15 2>&1)" \
+    && { echo "a detached agent reran a job"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no agent launch above it" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# NOTHING EXPORTED SKIPS OR REDIRECTS THAT CHECK. CEL_TESTING alone used to
+# skip it, and `X=CEL_TESTING; export $X=1` slips past the guard's literal
+# spellings. Now the check always runs, and its seam (CEL_PROC_DIR) and the
+# forge's curl seam (CEL_FORGE_CURL) are honoured only for a process under
+# this checkout's own tests/run.sh - its ancestry, which no variable sets.
+test_forge_writes_check_the_launch_whatever_the_environment_says() {
+  _fj_ws $'products:\n  - name: shop\n    repos: [web]\n  - name: tools\n    repos: [widget]'
+  local out
+  # under the suite with no proc fixture: the real /proc decides, and nothing
+  # above this test was launched as tools' agent
+  out="$(cd "$T" && X=CEL_TESTING; export "$X=1"; unset CEL_PROC_DIR; CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 2>&1)" \
+    && { echo "CEL_TESTING without a proc fixture skipped the check"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "launch" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  cel_under_suite || { echo "this test is not under the suite"; rm -rf "$T"; return 1; }
+  # OUTSIDE the suite - a process the runner did not start (detached, then
+  # reparented away from it) - exporting CEL_TESTING, a proc tree that vouches
+  # for tools and a stub curl changes nothing: the seams are not honoured
+  local P="$T/fake-proc" pc="$T/pathbin" o="$T/outside"
+  mkdir -p "$pc"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\necho "$*" >> %q\nprintf "%%s\\n%%s" %q 200\n' "$T/path-curl.log" '{"login":"path-curl"}' > "$pc/curl"
+  chmod +x "$pc/curl"
+  # shellcheck disable=SC2016  # expanded by the detached shell
+  OUT_P="$P" OUT_T="$T" OUT_PC="$pc" setsid -f bash -c '
+    while p="$(cut -d" " -f4 /proc/$$/stat)"; [ "$(cat "/proc/$p/comm" 2>/dev/null)" = setsid ]; do sleep 0.05; done
+    . "$CEL_ROOT/lib/common.sh"
+    if cel_under_suite; then echo under; else echo outside; fi
+    # the fake tree vouches for this shell as tools agent launch
+    mkdir -p "$OUT_P/$$"; printf "%s\0" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch > "$OUT_P/$$/environ"
+    printf "%s (bash) S 1 1 1" "$$" > "$OUT_P/$$/stat"
+    cd "$OUT_T"
+    CEL_TESTING=1 CEL_PROC_DIR="$OUT_P" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch \
+      bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; cmd_forge pr close widget#31" && echo closed
+    CEL_TESTING=1 PATH="$OUT_PC:$PATH" bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; forge_whoami \"\$OUT_T\" widget"
+  ' > "$o" 2>&1 < /dev/null
+  local i=0
+  until grep -q 'login' "$o" 2>/dev/null || [ "$i" -ge 200 ]; do sleep 0.05; i=$((i + 1)); done
+  out="$(cat "$o")"
+  assert_contains "$out" outside || { echo "$out"; rm -rf "$T"; return 1; }
+  case "$out" in *under*|*closed*) echo "outside the suite the seams were honoured: $out"; rm -rf "$T"; return 1 ;; esac
+  assert_contains "$out" "launch" || { echo "$out"; rm -rf "$T"; return 1; }
+  # the token went to the curl on PATH, never to CEL_FORGE_CURL's stub
+  assert_contains "$out" '{"login":"path-curl"}' || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$FJ_LOG")" "" || { echo "the stub named by CEL_FORGE_CURL ran outside the suite"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# CEL'S CHECKS RUN IN A CLEAN PROCESS (bin/cel). Shell functions arrive two
+# ways an agent controls - exported (`export -f`) or defined by a BASH_ENV
+# file - and either one shadows what cel's checks call (an `exit` that
+# returns turns every refusal into a pass). bin/cel re-executes itself
+# without BASH_ENV, ENV, SHELLOPTS, BASHOPTS or any exported function
+# before it loads a lib, so a forged product is refused through the real
+# bin/cel either way, and an honest call still works.
+_cel_bin_as() { # <launch product> <script>: run <script> in a bash whose launch is <launch product>'s agent
+  OUT_P="$T/proc" OUT_T="$T" OUT_LP="$1" bash -c '
+    mkdir -p "$OUT_P/$$"
+    printf "%s\0" CEL_ROLE=solo "CEL_PRODUCT=$OUT_LP" "CEL_INBOX_ME=$OUT_LP-orch" > "$OUT_P/$$/environ"
+    printf "%s (bash) S 1 1 1" "$$" > "$OUT_P/$$/stat"
+    cd "$OUT_T"
+    export CEL_PROC_DIR="$OUT_P"
+    '"$2"'
+    echo "rc=$?"' 2>&1
+}
+test_cel_runs_its_checks_in_a_process_without_smuggled_shell_code() {
+  _fj_ws $'products:\n  - name: shop\n    repos: [web]\n  - name: tools\n    repos: [widget]'
+  local out
+  printf 'exit() { return 0; }\ncel_launch_identity() { return 0; }\n' > "$T/evil.sh"
+  # exported functions: an exit that never exits, and the check itself
+  out="$(_cel_bin_as shop 'exit() { return 0; }; cel_launch_identity() { return 0; }; export -f exit cel_launch_identity
+    CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "this process says CEL_PRODUCT=tools but its launch" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { echo "an exported function let a forged product close a PR"; rm -rf "$T"; return 1; }
+  # a BASH_ENV file that defines the same
+  out="$(_cel_bin_as shop 'BASH_ENV="$OUT_T/evil.sh" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "this process says CEL_PRODUCT=tools but its launch" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { echo "a BASH_ENV file let a forged product close a PR"; rm -rf "$T"; return 1; }
+  # a forged marker skips nothing: still cleaned and refused
+  out="$(_cel_bin_as shop '_CEL_CLEAN_EXEC=1 BASH_ENV="$OUT_T/evil.sh" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "rc=1" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { echo "a forged marker let a forged product close a PR"; rm -rf "$T"; return 1; }
+  # an honest call through bin/cel is unaffected, smuggled code or not
+  out="$(_cel_bin_as tools 'CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch "$CEL_ROOT/bin/cel" forge pr close widget#31')"
+  assert_contains "$out" "rc=0" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "PATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
+  out="$(_cel_bin_as tools 'BASH_ENV="$OUT_T/evil.sh" "$CEL_ROOT/bin/cel" forge whoami widget')"
+  assert_contains "$out" $'\ngeoff\n' || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "rc=0" || { echo "$out"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
