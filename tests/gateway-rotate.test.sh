@@ -470,6 +470,66 @@ test_rotate_abort_killed_after_removing_next_aborts_when_run_again() {
   _rk_case _rk_abort_killed_body next-removed
 }
 
+# An --abort killed right after putting the old key back in api-key leaves no
+# api-key.next: the new key is accepted from no key file. --status says so,
+# names both fixes, and never claims an api-key.next.
+_rk_abort_killed_after_restore_status_body() {
+  local out
+  _rk --stage >/dev/null || return 1
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
+  _rk_crash api-key-restored --abort || return 1
+  [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] || { echo "an api-key.next appeared"; return 1; }
+  assert_eq "$(_rk_code "$NEW")" 200 || return 1
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  assert_contains "$out" "rotation   INTERRUPTED - an --abort was cut short" || return 1
+  assert_contains "$out" "config.yaml still accepts a key that is in no key file" || return 1
+  assert_contains "$out" "cel gateway rotate-key --abort again (or cel gateway refresh) removes it" || return 1
+  assert_contains "$out" "UNKNOWN (in no key file) (sha256 $(_gwr_fp_of "$NEW" | cut -c1-12))" || return 1
+  case "$out" in *"api-key.next"*) echo "status names an api-key.next that is not there: $out"; return 1 ;; esac
+  out="$(_rk --abort)" || { echo "abort again failed: $out"; return 1; }
+  _rk_back_to_old_alone || return 1
+  _rk_no_key_printed
+}
+test_rotate_abort_killed_after_restoring_api_key_status_names_the_key_in_no_file() {
+  _rk_case _rk_abort_killed_after_restore_status_body
+}
+
+# THE CRASH SEAM IS INERT OUTSIDE THE SUITE: a process the runner did not
+# start (detached, then reparented away from it), with
+# CEL_GATEWAY_ROTATE_CRASH_AFTER set, runs --stage to the end - not killed.
+_rk_crash_seam_outside_body() {
+  local o="$T/outside" out i=0
+  cel_under_suite || { echo "this test is not under the suite"; return 1; }
+  # shellcheck disable=SC2016  # expanded by the detached shell
+  setsid -f bash -c '
+    while p="$(cut -d" " -f4 /proc/$$/stat)"; [ "$(cat "/proc/$p/comm" 2>/dev/null)" = setsid ]; do sleep 0.05; done
+    . "$CEL_ROOT/lib/common.sh"
+    if cel_under_suite; then echo under; else echo outside; fi
+    CEL_GATEWAY_ROTATE_CRASH_AFTER=minted bash -c "
+      . \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/gateway-rotate.sh\"
+      _gateway_claude_cli_version() { return 1; }
+      cmd_gateway rotate-key --stage" 2>&1
+    echo "rc $?"
+    echo finished
+  ' > "$o" 2>&1 < /dev/null
+  until grep -q '^finished' "$o" 2>/dev/null || [ "$i" -ge 400 ]; do sleep 0.05; i=$((i + 1)); done
+  out="$(cat "$o")"
+  printf '%s\n' "$out" >>"$T/outs"
+  assert_contains "$out" outside || { echo "$out"; return 1; }
+  case "$out" in *under*) echo "the detached shell was under the suite: $out"; return 1 ;; esac
+  assert_contains "$out" "rc 0" || { echo "--stage did not complete outside the suite: $out"; return 1; }
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
+  _rk_key_is api-key.previous "$OLD" || return 1
+  [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] || { echo "the stage stopped at api-key.next"; return 1; }
+  assert_eq "$(_rk_code "$NEW")" 200 || return 1
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  assert_contains "$out" "rotation   staged" || return 1
+  _rk_no_key_printed
+}
+test_rotate_crash_seam_is_inert_outside_the_suite() {
+  _rk_case _rk_crash_seam_outside_body
+}
+
 # Any config the key files do not match is named, with the fix: here the
 # state a --finish killed between deleting api-key.previous and rewriting the
 # config used to leave - the old key still accepted, no rotation on record.

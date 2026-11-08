@@ -276,11 +276,14 @@ _gwr_print_plan() { # <rows>
 
 # --- the verbs ---------------------------------------------------------------
 
-# none, staged, or interrupted - a --stage cut short. That is api-key.next
-# without api-key.previous (killed before the switch), or api-key.previous
-# holding the very key api-key holds (killed between keeping the old key and
-# moving the new one over api-key; api-key.next still accepted). A staged
-# rotation may still carry a leftover api-key.next: --finish removes it.
+# none, staged, or interrupted - a --stage or an --abort cut short. That is
+# api-key.next without api-key.previous (a --stage killed before the switch),
+# or api-key.previous holding the very key api-key holds: a --stage killed
+# between keeping the old key and moving the new one over api-key
+# (api-key.next still accepted), or an --abort killed after putting the old
+# key back in api-key (no api-key.next; until it rewrote config.yaml, the
+# new key is still accepted from no key file). A staged rotation may still
+# carry a leftover api-key.next: --finish removes it.
 _gwr_state() { # -> none | staged | interrupted
   local prev cur
   if [ -e "$(_gateway_key_previous_file)" ]; then
@@ -319,10 +322,16 @@ _gwr_status() {
   case "$state" in
     none)        printf '  rotation   none - the current key is the only key\n' ;;
     interrupted)
-      if [ -e "$(_gateway_key_previous_file)" ]; then
+      if [ -e "$(_gateway_key_next_file)" ] && [ -e "$(_gateway_key_previous_file)" ]; then
         printf '  rotation   INTERRUPTED - a --stage was cut short after keeping api-key.previous: api-key still holds the old key and api-key.next is still accepted. Fix: cel gateway rotate-key --abort clears it, then --stage again\n'
-      else
+      elif [ -e "$(_gateway_key_next_file)" ]; then
         printf '  rotation   INTERRUPTED - a --stage was cut short and left api-key.next behind. Fix: cel gateway rotate-key --abort clears it, then --stage again\n'
+      elif [ "$(_gwr_config_fps)" != "$(_gwr_files_fps)" ]; then
+        # an --abort killed after putting the old key back in api-key: the
+        # new key is in no key file now, but config.yaml still accepts it
+        printf '  rotation   INTERRUPTED - an --abort was cut short after restoring the old key to api-key: config.yaml still accepts a key that is in no key file. Fix: cel gateway rotate-key --abort again (or cel gateway refresh) removes it\n'
+      else
+        printf '  rotation   INTERRUPTED - an --abort was cut short and left api-key.previous behind. Fix: cel gateway rotate-key --abort again clears it\n'
       fi ;;
     staged)      printf '  rotation   staged - the gateway accepts the old and the new key; new launches get the new key\n' ;;
   esac
