@@ -71,8 +71,10 @@ Leading a feature team
   be built independently and at the same time, or needs a specialist you are
   not (device QA, design, data, a release check). One change, a bug fix, a
   refactor in one place: no team. When in doubt, no team.
-- START. Only the product's orchestrator (`<product>-orch`) or the owner
-  starts and leads a team; a lane that needs one asks it by `cel inbox`.
+- START. Only the product's orchestrator (`<product>-orch`) starts and leads
+  a team; a lane that needs one asks it by `cel inbox`, and the owner asks
+  it by `cel inbox` or a `cel decide` answer (a shell with no agent role
+  runs no `cel team` verb but `status`).
   `cel team start <feature> --product <p> [--repo r]... --brief-file
   <f>` creates `<workspace>/.cel/teams/<feature>/`: brief.md,
   acceptance.yaml (`criteria: [{id, text, evidence}]`), contracts/,

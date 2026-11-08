@@ -568,8 +568,10 @@ helpers and 4 team members in all (`budget.max_live_agents`,
 `budget.max_team_members`; `cel run reviewer` can be refused too). Product
 agents (`<product>-orch`, solo lanes) and core are shown by `cel budget` but
 never counted: a box running ten products still has all 8 helpers for their
-reviewers. Only the product's orchestrator (`<product>-orch`) or the owner
-starts and leads a team.
+reviewers. Only the product's orchestrator (`<product>-orch`, `CEL_ROLE` solo
+or orchestrator and its product proven by `CEL_PRODUCT` or its mailbox)
+starts and leads a team. A process with no agent identity is refused; the
+owner asks the product's agent by `cel inbox` or answers its `cel decide`.
 
 ```
 cel team start login --product shop --brief-file brief.md      # lead only
@@ -606,7 +608,7 @@ write holds the folder's lock and JSON is replaced whole.
   --evidence <file>`. A newer `candidate.updated` makes older verdicts show
   as stale.
 - **Owner decisions** go through the lead's `cel decide ask`; only the lead
-  or the owner records a `decision` event. Members spend nothing unless the
+  records a `decision` event. Members spend nothing unless the
   lead sets the team's spend cap from one (`cel team cap <f> "<cap>"`, kept in
   `team.json`); nothing in `brief.md`, which members can write, widens a
   member's authority or spend.

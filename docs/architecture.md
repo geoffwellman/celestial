@@ -110,11 +110,15 @@ calls nothing external while holding it - the budget, git, the launcher,
 herdr and the inbox are all called outside it - and JSON is written temp +
 rename. `cel team start` builds the folder aside and renames it into place,
 so a half-made team is never visible and a second start of the id fails.
-Authority is checked in `cel team` itself: start, add, retire, close and
-`cap` belong to `<product>-orch` (the lead) or the owner's shell; a
-`decision` event and the spend cap (`team.json` `spend_cap`) are the lead's
-or the owner's only, so nothing a member writes - brief.md included - can
-grant spend or authority.
+Authority is checked in `cel team` itself, and only positively: start, add,
+retire, close and `cap` belong to `<product>-orch` (the lead: `CEL_ROLE` solo
+or orchestrator, its product from `CEL_PRODUCT` and/or its mailbox, agreeing
+and naming the team's product); a `decision` event and the spend cap
+(`team.json` `spend_cap`) are the lead's only, so nothing a member writes -
+brief.md included - can grant spend or authority. There is no owner path: a
+process with no agent role (an agent can shed one with `env -u` or `setsid`)
+is refused and the owner asks the lead by `cel inbox` or `cel decide`.
+Members act by their member identity (ack, event, verdict).
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
