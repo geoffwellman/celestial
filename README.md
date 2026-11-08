@@ -332,7 +332,9 @@ while the round is blocked by any live agent it could not resume (a reviewer,
 an older receipt, a missing saved session) or by ANY Rex session
 that is not a live managed launch - a session you opened yourself, or an old
 empty shell: stopping the server ends every session, and only managed agents
-come back. Close those sessions (`rex ls`, `rex kill`) to let it proceed. Then
+come back. Close those sessions (`rex ls`, `rex kill`) to let it proceed. That
+alert is said once per rex version, whoever is in the way, and the steward
+reminds root once more if that version has stayed blocked for over 24 hours. Then
 it records the agents, installs exactly the version it vetted
 (`sudo -n apt-get install --only-upgrade -y rex=<version>`), restarts the
 per-user Rex server in its own systemd scope if the package did not, resumes
