@@ -98,6 +98,8 @@ _CEL_FORGE=1
 . "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/workspace.sh
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
+# shellcheck source=lib/identity.sh
+. "${BASH_SOURCE[0]%/*}/identity.sh"   # cel_launch_identity: a write acts as its launch
 
 forge_pr_view()    { _forge_call pr_view "$@"; }
 forge_pr_list()    { _forge_call pr_list "$@"; }
@@ -951,7 +953,8 @@ _forge_cli_agent_product() {
 # product (CEL_PRODUCT or its <product>-orch mailbox, agreeing when both are
 # set) that owns <repo>; for a PR, only one its workspace's account authored
 # or a migrated Forgejo PR (author Ghost, the placeholder for an imported
-# PR's author). Anything missing or contradictory is refused. There is no
+# PR's author). The identity must also be the one the agent's launch fixed
+# (cel_launch_identity). Anything missing or contradictory is refused. There is no
 # owner path: the absence of an agent's marks proves nothing (an agent can
 # shed them - env -u, setsid, a fresh environment), so a process with no
 # identity is refused and the owner uses the forge's web UI or gh. Every
@@ -964,6 +967,9 @@ _forge_cli_authorise() { # <wsdir> <repo> <verb> [pr-number]
     "") die "cel forge $3: only the product's own agent (CEL_ROLE solo or orchestrator) changes a forge, and this process carries no agent role - a missing role proves nothing, so it is refused. At your own shell, use the forge's web UI (Forgejo or GitHub) or gh directly; nothing changed" ;;
     *) die "cel forge $3: a ${role} does not do this - the product's own agent does (the owner uses the forge's web UI or gh); nothing changed" ;;
   esac
+  # ...and that identity is the one its launch fixed (lib/identity.sh), so an
+  # exported CEL_PRODUCT cannot steer a write to another product.
+  cel_launch_identity "cel forge $3"
   product="$(_forge_cli_agent_product)" \
     || die "cel forge $3: this agent's CEL_PRODUCT ($CEL_PRODUCT) and mailbox ($CEL_INBOX_ME) name different products - nothing changed"
   [ -n "$product" ] || die "cel forge $3: cannot tell which product this agent is (no CEL_PRODUCT, no <product>-orch mailbox) - nothing changed"

@@ -35,6 +35,8 @@
 _CEL_TEAM=1
 # shellcheck source=lib/inbox.sh
 . "${BASH_SOURCE[0]%/*}/inbox.sh"   # common, workspace, registry, rex (cel_agent_list), _inbox_send
+# shellcheck source=lib/identity.sh
+. "${BASH_SOURCE[0]%/*}/identity.sh" # cel_launch_identity: a write acts as its launch
 
 TEAM_ROLES="product design builder qa platform release analyst"
 # Event types anyone may append with `cel team event`. The lifecycle types
@@ -146,48 +148,6 @@ _team_require_lead() { # <wsdir> <product> <verb> [team-lead-alias]
   if [ -n "$lead" ] && [ "$(_team_caller)" != "$lead" ]; then
     die "cel team $verb: only $lead, the product's orchestrator, leads its teams - not $(_team_caller) (a lane asks it by cel inbox)"
   fi
-}
-
-# THE LAUNCH SAYS WHO AN AGENT IS. `cel run` execs every agent runtime under
-# `env CEL_ROLE=... CEL_PRODUCT=...` (lib/run.sh _run_launch_env), and
-# /proc/<pid>/environ is fixed at exec - the marks `cel gc` proves agents by.
-# An agent that re-dresses its own shell (`export CEL_PRODUCT=other`,
-# `X=CEL_PRODUCT; declare -x "$X=other"`, `bash -c 'CEL_ROLE=solo cel ...'`)
-# changes its variables but not the environ its launch fixed. So from the
-# caller (cel's parent) upward, the nearest process whose environ carries
-# CEL_ROLE is this agent's launch, and every identity variable here must
-# equal that environ's (set to the same value, or unset in both). A process
-# that claims a role or a membership with no such launch above it - detached
-# by `setsid` or a double fork, or never launched - is refused: nothing
-# vouches for it. Limit: a process that execs a fresh environment carrying
-# CEL_ROLE (`env CEL_ROLE=solo CEL_PRODUCT=x bash -c ...`) is its own nearest
-# launch; that spelling is the guard's to refuse (_guard_cel_env_tamper).
-# Under the suite the proc root is CEL_PROC_DIR (the seam lib/inbox.sh
-# uses), and without one the check is skipped: a test must never read the
-# environ of the agent that happens to run it.
-_TEAM_IDENTITY_VARS='CEL_ROLE CEL_PRODUCT CEL_INBOX_ME CEL_INBOX_WS CEL_TEAM CEL_TEAM_ROLE CEL_TEAM_MEMBER'
-_team_launch_identity() { # <verb> -> dies unless this identity is its launch's
-  local proc=/proc pid="$PPID" n=0 stat item v
-  if [ -n "${CEL_TESTING:-}" ]; then proc="${CEL_PROC_DIR:-}"; [ -n "$proc" ] || return 0; fi
-  [ -n "${CEL_ROLE:-}${CEL_TEAM_MEMBER:-}" ] || return 0   # no identity: the verb refuses it
-  local -A env=()
-  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
-    if grep -qsz '^CEL_ROLE=' "$proc/$pid/environ"; then
-      while IFS= read -r -d '' item; do
-        case "$item" in CEL_*=*) env["${item%%=*}"]="${item#*=}" ;; esac
-      done < <({ cat "$proc/$pid/environ"; } 2>/dev/null)
-      for v in $_TEAM_IDENTITY_VARS; do
-        if [ "${!v+set}" != "${env[$v]+set}" ] || [ "${!v:-}" != "${env[$v]:-}" ]; then
-          die "cel team $1: this process says $v=${!v-<unset>} but its launch (pid $pid) says $v=${env[$v]-<unset>} - an agent acts as the one it was launched as; nothing changed"
-        fi
-      done
-      return 0
-    fi
-    stat="$({ cat "$proc/$pid/stat"; } 2>/dev/null)" || break
-    stat="${stat##*) }"; stat="${stat#* }"; pid="${stat%% *}"
-    n=$((n + 1))
-  done
-  die "cel team $1: this process claims CEL_ROLE=${CEL_ROLE:-} ${CEL_TEAM_MEMBER:+CEL_TEAM_MEMBER=$CEL_TEAM_MEMBER }but no agent launch above it carries one (detached, or never launched) - nothing vouches for it; nothing changed"
 }
 
 # --- builder ownership -------------------------------------------------------
@@ -1162,8 +1122,9 @@ EOS
 
 cmd_team() {
   local sub="${1:-help}"; shift 2>/dev/null || true
-  # Every verb that writes acts only as the identity this agent was launched with.
-  case "$sub" in start|add|ack|event|verdict|retire|close|cap) _team_launch_identity "$sub" ;; esac
+  # Every verb that writes acts only as the identity this agent was launched
+  # with (lib/identity.sh).
+  case "$sub" in start|add|ack|event|verdict|retire|close|cap) cel_launch_identity "cel team $sub" ;; esac
   case "$sub" in
     start)   _team_start "$@" ;;
     add)     _team_add "$@" ;;

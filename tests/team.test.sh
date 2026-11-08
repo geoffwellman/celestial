@@ -462,7 +462,7 @@ test_an_agent_acts_only_as_its_launch_environ_says() {
   _launch 4242 CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch
   _launch "$PPID" HOME=/h
   out="$(CEL_PROC_DIR="$P" _t start login --product shop)" && { echo "a re-dressed agent led another product's team"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "CEL_PRODUCT=shop but its launch (pid 4242) says CEL_PRODUCT=tools" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel team start: this process says CEL_PRODUCT=shop but its launch (pid 4242) says CEL_PRODUCT=tools" || { rm -rf "$T"; return 1; }
   [ ! -e "$W/.cel/teams/login" ] || { echo "a refused start left a team"; rm -rf "$T"; return 1; }
   # the nearest carrier wins: a shell exec'd as shop's agent below it
   _launch "$PPID" CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch

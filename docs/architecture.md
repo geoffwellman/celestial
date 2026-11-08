@@ -120,14 +120,14 @@ process with no agent role (an agent can shed one with `env -u` or `setsid`)
 is refused and the owner asks the lead by `cel inbox` or `cel decide`.
 Members act by their member identity (ack, event, verdict). Every writing
 verb also checks that identity against the agent's launch
-(`_team_launch_identity`): the nearest process above `cel` whose
+(`cel_launch_identity`, lib/identity.sh): the nearest process above `cel` whose
 `/proc/<pid>/environ` - fixed at exec, the marks `cel gc` proves agents by -
 carries `CEL_ROLE` must agree on `CEL_ROLE`, `CEL_PRODUCT`, `CEL_INBOX_ME`,
 `CEL_INBOX_WS` and the `CEL_TEAM*` variables, so a shell re-dressed with
 `export` or a variable-held name is refused, and so is a role with no launch
 above it (detached by `setsid` or a double fork). A process that execs a
 fresh environment carrying `CEL_ROLE` is its own nearest launch; that
-spelling is the guard's to refuse.
+spelling is the guard's to refuse. `cel forge`'s writes run the same check.
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
@@ -350,7 +350,10 @@ orchestrator) alone, refused to core, root, members and reviewers.
 `cel forge` itself decides who is asking (`_forge_cli_authorise`), and only
 positively: `CEL_ROLE` solo or orchestrator AND a product - `CEL_PRODUCT`
 and/or its `<product>-orch` mailbox, agreeing when both are set - that owns
-the repo; anything missing or contradictory is refused. There is NO owner
+the repo, and that identity must be its launch's (`cel_launch_identity`,
+lib/identity.sh - the check `cel team` makes), so an agent that exports
+another product's `CEL_PRODUCT` is refused; anything missing or
+contradictory is refused. There is NO owner
 path: the absence of an agent's marks proves nothing (an agent can shed them
 with `env -u`, `setsid` or a fresh environment), so a process with no agent
 identity is refused every write and told to use the forge's web UI (Forgejo

@@ -305,8 +305,8 @@ _GUARD_FORGE_LIB_DENY='deny lib/forge.sh is cel'"'"'s own code - an agent does n
 # CEL_GUARD_ALLOW_ONCE, the human's one-off approval, says nothing about who
 # is asking and is not counted. Shedding variables (unset, env -u, env -i,
 # setsid) is not refused here: cel forge and cel team act only for a
-# positively identified agent, and cel team also checks the identity against
-# its launch's environ (_team_launch_identity).
+# positively identified agent, and both check the identity against its
+# launch's environ (lib/identity.sh cel_launch_identity).
 _guard_cel_env_tamper() { # <command> -> 0 when it does
   local s="${1//CEL_GUARD_ALLOW_ONCE=/}" re='(^|[^A-Za-z0-9_.-])cel([[:space:]]|$)'
   [[ "$s" =~ $re ]] || return 1

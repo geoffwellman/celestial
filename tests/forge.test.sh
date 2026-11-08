@@ -585,6 +585,40 @@ test_forge_writes_refuse_a_process_with_no_agent_identity() {
   rm -rf "$T"
 }
 
+# AN AGENT WRITES AS ITS LAUNCH (lib/identity.sh). A product agent that
+# re-dresses its shell - `export CEL_PRODUCT=other` through any indirection -
+# keeps its launch's environ, fixed at exec; the nearest process above cel
+# carrying CEL_ROLE must agree, so the forged product is refused before any
+# write and the agent's own product still works. The suite's /proc is
+# CEL_PROC_DIR: here, the caller is $PPID, its runtime 4242.
+test_forge_writes_act_only_as_the_launch_environ_says() {
+  _fj_ws $'products:\n  - name: shop\n    repos: [web]\n  - name: tools\n    repos: [widget]'
+  local P="$T/proc" out
+  mkdir -p "$P/$PPID" "$P/4242"
+  printf '%s\0' CEL_ROLE=solo CEL_PRODUCT=shop CEL_INBOX_ME=shop-orch > "$P/4242/environ"
+  printf '4242 (omp) S 1 1 1' > "$P/4242/stat"
+  printf '%s\0' HOME=/h > "$P/$PPID/environ"
+  printf '%s (bash) S 4242 1 1' "$PPID" > "$P/$PPID/stat"
+  # shop's agent exports tools as its product (and mailbox, so they agree)
+  out="$(cd "$T" && X=CEL_PRODUCT; declare -x "$X=tools"; CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 2>&1)" \
+    && { echo "a forged product closed another product's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel forge pr close: this process says CEL_PRODUCT=tools but its launch (pid 4242) says CEL_PRODUCT=shop" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  # the agent's real product: tools' agent, launched as tools, closes its own PR
+  printf '%s\0' CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch > "$P/4242/environ"
+  ( cd "$T" && CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 ) >/dev/null \
+    || { echo "its own launch was refused"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "PATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
+  # detached: a role with no launch above it changes nothing
+  : > "$FJ_LOG"
+  printf 'HOME=/h\0' > "$P/4242/environ"
+  out="$(cd "$T" && CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch cmd_forge run rerun widget 15 2>&1)" \
+    && { echo "a detached agent reran a job"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no agent launch above it" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # A product's agent changes only its own product's repos, however the
 # workspace account authored the PR.
 test_forge_agent_changes_only_its_own_products_repos() {
