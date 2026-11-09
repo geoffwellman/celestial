@@ -472,6 +472,67 @@ test_steward_launch_card_does_not_hide_another_stale_agent() {
   rm -rf "$T"
 }
 
+# CLEARED ONCE PER CHANGE. A mailbox from before roll-up holds several open
+# launch items under the one key. Taking down one per tick said `cleared:`
+# every tick while the card stayed open; every one goes in one pass, under one
+# line. A difference that comes back after that is news, and clearing it again
+# is one more line.
+_legacy_stale_item() { # <id>
+  printf '{"id":"%s","ts":"2026-10-01T00:00:00+00:00","to":"root","from":"steward","kind":"status","message":"steward: after the update to 0000000, bundle-orch runs an older launch line (model differs)","fp":"orch-stale"}\n' \
+    "$1" >> "$CEL_INBOX_DIR/alpha.jsonl"
+}
+_stale_cleared_count() {
+  jq -s '[.[] | select(.from == "steward" and .kind == "status"
+          and (.message | startswith("cleared: stale launch differences in alpha")))] | length' \
+    "$CEL_INBOX_DIR/alpha.jsonl"
+}
+test_steward_launch_cleared_is_said_once_while_the_card_stays_open() {
+  _stale_launch_fixture
+  _legacy_stale_item 1690000000000000001
+  _legacy_stale_item 1690000000000000002
+  _legacy_stale_item 1690000000000000003
+  _owner_card alpha 1700000000000000001 "Keep bundle-orch on its chosen model" "bundle-orch model choice"
+  local j
+  for j in 1 2 3 4 5; do _steward_stale_orchestrators >/dev/null; done
+  assert_eq "$(_stale_cleared_count)" 1
+  assert_eq "$(_inbox_open_fp alpha orch-stale steward root)" ""
+  # a new difference, from an agent no card covers, is said again...
+  SECOND_STALE_AGENT=1 _steward_stale_orchestrators >/dev/null
+  assert_contains "$(_stale_launch_message)" "lone-orch runs an older launch line"
+  # ...and when only the covered one is left, cleared once more - once
+  for j in 1 2 3; do _steward_stale_orchestrators >/dev/null; done
+  assert_eq "$(_stale_cleared_count)" 2
+  assert_eq "$(_inbox_open_fp alpha orch-stale steward root)" ""
+  rm -rf "$T"
+}
+
+# Every steward clear works the same way: an open item under the key, one
+# word; every duplicate goes with it, and nothing is said once nothing is open.
+test_steward_clear_takes_every_open_item_down_with_one_line() {
+  _stale_launch_fixture
+  _legacy_stale_item 1690000000000000001
+  _legacy_stale_item 1690000000000000002
+  local j
+  for j in 1 2 3; do _steward_clear alpha orch-stale "stale launch differences in alpha are gone"; done
+  assert_eq "$(_stale_cleared_count)" 1
+  assert_eq "$(_inbox_open_fp alpha orch-stale steward root)" ""
+  rm -rf "$T"
+}
+
+# A resolve that fails leaves the item open: saying `cleared:` would be false.
+test_steward_clear_says_nothing_when_the_item_could_not_be_resolved() {
+  _stale_launch_fixture
+  _legacy_stale_item 1690000000000000001
+  local real; real="$(declare -f cmd_inbox)"
+  eval "${real/cmd_inbox/_real_cmd_inbox}"
+  cmd_inbox() { [ "$1" != resolve ] || return 1; _real_cmd_inbox "$@"; }
+  _steward_clear alpha orch-stale "stale launch differences in alpha are gone"
+  eval "$real"
+  assert_eq "$(_stale_cleared_count)" 0
+  assert_eq "$(_inbox_open_fp alpha orch-stale steward root)" 1690000000000000001
+  rm -rf "$T"
+}
+
 # --- routing ready tickets -------------------------------------------------
 # A ready ticket's prefix names a repo, the repo names a product, and that
 # product's orchestrator takes it directly; root is only the fallback.
@@ -1123,8 +1184,12 @@ test_steward_reports_a_suite_lock_held_past_the_warning_and_clears_it() {
 
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   _steward_suite_lock >/dev/null 2>&1
+  _steward_suite_lock >/dev/null 2>&1
   mail="$(cmd_inbox read --for root --workspace alpha --all)"
   assert_contains "$mail" "cleared: the suite lock is free again"
+  # one word for one change, however many ticks see it free
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'cleared: ' || true)" "1"
+  assert_eq "$(_inbox_open_fp alpha suite-lock steward root)" ""
   rm -rf "$T"
 }
 
@@ -2067,6 +2132,24 @@ test_steward_says_a_new_blocked_rex_version_again() {
   # one open item, about the new version: the old version's is taken down
   assert_eq "$(cmd_inbox open --for root --workspace alpha --json | jq -s 'length')" 1
   assert_contains "$(_rexup_open)" "rex 0.0.3-gccc is available"
+  rm -rf "$T"
+}
+
+# A mailbox from before roll-up can hold more than one open blocked item: a
+# new version takes every one of them down, so its word opens a fresh item
+# instead of landing as an update on an older version's.
+test_steward_new_blocked_rex_version_replaces_every_open_item() {
+  _rexup_fixture
+  local id
+  for id in 1690000000000000001 1690000000000000002; do
+    printf '{"id":"%s","ts":"2026-10-01T00:00:00+00:00","to":"root","from":"steward","kind":"blocked","message":"steward: rex 0.0.1-gaaa is available, but the managed upgrade will not restart the Rex server: old","fp":"rex-upgrade-blocked"}\n' \
+      "$id" >> "$CEL_INBOX_DIR/alpha.jsonl"
+  done
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  assert_eq "$(cmd_inbox open --for root --workspace alpha --json | jq -s 'length')" 1
+  id="$(_inbox_open_fp alpha rex-upgrade-blocked steward root)"
+  assert_contains "$(jq -rs --arg i "$id" '.[] | select(.id == $i) | .message' "$CEL_INBOX_DIR/alpha.jsonl")" \
+    "rex 0.0.2-gbbb is available"
   rm -rf "$T"
 }
 
