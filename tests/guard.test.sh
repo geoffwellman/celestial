@@ -1294,17 +1294,26 @@ _RV_ALLOW=( 'git fetch origin main' 'git fetch origin' 'git diff origin/main...H
   'cel preview widget#3 --qa browser --stop' 'cel preview --list' 'cel serve list' 'cel decide list' 'cel learn list'
   'gh pr comment 3 --body x' 'gh pr review 3 --comment -b x' 'gh pr view 3' 'gh pr diff 3' 'gh pr checks 3' 'gh api repos/o/r/pulls/3'
   'herdr agent list' 'npx playwright screenshot http://localhost:4600 /tmp/x.png' 'bun test' 'ls -la' )
-test_a_reviewer_judges_and_changes_nothing() {
-  local c role
-  for role in other root orchestrator solo core member; do
-    for c in "${_RV_DENY[@]}"; do
-      if CEL_ROLE=reviewer guard_override_honoured "$role" "$c"; then echo "a reviewer's one-off override honoured: $c"; return 1; fi
-      _deny "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" "reviewer standing as $role: $c" || return 1
-    done
-    for c in "${_RV_ALLOW[@]}"; do
-      assert_eq "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" allow || { echo "reviewer standing as $role refused: $c"; return 1; }
-    done
+# The same cases for every role a reviewer may stand as, one test per role
+# (each alone stays well inside the per-test limit on a loaded box).
+_rv_judges_as() { # <role>
+  local c role="$1"
+  for c in "${_RV_DENY[@]}"; do
+    if CEL_ROLE=reviewer guard_override_honoured "$role" "$c"; then echo "a reviewer's one-off override honoured: $c"; return 1; fi
+    _deny "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" "reviewer standing as $role: $c" || return 1
   done
+  for c in "${_RV_ALLOW[@]}"; do
+    assert_eq "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" allow || { echo "reviewer standing as $role refused: $c"; return 1; }
+  done
+}
+test_a_reviewer_judges_and_changes_nothing_as_other() { _rv_judges_as other; }
+test_a_reviewer_judges_and_changes_nothing_as_root() { _rv_judges_as root; }
+test_a_reviewer_judges_and_changes_nothing_as_orchestrator() { _rv_judges_as orchestrator; }
+test_a_reviewer_judges_and_changes_nothing_as_solo() { _rv_judges_as solo; }
+test_a_reviewer_judges_and_changes_nothing_as_core() { _rv_judges_as core; }
+test_a_reviewer_judges_and_changes_nothing_as_member() { _rv_judges_as member; }
+test_a_reviewer_judges_and_changes_nothing() {
+  local c
   # a reviewer under a workspace is still a reviewer, not that workspace's root
   local T; T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"; mkdir -p "$T/repos/widget"
   for c in 'git push origin HEAD:main' 'cel solo land widget#3'; do
