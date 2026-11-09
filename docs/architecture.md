@@ -654,6 +654,10 @@ git and a pager through `PATH`, and they inherit `GH_TOKEN`, so a git
 planted first on the caller's `PATH` is never handed the token.
 `tools/reviewers/retire.mjs` runs the gh, and the tool path, the bash side
 resolved and passes as arguments; it reads neither from its environment.
+That is for a GitHub repo: the bash side also passes the repo's forge and
+owner/name (`forge_repo`), and a Forgejo repo's PR state is read with `cel
+forge pr view` as the workspace - never from GitHub, whose mirror numbers
+other PRs the same - and must name exactly that owner/name and PR.
 Other caller variables (`GH_CONFIG_DIR`, `GH_EDITOR`, `BROWSER`, ...) still
 reach gh - the environment is not scrubbed. The system directories are where
 root installs the distribution's packages and are normally root-owned, but
