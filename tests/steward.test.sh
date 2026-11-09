@@ -950,10 +950,14 @@ _mem_steward_fixture() { # <total-kb> <available-kb>
 # blocked item, naming the trees big enough to be worth doing something about.
 test_steward_raises_one_blocker_when_the_box_runs_out_of_memory() {
   _mem_steward_fixture 25165824 1258291
-  export CEL_SERVE_STATE="$T/serve" CEL_SERVE_PROC_DATA=''
-  mkdir -p "$CEL_SERVE_STATE"
+  export CEL_SERVE_STATE="$T/serve" CEL_SERVE_PROC_DATA='' CEL_SERVE_SYSTEMCTL="$T/serve-systemctl" CEL_SERVE_CGROUP_ROOT="$T/cgroup"
+  mkdir -p "$CEL_SERVE_STATE" "$T/cgroup/app/cel-serve-preview-demo.service"
   printf '%s\n' '{"name":"preview-demo","unit":"cel-serve-preview-demo","owner":"bundle-orch","workspace":"alpha","started_at":100,"ttl_seconds":3600,"last_request_at":100,"port":8080}' > "$CEL_SERVE_STATE/preview-demo.json"
-  _serve_cgroup_memory() { printf 880; }
+  printf '%s\n' "$((880 * 1048576))" > "$T/cgroup/app/cel-serve-preview-demo.service/memory.current"
+  # a fixture user manager: each unit's cgroup under /app, and no running
+  # unit of its own for the unledgered pass to find
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in *.service) printf "Id=%%s\\nControlGroup=/app/%%s\\n\\n" "$a" "$a";; esac; done\n' > "$CEL_SERVE_SYSTEMCTL"
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
   local i
   for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_memory >/dev/null 2>&1; done
   local open; open="$(cmd_inbox open --for root --workspace alpha)"

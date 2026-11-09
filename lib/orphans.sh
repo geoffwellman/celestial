@@ -200,12 +200,14 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
   local services; services=$'\n'"$(_orphans_service_tree "$pidmap")"$'\n'
 
   # REGISTERED PERMANENT SERVERS ARE OWNED (`cel serve adopt --permanent`):
-  # their pid, and anything inside their unit, whatever its parent or cwd.
+  # their pid, and anything inside their unit, whatever its parent or cwd. A
+  # pid is its server only while its start time is the recorded one: the same
+  # number reused (or a record with no start time) shields nothing.
   local -A perm_pids=()
   local -a perm_units=()
-  local pk pv
-  while read -r pk pv; do
-    case "$pk" in pid) perm_pids[$pv]=1 ;; unit) [ -n "$pv" ] && perm_units+=("$pv") ;; esac
+  local pk pv ps
+  while read -r pk pv ps; do
+    case "$pk" in pid) [ -z "$ps" ] || perm_pids[$pv]="$ps" ;; unit) [ -n "$pv" ] && perm_units+=("$pv") ;; esac
   done < <(serve_permanent_ids)
 
   # The candidates: ours, reparented to init, not this shell, not a service,
@@ -218,7 +220,7 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
     [ "${st_ppid[$pid]}" = 1 ] || continue
     [ "$pid" = "$$" ] && continue
     case "$services" in *$'\n'"$pid"$'\n'*) continue ;; esac
-    [ -z "${perm_pids[$pid]:-}" ] || continue
+    if [ -n "${perm_pids[$pid]:-}" ] && [ "$(_serve_pid_start_in "$proc" "$pid")" = "${perm_pids[$pid]}" ]; then continue; fi
     if [ "${#perm_units[@]}" -gt 0 ]; then
       local cgl="" cg=""
       { while IFS= read -r cgl; do case "$cgl" in 0::*) cg="${cgl#0::}"; break ;; esac; done < "$proc/$pid/cgroup"; } 2>/dev/null

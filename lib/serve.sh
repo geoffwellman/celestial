@@ -25,8 +25,25 @@ _CEL_SERVE=1
 _serve_state() { printf '%s' "${CEL_SERVE_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/servers}"; }
 _serve_systemctl() { "${CEL_SERVE_SYSTEMCTL:-systemctl}" --user "$@"; }
 _serve_systemd_run() { "${CEL_SERVE_SYSTEMD_RUN:-systemd-run}" --user "$@"; }
-_serve_now() { printf '%s' "${CEL_SERVE_NOW:-$(date +%s)}"; }
-_serve_pid_start() { cut -d ')' -f2 "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
+_serve_now() { if [ -n "${CEL_SERVE_NOW:-}" ]; then printf '%s' "$CEL_SERVE_NOW"; else printf '%(%s)T' -1; fi; }
+# A process's start time (stat field 22), read with builtins: it is what tells
+# a pid from the same number reused, and `cel fleet` pays for every process.
+_serve_pid_start_in() { # <proc-root> <pid>
+  local line="" rest
+  local -a f=()
+  { IFS= read -r line < "$1/$2/stat"; } 2>/dev/null || [ -n "$line" ] || return 0
+  rest="${line#*)}"; rest="${rest%%)*}"
+  read -ra f <<<"$rest"
+  printf '%s' "${f[19]:-}"
+}
+_serve_pid_start() { _serve_pid_start_in /proc "$1"; }
+_serve_rss_mb() { # <pid> -> VmRSS in MB, read with builtins
+  local k v rest
+  { while read -r k v rest; do
+      [ "$k" = VmRSS: ] && { printf '%s' "$((v / 1024))"; return 0; }
+    done < "/proc/$1/status"; } 2>/dev/null
+  printf 0
+}
 _serve_mark_request() { # <name>
   local f now
   f="$(_serve_file "$1")"; [ -f "$f" ] || return 1
@@ -90,32 +107,58 @@ _serve_cgroup_memory() { # <unit> -> memory current MB
   awk '{print int($1/1048576)}' "${CEL_SERVE_CGROUP_ROOT:-/sys/fs/cgroup}${path}/memory.current" 2>/dev/null || printf 0
 }
 
+# EVERY RECORD, AT A CONSTANT COST: `cel fleet` and the dashboard read this on
+# their budgeted paths. One jq reads all the records, one batched `systemctl
+# show` names every unit's cgroup, memory and pid identity are read with
+# builtins, and one jq assembles the answer. No record, no process at all. A
+# record that does not parse is skipped.
 serve_list_json() {
-  local f row unit age mem now kind pid pid_start initial_age
-  # No record, no process: `cel fleet` reads this on its budgeted path.
-  compgen -G "$(_serve_state)/*.json" >/dev/null || { printf '[]\n'; return 0; }
+  local d now records='' line kind unit pid start i=0 mems='' path mb out id cur='' f
+  local -a rows=() ids=()
+  local -A cg=()
+  d="$(_serve_state)"
+  compgen -G "$d/*.json" >/dev/null || { printf '[]\n'; return 0; }
   now="$(_serve_now)"
-  for f in "$(_serve_state)"/*.json; do
-    [ -f "$f" ] || continue
-    row="$(jq -c . "$f" 2>/dev/null)" || continue
-    unit="$(jq -r '.unit // ""' <<<"$row")"
-    initial_age="$(jq -r '.initial_age_seconds // 0' <<<"$row")"
-    [[ "$initial_age" =~ ^[0-9]+$ ]] || initial_age=0
-    age=$((now - $(jq -r '.started_at' <<<"$row") + initial_age))
-    kind="$(jq -r '.kind // "unit"' <<<"$row")"
+  # the records as one array, then one line per record (fields split by
+  # US: a tab is whitespace to `read`, and empty fields would collapse)
+  local prog='. as $r | ($r | tojson), ($r[] | [(.kind // "unit"), (.unit // ""), ((.pid // 0) | tostring), (.pid_start // "")] | join("\u001f"))'
+  out="$(jq -rn "[inputs] | $prog" "$d"/*.json 2>/dev/null)" \
+    || out="$(for f in "$d"/*.json; do jq -c . "$f" 2>/dev/null; done | jq -rs "$prog")"
+  { IFS= read -r records; while IFS= read -r line; do rows+=("$line"); done; } <<<"$out"
+  [ -n "$records" ] || { printf '[]\n'; return 0; }
+  for line in "${rows[@]}"; do
+    IFS=$'\x1f' read -r kind unit pid start <<<"$line"
+    [ "$kind" = pid ] || [ -z "$unit" ] || ids+=("${unit%.service}.service")
+  done
+  if [ "${#ids[@]}" -gt 0 ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        Id=*) cur="${line#Id=}" ;;
+        ControlGroup=*) [ -z "$cur" ] || cg[$cur]="${line#ControlGroup=}" ;;
+      esac
+    done < <(_serve_systemctl show -p Id -p ControlGroup "${ids[@]}" 2>/dev/null)
+  fi
+  for line in "${rows[@]}"; do
+    IFS=$'\x1f' read -r kind unit pid start <<<"$line"
+    mb=0
     if [ "$kind" = pid ]; then
-      pid="$(jq -r '.pid // 0' <<<"$row")"
-      pid_start="$(jq -r '.pid_start // ""' <<<"$row")"
-      if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$pid_start" ] && [ "$(_serve_pid_start "$pid")" = "$pid_start" ]; then
-        mem="$(awk '/^VmRSS:/{print int($2/1024)}' "/proc/$pid/status" 2>/dev/null || printf 0)"
-      else
-        mem=0
+      if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$start" ] && [ "$(_serve_pid_start "$pid")" = "$start" ]; then mb="$(_serve_rss_mb "$pid")"; fi
+    elif [ -n "$unit" ]; then
+      id="${unit%.service}.service"; path="${cg[$id]:-}"
+      if [ -n "$path" ]; then
+        mb=""; { read -r mb < "${CEL_SERVE_CGROUP_ROOT:-/sys/fs/cgroup}$path/memory.current"; } 2>/dev/null || true
+        if [[ "$mb" =~ ^[0-9]+$ ]]; then mb=$((mb / 1048576)); else mb=0; fi
       fi
-    else
-      mem="$(_serve_cgroup_memory "$unit")"
     fi
-    jq -c --argjson age "$age" --argjson memory "$mem" '. + {age_seconds:$age,memory_mb:$memory,managed:true,permanent:(.permanent == true)}' <<<"$row"
-  done | jq -s 'sort_by(-.memory_mb)'
+    mems="$mems$i"$'\t'"$mb"$'\n'
+    i=$((i + 1))
+  done
+  jq -n --argjson r "$records" --arg mems "$mems" --argjson now "$now" '
+    ($mems | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: (.[1] | tonumber)}) | from_entries) as $m
+    | [$r | to_entries[] | .value + {
+        age_seconds: ($now - (.value.started_at // $now) + ((.value.initial_age_seconds // 0) | if type == "number" then . else 0 end)),
+        memory_mb: ($m[.key | tostring] // 0), managed: true, permanent: (.value.permanent == true)}]
+    | sort_by(-.memory_mb)'
 }
 
 serve_unit_stop() { # <unit> -- require exact durable ledger ownership
@@ -155,16 +198,23 @@ _serve_unit_state() { # <unit> -> present | gone | unknown
     *) printf unknown ;;
   esac
 }
-_serve_unit_ledgered() { # <unit> -> 0 when a record already names it
+# Who a server is registered to: the owner of the record naming this unit (by
+# its unit, whatever the record is called) or this pid. Status 1: nobody's.
+_serve_registered_owner() { # <unit|pid> -> owner
   local f
+  if [[ "$1" =~ ^[0-9]+$ ]]; then
+    f="$(_serve_file "pid-$1")"
+    [ -f "$f" ] || return 1
+    jq -r '.owner // ""' "$f" 2>/dev/null; return 0
+  fi
   for f in "$(_serve_state)"/*.json; do
     [ -f "$f" ] || continue
-    [ "$(jq -r '.unit // "" | sub("\\.service$"; "")' "$f" 2>/dev/null)" = "${1%.service}" ] && return 0
+    jq -er --arg u "${1%.service}" 'select((.kind // "unit") != "pid" and ((.unit // "") | sub("\\.service$"; "")) == $u) | .owner // ""' "$f" 2>/dev/null && return 0
   done
   return 1
 }
 
-# Every registered permanent server, as `pid <n>` or `unit <name>` lines, for
+# Every registered permanent server, as `pid <n> <start>` or `unit <name>` lines, for
 # the sweeps that must never touch one (lib/orphans.sh). Read with builtins
 # first: no record that mentions `permanent`, no process.
 serve_permanent_ids() {
@@ -173,27 +223,32 @@ serve_permanent_ids() {
     [ -f "$f" ] || continue
     body=""; IFS= read -r -d '' body < "$f" 2>/dev/null || true
     [[ "$body" == *'"permanent"'* ]] || continue
-    jq -r 'select(.permanent == true) | if (.kind // "unit") == "pid" then "pid \(.pid)" else "unit \(.unit)" end' "$f" 2>/dev/null || true
+    jq -r 'select(.permanent == true) | if (.kind // "unit") == "pid" then "pid \(.pid) \(.pid_start // "")" else "unit \(.unit)" end' "$f" 2>/dev/null || true
   done
 }
 
-# A PERMANENT SERVER IS ITS OWNER'S, OR A PERSON'S, TO STOP. A person's own
-# shell (no agent launch above it, lib/identity.sh cel_agent_role) may; an
-# agent may only as the alias its launch fixed (CEL_INBOX_ME, checked against
-# the launch's environ), and only when that is the record's owner. An agent
-# that shed CEL_ROLE is still an agent, and proves no alias - refused. The
-# sweeps never come here for a permanent row: they skip it themselves.
-_serve_stop_authorised() { # <row>
-  [ "$(jq -r '.permanent // false' <<<"$1")" = true ] || return 0
-  local name owner role
-  name="$(jq -r '.name // ""' <<<"$1")"; owner="$(jq -r '.owner // ""' <<<"$1")"
+# A PERMANENT SERVER IS ITS OWNER'S, OR A PERSON'S, to register and to stop: a
+# registration shields it from every sweep, and only its owner or a person
+# can undo it. A person's own shell (no agent launch above it, lib/identity.sh
+# cel_agent_role) may act for any owner; an agent only as the alias its launch
+# fixed (CEL_INBOX_ME, checked against the launch's environ), and only when
+# that alias is the owner. An agent that shed CEL_ROLE is still an agent, and
+# proves no alias - refused. The sweeps never come here: they skip it.
+_serve_owner_or_person() { # <verb> <owner> <what> -> dies unless the caller may
+  local verb="$1" owner="$2" what="$3" role
   role="$(cel_agent_role)"
   [ -n "$role" ] || return 0
   [ -n "${CEL_ROLE:-}" ] && [ -n "${CEL_INBOX_ME:-}" ] \
-    || die "cel serve stop: $name is a permanent server of $owner - only its owner or a person stops it, and this agent ($role) does not say which alias it is; nothing stopped"
-  cel_launch_identity "cel serve stop"
+    || die "cel serve $verb: $what - an agent acts only for itself, and this agent ($role) does not say which alias it is; nothing changed"
+  cel_launch_identity "cel serve $verb"
   [ "$(cel_alias_norm "$CEL_INBOX_ME")" = "$(cel_alias_norm "$owner")" ] \
-    || die "cel serve stop: $name is a permanent server of $owner - only its owner or a person stops it, not $CEL_INBOX_ME; nothing stopped"
+    || die "cel serve $verb: $what - an agent acts only for itself, not as $CEL_INBOX_ME for $owner; nothing changed"
+}
+_serve_stop_authorised() { # <row>
+  [ "$(jq -r '.permanent // false' <<<"$1")" = true ] || return 0
+  local name owner
+  name="$(jq -r '.name // ""' <<<"$1")"; owner="$(jq -r '.owner // ""' <<<"$1")"
+  _serve_owner_or_person stop "$owner" "$name is a permanent server of $owner, and only its owner or a person stops it"
 }
 
 serve_stop() { # <name|unit|pid>
@@ -418,10 +473,14 @@ serve_adopt_json() {
 # EXPLICIT ADOPTION ONLY. A TTL adoption takes a row `cel serve adopt` lists:
 # the classifier above is what keeps agents and standing services off a clock
 # that stops them. A PERMANENT one (ttl `permanent`) is never stopped by
-# anything but its owner or a person, so it may also name any running user
-# unit outright (not Celestial's own `cel-*` services); and a pid inside a user
-# service registers that UNIT, so the unit recreated under its name - a new
-# pid - is still the registered server. An empty port takes the one seen.
+# anything but its owner or a person, so only a person or the owner itself
+# registers it (_serve_owner_or_person), and a server already registered is
+# never re-registered to anyone else. It may name any running user unit
+# outright (not Celestial's own `cel-*` services), wherever it runs - the
+# record keeps its WorkingDirectory and ExecStart, and `cel serve list` shows
+# them, so a person can see what was shielded. A pid inside a user service
+# registers that UNIT, so the unit recreated under its name - a new pid - is
+# still the registered server. An empty port takes the one seen.
 serve_adopt() { # <unit|pid> <owner> <workspace> <ttl-seconds|permanent> <port|""> [why]
   local target="$1" owner="$2" ws="$3" ttl="$4" port="$5" why="${6:-}" rows row='' id unit='' pid='' now f tmp initial_age permanent=false
   if [[ "$target" =~ ^pid:([1-9][0-9]*)$ ]]; then target="${BASH_REMATCH[1]}"; fi
@@ -432,15 +491,23 @@ serve_adopt() { # <unit|pid> <owner> <workspace> <ttl-seconds|permanent> <port|"
   [[ "$owner" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die 'cel serve adopt: invalid owner'
   [[ "$ws" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die 'cel serve adopt: invalid workspace'
   [[ "$target" =~ ^[0-9]+$ ]] || target="${target%.service}"
-  if [ "$permanent" = true ] && [[ "$target" =~ ^[0-9]+$ ]] && unit="$(_serve_pid_unit "$target")"; then target="$unit"; fi
+  if [ "$permanent" = true ]; then
+    _serve_owner_or_person adopt "$owner" "registering $target as a permanent server of $owner"
+    if [[ "$target" =~ ^[0-9]+$ ]] && unit="$(_serve_pid_unit "$target")"; then target="$unit"; fi
+  fi
   unit=''
+  local prev
+  if prev="$(_serve_registered_owner "$target")"; then
+    [ "$(cel_alias_norm "$prev")" = "$(cel_alias_norm "$owner")" ] \
+      || die "cel serve adopt: $target is already registered to $prev - it is never re-registered to anyone else; $prev or a person stops it with cel serve stop"
+    die 'cel serve adopt: already ledgered'
+  fi
   rows="$(serve_adopt_json)"
   row="$(printf '%s' "$rows" | jq -ce --arg target "$target" '[.[] | select((.unit // "") == $target or ((.pid // 0) | tostring) == $target)] | .[0] // empty')" || row=''
   if [ -z "$row" ]; then
     [ "$permanent" = true ] && ! [[ "$target" =~ ^[0-9]+$ ]] && _serve_name_ok "$target" \
       || die 'cel serve adopt: target is not a running unledgered server'
     case "$target" in cel-serve-*) ;; cel-*) die "cel serve adopt: $target is one of Celestial's own services, not a server to register" ;; esac
-    ! _serve_unit_ledgered "$target" || die 'cel serve adopt: already ledgered'
     [ "$(_serve_unit_state "$target")" = present ] || die "cel serve adopt: $target is not a running user unit"
     row="$(_serve_unit_row "$target")"
   fi
@@ -455,12 +522,15 @@ serve_adopt() { # <unit|pid> <owner> <workspace> <ttl-seconds|permanent> <port|"
   initial_age="$(jq -r '.age_seconds // 0' <<<"$row")"; [[ "$initial_age" =~ ^[0-9]+$ ]] || initial_age=0
   f="$(_serve_file "$id")"; [ ! -e "$f" ] || die 'cel serve adopt: already ledgered'
   now="$(_serve_now)"; mkdir -p "$(_serve_state)"; chmod 700 "$(_serve_state)"; tmp="$(mktemp "$(_serve_state)/.adopt.XXXXXX")"
+  local wd=''
+  [ -z "$unit" ] || wd="$(_serve_systemctl show "$unit.service" -p WorkingDirectory --value 2>/dev/null || true)"
+  [ -n "$wd" ] || wd="$(jq -r '.worktree // ""' <<<"$row")"
   jq -n --arg name "$id" --arg unit "$unit" --arg owner "$owner" --arg workspace "$ws" \
-    --arg worktree "$(jq -r '.worktree // ""' <<<"$row")" --arg command "$(jq -r '.command // ""' <<<"$row")" \
+    --arg worktree "$(jq -r '.worktree // ""' <<<"$row")" --arg command "$(jq -r '.command // ""' <<<"$row")" --arg wd "$wd" \
     --argjson pid "${pid:-0}" --argjson started "$now" --argjson ttl "$ttl" --argjson port "$port" --argjson initial_age "$initial_age" \
     --arg pid_start "$(jq -r '.pid_start // ""' <<<"$row")" --argjson permanent "$permanent" --arg why "$why" \
     --arg kind "$([ -n "$pid" ] && printf pid || printf unit)" \
-    '{name:$name,unit:$unit,kind:$kind,pid:(if $kind == "pid" then $pid else null end),pid_start:$pid_start,owner:$owner,workspace:$workspace,worktree:$worktree,command:$command,started_at:$started,initial_age_seconds:$initial_age,ttl_seconds:$ttl,permanent:$permanent,port:$port,last_request_at:$started}
+    '{name:$name,unit:$unit,kind:$kind,pid:(if $kind == "pid" then $pid else null end),pid_start:$pid_start,owner:$owner,workspace:$workspace,worktree:$worktree,working_directory:$wd,command:$command,started_at:$started,initial_age_seconds:$initial_age,ttl_seconds:$ttl,permanent:$permanent,port:$port,last_request_at:$started}
      + (if $why == "" then {} else {why:$why} end)' > "$tmp"
   chmod 600 "$tmp"; mv "$tmp" "$f"
 }
@@ -637,7 +707,13 @@ cmd_serve() {
     list)
       if [ "${1:-}" = --json ]; then serve_list_json; else
         printf '%-24s %-18s %-12s %-7s %-10s %-14s %-10s %s\n' NAME OWNER WORKSPACE PORT MEMORY AGE TTL LAST-REQUEST
-        serve_list_json | jq -r '.[] | [.name,.owner,.workspace,(.port|tostring),((.memory_mb|tostring)+"M"),((.age_seconds|tostring)+"s"),(if .permanent then "permanent" else ((.ttl_seconds // 0) / 3600 | floor | tostring) + "h" end),((now - (.last_request_at // .started_at))|floor|tostring + "s ago")] | @tsv' | while IFS=$'\t' read -r name owner ws port mem age ttl last; do printf '%-24s %-18s %-12s %-7s %-10s %-14s %-10s %s\n' "$name" "$owner" "$ws" "$port" "$mem" "$age" "$ttl" "$last"; done
+        # a permanent server also says where it runs and what: what a
+        # registration shields from every sweep is in view of a person
+        serve_list_json | jq -r '.[] | [.name,.owner,.workspace,(.port|tostring),((.memory_mb|tostring)+"M"),((.age_seconds|tostring)+"s"),(if .permanent then "permanent" else ((.ttl_seconds // 0) / 3600 | floor | tostring) + "h" end),((now - (.last_request_at // .started_at))|floor|tostring + "s ago"),(if .permanent then "dir \(.working_directory // .worktree // "?")  runs \(.command // "?")" else "" end)] | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")' \
+          | while IFS=$'\x1f' read -r name owner ws port mem age ttl last detail; do
+            printf '%-24s %-18s %-12s %-7s %-10s %-14s %-10s %s\n' "$name" "$owner" "$ws" "$port" "$mem" "$age" "$ttl" "$last"
+            [ -z "$detail" ] || printf '  %s\n' "$detail"
+          done
       fi;;
     stop) [ $# -eq 1 ] || die 'cel serve stop <name|unit|pid>'; serve_stop "$1";;
     adopt)

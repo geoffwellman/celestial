@@ -316,7 +316,8 @@ test_preview_sweep_never_stops_a_permanent_server() {
   jq -n --arg r "$T/ws/repos/widget" --arg w "$(_pv_wt)" \
     '{name:"preview-widget-pr7",repodir:$r,worktree:$w,head:"x",slug:"acme/widget",pr:7}' > "$CEL_SERVE_STATE/previews/preview-widget-pr7.json"
   echo MERGED > "$T/pr-state"
-  preview_sweep >/dev/null 2>&1 || true   # the refused teardown reports status 1
+  local out; out="$(preview_sweep 2>&1)" || { echo "the sweep failed on a permanent name: $out"; _pv_down; return 1; }
+  [ -z "$out" ] || { echo "the sweep spoke about a permanent server it skips: $out"; _pv_down; return 1; }
   [ -f "$CEL_SERVE_STATE/preview-widget-pr7.json" ] || { echo "the preview sweep dropped a permanent server"; _pv_down; return 1; }
   ! grep -q 'stop' "$T/systemctl-calls" 2>/dev/null || { echo "the preview sweep stopped a permanent server"; _pv_down; return 1; }
   _pv_down

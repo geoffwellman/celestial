@@ -410,7 +410,15 @@ case "$*" in
   *Description*) printf 'shop live server\n' ;;
   *ExecStart*) printf '{ path=/opt/shop/run ; argv[]=/opt/shop/run }\n' ;;
   *MainPID*) if [ "$st" = active ]; then printf '%s\n' "$pid"; else printf '0\n'; fi ;;
+  *"-p Id -p ControlGroup"*)
+    for a in "$@"; do
+      case "$a" in *.service)
+        printf 'Id=%s\n' "$a"
+        if [ "$a" = shop-server.service ] && [ "$st" = active ]; then printf 'ControlGroup=%s\n\n' /user.slice/user-1000.slice/user@1000.service/app.slice/shop-server.service; else printf 'ControlGroup=\n\n'; fi ;;
+      esac
+    done ;;
   *ControlGroup*) [ "$st" != active ] || printf '%s\n' /user.slice/user-1000.slice/user@1000.service/app.slice/shop-server.service ;;
+  *WorkingDirectory*) printf '/srv/shop\n' ;;
 esac
 exit 0
 EOS
@@ -567,5 +575,46 @@ test_serve_adopting_a_units_pid_permanently_registers_the_unit() {
   assert_eq "$(jq -r '[.kind, .unit, .permanent] | @tsv' "$CEL_SERVE_STATE/shop-server.json")" "$(printf 'unit\tshop-server\ttrue')" \
     || { _sp_down; return 1; }
   [ ! -e "$CEL_SERVE_STATE/pid-3900001.json" ] || { echo "registered the pid"; _sp_down; return 1; }
+  _sp_down
+}
+
+# WHO MAY SHIELD A SERVER. A permanent registration is undone only by its
+# owner or a person, so an agent registers only for itself - the alias its
+# launch fixed - never for another owner, nor with its role shed. A person may
+# register one for anyone. A unit already registered is not re-registered to
+# someone else.
+test_serve_permanent_adopt_by_an_agent_is_only_for_itself() {
+  _sp_setup
+  local P="$SP/launch" f="$CEL_SERVE_STATE/shop-server.json" out
+  _sp_launch() { mkdir -p "$P/$PPID"; printf '%s\0' "$@" > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"; }
+  _sp_launch CEL_ROLE=solo CEL_INBOX_ME=tools-orch
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch serve_adopt shop-server shop-orch alpha permanent "" "" 2>&1)" \
+    && { echo "an agent registered a server for another owner"; _sp_down; return 1; }
+  assert_contains "$out" "only for itself" || { _sp_down; return 1; }
+  out="$(CEL_PROC_DIR="$P" CEL_INBOX_ME=tools-orch serve_adopt shop-server tools-orch alpha permanent "" "" 2>&1)" \
+    && { echo "an agent that shed CEL_ROLE registered a server"; _sp_down; return 1; }
+  [ ! -e "$f" ] || { echo "a refused adopt left a record"; _sp_down; return 1; }
+  # for itself, it may
+  ( CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch serve_adopt shop-server tools-orch alpha permanent "" "" ) \
+    || { echo "an agent was refused its own registration"; _sp_down; return 1; }
+  assert_eq "$(jq -r .owner "$f")" tools-orch || { _sp_down; return 1; }
+  # registered to tools-orch, it is not re-registered to anyone else - not even by a person
+  printf 'HOME=/h\0' > "$P/$PPID/environ"
+  out="$(CEL_PROC_DIR="$P" serve_adopt shop-server shop-orch alpha permanent "" "" 2>&1)" \
+    && { echo "re-registered under another owner"; _sp_down; return 1; }
+  assert_contains "$out" "registered to tools-orch" || { _sp_down; return 1; }
+  assert_eq "$(jq -r .owner "$f")" tools-orch || { _sp_down; return 1; }
+  _sp_down
+}
+test_serve_a_person_registers_a_permanent_server_for_anyone_and_sees_what_it_runs() {
+  _sp_setup
+  local P="$SP/launch" f="$CEL_SERVE_STATE/shop-server.json"
+  mkdir -p "$P/$PPID"; printf 'HOME=/h\0' > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"
+  ( CEL_PROC_DIR="$P" serve_adopt shop-server shop-orch alpha permanent 8090 "" ) || { echo "a person was refused"; _sp_down; return 1; }
+  assert_eq "$(jq -r '[.owner, .working_directory, .command] | @tsv' "$f")" \
+    "$(printf 'shop-orch\t/srv/shop\t{ path=/opt/shop/run ; argv[]=/opt/shop/run }')" || { _sp_down; return 1; }
+  local out; out="$(cmd_serve list)"
+  assert_contains "$out" "/srv/shop" || { _sp_down; return 1; }
+  assert_contains "$out" "/opt/shop/run" || { _sp_down; return 1; }
   _sp_down
 }

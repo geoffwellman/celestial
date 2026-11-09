@@ -295,6 +295,9 @@ preview_sweep() {
     # is not recorded yet): left alone for 10 minutes, then treated as dead.
     if ! jq -e '.head' "$f" >/dev/null 2>&1 && [ -n "$(find "$f" -mmin -10 2>/dev/null)" ]; then continue; fi
     if [ ! -f "$(_serve_file "$name")" ]; then _preview_teardown "$name"; continue; fi
+    # a registered permanent server is never this sweep's, and every tick is
+    # not news: skipped without a word (`cel serve list` shows it)
+    [ "$(jq -r '.permanent // false' "$(_serve_file "$name")" 2>/dev/null)" != true ] || continue
     # A QA agent's preview outlives its agent only when a retirement could
     # not stop it: once no live agent bears the name that started it (its
     # server record's owner), it goes. An unreadable roster changes nothing.

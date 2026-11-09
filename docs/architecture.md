@@ -296,23 +296,32 @@ worktree removal, and mails their owner with the recorded restart command.
 A server adopted with `cel serve adopt <unit|pid> --owner <alias> --workspace
 <ws> --permanent [--port N] [--why "..."]` is permanent: an agent's standing
 box service, such as a product's live app in a persistent user unit that its
-own follow-main unit recreates. Its record has `permanent: true` and no TTL.
+own follow-main unit recreates. Its record has `permanent: true`, no TTL, and
+the unit's `WorkingDirectory` (`working_directory`) and `ExecStart`
+(`command`), wherever it runs. Registering it takes the same authority as
+stopping it (`_serve_owner_or_person`): a person (no agent launch above,
+`cel_agent_role`) for any owner, or an agent only for the alias its launch
+fixed (`CEL_INBOX_ME`, checked by `cel_launch_identity`); an agent that shed
+`CEL_ROLE` is refused. A server already registered (by unit, under any record
+name, or by pid) is never re-registered to another owner.
 `serve_sweep` never stops it (no TTL, idle, pressure or worktree reason),
-`_preview_teardown` refuses it (so `preview_sweep` and gc's QA-preview release
-cannot), the orphan reaper (`lib/orphans.sh`, through `serve_permanent_ids`)
-never lists its pid or any process in its unit's cgroup, and the unledgered
-report skips it as it skips every ledgered unit and the pids in its cgroup.
-`serve_stop` ends it only for a person (no agent launch above,
-`cel_agent_role`) or the agent whose launch-verified `CEL_INBOX_ME` is the
-record's owner. A unit is matched by name: a pid adopted permanently inside a
-user service registers that unit, and the unit recreated under its name keeps
-its registration. A unit gone (not loaded, or inactive/failed) for
-`CEL_SERVE_GONE_GRACE_SECONDS` (default 900; the record carries `gone_since`
-meanwhile) or a pid that exited is dropped from the registry with one inbox
-note to its owner and never restarted; an unanswerable user manager changes
-nothing. `cel serve list`, the dashboard's server rows and `cel fleet`
-(`box.servers`, and a `server` line under its workspace) show owner, port,
-memory and `permanent`.
+`preview_sweep` skips it quietly and `_preview_teardown` refuses it (so gc's
+QA-preview release cannot), the orphan reaper (`lib/orphans.sh`, through
+`serve_permanent_ids`) never lists its pid while the pid's start time is the
+recorded one, nor any process in its unit's cgroup, and the unledgered report
+skips it as it skips every ledgered unit and the pids in its cgroup. A unit is
+matched by name: a pid adopted permanently inside a user service registers that
+unit, and the unit recreated under its name keeps its registration. A unit gone
+(not loaded, or inactive/failed) for `CEL_SERVE_GONE_GRACE_SECONDS` (default
+900; the record carries `gone_since` meanwhile) or a pid that exited is dropped
+from the registry with one inbox note to its owner and never restarted; an
+unanswerable user manager changes nothing. `cel serve list`, the dashboard's
+server rows and `cel fleet` (`box.servers`, and a `server` line under its
+workspace) show owner, port, memory and `permanent`; the list and dashboard
+also show its directory and command. `serve_list_json` costs a constant number
+of processes: one jq over every record, one batched `systemctl show -p Id -p
+ControlGroup`, memory and pid start times read with builtins, one jq to
+assemble - none when there are no records.
 
 ## Preservation before cleanup
 

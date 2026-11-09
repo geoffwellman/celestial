@@ -1523,12 +1523,17 @@ cel serve adopt shop-live --owner shop-orch --workspace plane --permanent \
 
 It has no TTL and no idle or pressure limit. No sweep stops it - not the
 steward's TTL/idle sweep, not the preview sweep or gc's QA-preview release, not
-the orphan reaper - and the unledgered report no longer lists it. `cel serve
-list` (TTL column `permanent`), the dashboard's server rows and `cel fleet`
-(`box.servers`, and a `server` line under its workspace) show it with owner,
-port and memory. Only `cel serve stop <name>` by its owner (the agent whose
-launch says it is that alias) or a person ends it. A unit is matched by name,
-so systemd recreating it is the same server; adopting a pid that runs inside a
+the orphan reaper - and the unledgered report no longer lists it. Because a
+registration shields a server from all of that, only a person or the owner
+itself registers one: an agent adopts `--permanent` only with `--owner` set to
+its own alias (the one its launch fixed), and a server already registered is
+never re-registered to another owner. It may run anywhere, inside a workspace
+or not; the record keeps the unit's working directory and command. `cel serve
+list` (TTL column `permanent`, then a line with that directory and command),
+the dashboard's server rows and `cel fleet` (`box.servers`, and a `server`
+line under its workspace) show it with owner, port and memory. Only `cel serve
+stop <name>` by its owner or a person ends it. A unit is matched by name, so
+systemd recreating it is the same server; adopting a pid that runs inside a
 user service registers that unit. A unit that stays gone for 15 minutes, or a
 pid that exits, is dropped from the registry with one note to its owner and is
 never restarted.
