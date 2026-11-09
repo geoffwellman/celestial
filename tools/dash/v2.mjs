@@ -779,7 +779,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const served = await run(CEL(), ['serve', 'list', '--json'], 15000).then((x) => JSON.parse(x || '[]')).catch(() => []);
     const unknown = await run(CEL(), ['serve', 'adopt', '--json'], 15000).then((x) => JSON.parse(x || '[]')).catch(() => []);
     const serverItems = [
-      ...served.map((x) => ({ name: x.name, ws: 'box', port: x.port || null, state: 'up', url: '', kind: 'preview', memory_mb: x.memory_mb, age_seconds: x.age_seconds, owner: x.owner })),
+      ...served.map((x) => ({ name: x.name, ws: 'box', port: x.port || null, state: 'up', url: '', kind: 'preview', memory_mb: x.memory_mb, age_seconds: x.age_seconds, owner: x.owner,
+        // what a permanent registration shields from every sweep, in view
+        permanent: x.permanent === true, ...(x.permanent === true ? { dir: x.working_directory || x.worktree || '', command: x.command || '' } : {}) })),
       ...unknown.map((x) => ({ name: x.unit || `pid:${x.pid}`, ws: 'box', port: x.port || null, state: 'unledgered', url: '', kind: 'unledgered', memory_mb: x.memory_mb, age_seconds: x.age_seconds }))
     ];
     const parts = await Promise.all([dash, pagesRow(), serverItems, ...wss.map(wsRows)]);

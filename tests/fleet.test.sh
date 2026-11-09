@@ -760,3 +760,68 @@ test_fleet_serves_a_pre_cel90_cache_with_its_age_and_cache_secs() {
   unset CEL_CACHE CEL_FLEET_CACHE_SECS CEL_FLEET_REFILL_DELAY
   _fleet_teardown
 }
+
+# A REGISTERED SERVER IS PART OF THE BOX. `cel fleet` carries each one with its
+# owner, port and memory, and says which are permanent - in the document and
+# on its workspace's block.
+_fleet_servers_down() { unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_CGROUP_ROOT; _fleet_teardown; }
+# A user manager answering one batched `show -p Id -p ControlGroup <unit>...`:
+# each unit's cgroup is /app/<unit>; shop-server's holds 117 MB.
+_fleet_serve_stub() {
+  export CEL_SERVE_STATE="$T/serve" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_CGROUP_ROOT="$T/cgroup"
+  mkdir -p "$CEL_SERVE_STATE" "$T/cgroup/app/shop-server.service"
+  printf '%s\n' 123456789 > "$T/cgroup/app/shop-server.service/memory.current"
+  cat > "$CEL_SERVE_SYSTEMCTL" <<'EOS'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in *.service) printf 'Id=%s\nControlGroup=/app/%s\n\n' "$a" "$a" ;; esac; done
+EOS
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+}
+test_fleet_lists_registered_servers_with_owner_port_memory_and_permanence() {
+  _fleet_setup
+  _fleet_serve_stub
+  jq -n '{name:"shop-server",unit:"shop-server",kind:"unit",owner:"shop-orch",workspace:"alpha",port:8090,started_at:100,permanent:true,ttl_seconds:null}' \
+    > "$CEL_SERVE_STATE/shop-server.json"
+  local doc out
+  doc="$(cmd_fleet --json)"
+  assert_eq "$(printf '%s' "$doc" | jq -c '.box.servers')" \
+    '[{"name":"shop-server","owner":"shop-orch","workspace":"alpha","port":8090,"memory_mb":117,"permanent":true}]' \
+    || { _fleet_servers_down; return 1; }
+  out="$(cmd_fleet --workspace alpha)"
+  assert_contains "$out" "server shop-server" || { _fleet_servers_down; return 1; }
+  assert_contains "$out" "permanent" || { _fleet_servers_down; return 1; }
+  case "$(cmd_fleet --workspace beta)" in *shop-server*) echo "beta's block listed alpha's server"; _fleet_servers_down; return 1 ;; esac
+  _fleet_servers_down
+}
+
+# THE SERVERS COST THE READ A CONSTANT, NOT A PRICE PER SERVER: the records
+# are read in one pass and every unit's cgroup asked of the user manager once.
+test_fleet_server_records_cost_a_constant_number_of_processes() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_declare_bundle
+  _fleet_stub_box_walk
+  _fleet_serve_stub
+  _fleet_spawn_shim
+  local base with n rc=0
+  PATH="$T/shim:$T/bin" cmd_fleet --json >/dev/null
+  base="$(_fleet_spawns)"
+  for n in 1 2 3 4 5; do
+    jq -n --arg n "web-$n" '{name:$n,unit:$n,kind:"unit",owner:"shop-orch",workspace:"alpha",port:8090,started_at:100,ttl_seconds:3600}' > "$CEL_SERVE_STATE/web-$n.json"
+  done
+  jq -n '{name:"shop-server",unit:"shop-server",kind:"unit",owner:"shop-orch",workspace:"alpha",port:8090,started_at:100,permanent:true,ttl_seconds:null}' > "$CEL_SERVE_STATE/shop-server.json"
+  jq -n '{name:"pid-3999999",kind:"pid",pid:3999999,pid_start:"1",owner:"shop-orch",workspace:"alpha",port:0,started_at:100,permanent:true,ttl_seconds:null}' > "$CEL_SERVE_STATE/pid-3999999.json"
+  : > "$CEL_SPAWN_LOG"
+  PATH="$T/shim:$T/bin" cmd_fleet --json > "$T/doc.json"
+  with="$(_fleet_spawns)"
+  assert_eq "$(jq '.box.servers | length' "$T/doc.json")" 7 || rc=1
+  assert_eq "$(jq '[.box.servers[] | select(.name == "shop-server")][0].memory_mb' "$T/doc.json")" 117 || rc=1
+  if [ "$((with - base))" -gt 4 ]; then
+    echo "seven server records cost $((with - base)) processes over none (want at most 4)"
+    cut -f1 "$CEL_SPAWN_LOG" | sort | uniq -c | sort -rn | head -5; rc=1
+  fi
+  _fleet_assert_budget "$with" || rc=1
+  _fleet_servers_down
+  return "$rc"
+}

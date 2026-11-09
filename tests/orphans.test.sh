@@ -492,3 +492,30 @@ test_orphans_hermes_desktop_reaper_preserves_the_owned_process() {
   rm -rf "$t"
   assert_eq "$alive" 1
 }
+
+# A registered permanent server is owned, whatever its parent or its cwd: its
+# pid, and any process inside its unit, is never an orphan. A pid is its
+# server only while its start time is the one recorded: a reused pid shields
+# nothing.
+_proc_start() { # <procdir> <pid> <start-ticks> - a stat line with field 22
+  printf '%s (node) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0\n' "$2" "$3" > "$1/$2/stat"
+}
+test_orphans_never_lists_a_registered_permanent_server() {
+  _orphans_fixture
+  export CEL_SERVE_STATE="$T/serve"; mkdir -p "$CEL_SERVE_STATE"
+  _proc_add "$P" 4050 1 node 30000 "$T/gone" node server.js
+  _proc_start "$P" 4050 777
+  _proc_add "$P" 4051 1 node 30000 "$T/gone" node app.js
+  printf '0::/user.slice/user-1000.slice/user@1000.service/app.slice/shop-server.service\n' > "$P/4051/cgroup"
+  _proc_add "$P" 4052 1 node 30000 "$T/gone" node other.js
+  _proc_start "$P" 4052 999
+  jq -n '{name:"pid-4050",kind:"pid",pid:4050,pid_start:"777",owner:"shop-orch",permanent:true}' > "$CEL_SERVE_STATE/pid-4050.json"
+  jq -n '{name:"pid-4052",kind:"pid",pid:4052,pid_start:"111",owner:"shop-orch",permanent:true}' > "$CEL_SERVE_STATE/pid-4052.json"
+  jq -n '{name:"shop-server",kind:"unit",unit:"shop-server",owner:"shop-orch",permanent:true}' > "$CEL_SERVE_STATE/shop-server.json"
+  local rows; rows="$(orphans_list)"
+  assert_eq "$(_class_of "$rows" 4050)" "" || { unset CEL_SERVE_STATE; rm -rf "$T"; return 1; }
+  assert_eq "$(_class_of "$rows" 4051)" "" || { unset CEL_SERVE_STATE; rm -rf "$T"; return 1; }
+  assert_eq "$(_class_of "$rows" 4010)" "fixture" || { unset CEL_SERVE_STATE; rm -rf "$T"; return 1; }
+  assert_eq "$(_class_of "$rows" 4052)" "fixture" || { echo "a reused pid was shielded"; unset CEL_SERVE_STATE; rm -rf "$T"; return 1; }
+  unset CEL_SERVE_STATE; rm -rf "$T"
+}

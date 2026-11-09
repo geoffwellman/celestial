@@ -386,3 +386,235 @@ test_serve_hermes_desktop_signature_is_not_a_preview() {
   assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[5002,5003,5004,5005,5007,5008,5009]'
   rm -rf "$t"
 }
+
+# PERMANENT SERVERS. One persistent user unit, shop-server, behind a fixture
+# user manager: its state is a file the test rewrites (`active <pid>` or
+# `gone`), every call to it is logged, its pids live in a fixture /proc and
+# its memory in a fixture cgroup tree.
+_SP_CG=/user.slice/user-1000.slice/user@1000.service/app.slice/shop-server.service
+_sp_setup() {
+  SP="$(mktemp -d)"
+  export CEL_SERVE_STATE="$SP/state" CEL_SERVE_SYSTEMCTL="$SP/systemctl" CEL_SERVE_SYSTEMD_RUN="$SP/systemd-run" \
+    CEL_SERVE_PROC_ROOT="$SP/proc" CEL_SERVE_CGROUP_ROOT="$SP/cgroup" CEL_SERVE_PROC_DATA='' CEL_SERVE_ADOPT_DATA='' \
+    SP_UNIT="$SP/unit" SP_CALLS="$SP/calls" CEL_SERVE_NOW=1000
+  mkdir -p "$CEL_SERVE_STATE" "$SP/proc" "$SP/cgroup$_SP_CG"
+  printf '%s\n' 123456789 > "$SP/cgroup$_SP_CG/memory.current"   # 117 MB
+  _sp_unit active 3900001
+  cat > "$CEL_SERVE_SYSTEMCTL" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SP_CALLS"
+read -r st pid < "$SP_UNIT"
+case "$*" in
+  *list-units*) [ "$st" = active ] && printf 'shop-server.service loaded active running shop live server\n' ;;
+  *LoadState*) if [ "$st" = active ]; then printf 'LoadState=loaded\nActiveState=active\n'; else printf 'LoadState=not-found\nActiveState=inactive\n'; fi ;;
+  *Description*) printf 'shop live server\n' ;;
+  *ExecStart*) printf '{ path=/opt/shop/run ; argv[]=/opt/shop/run }\n' ;;
+  *MainPID*) if [ "$st" = active ]; then printf '%s\n' "$pid"; else printf '0\n'; fi ;;
+  *"-p Id -p ControlGroup"*)
+    for a in "$@"; do
+      case "$a" in *.service)
+        printf 'Id=%s\n' "$a"
+        if [ "$a" = shop-server.service ] && [ "$st" = active ]; then printf 'ControlGroup=%s\n\n' /user.slice/user-1000.slice/user@1000.service/app.slice/shop-server.service; else printf 'ControlGroup=\n\n'; fi ;;
+      esac
+    done ;;
+  *ControlGroup*) [ "$st" != active ] || printf '%s\n' /user.slice/user-1000.slice/user@1000.service/app.slice/shop-server.service ;;
+  *WorkingDirectory*) printf '/srv/shop\n' ;;
+esac
+exit 0
+EOS
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/systemd-run-calls"\n' "$SP" > "$CEL_SERVE_SYSTEMD_RUN"
+  chmod +x "$CEL_SERVE_SYSTEMCTL" "$CEL_SERVE_SYSTEMD_RUN"
+  cmd_inbox() { printf '%s\n' "$*" >> "$SP/inbox"; }
+  boxguard_pressure() { return 1; }
+}
+_sp_unit() { # active <pid> | gone - an active unit's pid sits in its cgroup
+  printf '%s %s\n' "$1" "${2:-0}" > "$SP_UNIT"
+  if [ "$1" = active ]; then mkdir -p "$SP/proc/$2"; printf '0::%s\n' "$_SP_CG" > "$SP/proc/$2/cgroup"; fi
+}
+_sp_down() {
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_SYSTEMD_RUN CEL_SERVE_PROC_ROOT CEL_SERVE_CGROUP_ROOT \
+    CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA SP_UNIT SP_CALLS CEL_SERVE_NOW CEL_SERVE_GONE_GRACE_SECONDS
+  rm -rf "$SP"
+}
+# Anything that would end or (re)start a unit: none of it is a sweep's to do
+# to a permanent server.
+_sp_acted() { grep -Eq '(^| )(stop|kill|start|restart|reset-failed)( |$)' "$SP_CALLS" 2>/dev/null || [ -e "$SP/systemd-run-calls" ]; }
+
+test_serve_permanent_unit_outlives_any_ttl_idle_or_pressure() {
+  _sp_setup
+  local f="$CEL_SERVE_STATE/shop-server.json"
+  cmd_serve adopt shop-server --owner shop-orch --workspace alpha --permanent --why "the shop's live app" \
+    || { echo "permanent adopt refused"; _sp_down; return 1; }
+  assert_eq "$(jq -c '[.permanent, .ttl_seconds, .kind, .unit, .owner, .workspace, .why]' "$f")" \
+    '[true,null,"unit","shop-server","shop-orch","alpha","the shop'"'"'s live app"]' || { _sp_down; return 1; }
+  # a lifetime and a forever are not both
+  ( cmd_serve adopt shop-server --owner shop-orch --workspace alpha --permanent --ttl 2h ) >/dev/null 2>&1 \
+    && { echo "--permanent took a --ttl"; _sp_down; return 1; }
+  # ten years on, never a request, its checkout gone, the box under pressure
+  jq '.worktree = "/nowhere/gone"' "$f" > "$f.t" && mv "$f.t" "$f"
+  CEL_SERVE_NOW=$((1000 + 315360000)) CEL_SERVE_IDLE_SECONDS=1 serve_sweep
+  boxguard_pressure() { return 0; }
+  CEL_SERVE_NOW=$((1000 + 315360000)) CEL_SERVE_PRESSURE_IDLE_SECONDS=1 serve_sweep
+  [ -f "$f" ] || { echo "the sweep dropped a permanent server"; _sp_down; return 1; }
+  _sp_acted && { echo "the sweep acted on a permanent server: $(cat "$SP_CALLS")"; _sp_down; return 1; }
+  [ ! -s "$SP/inbox" ] || { echo "the sweep mailed about a live permanent server: $(cat "$SP/inbox")"; _sp_down; return 1; }
+  _sp_down
+}
+
+test_serve_permanent_server_is_listed_with_owner_port_memory() {
+  _sp_setup
+  cmd_serve adopt shop-server --owner shop-orch --workspace alpha --permanent --port 8090 >/dev/null || { _sp_down; return 1; }
+  assert_eq "$(serve_list_json | jq -c '.[0] | [.name, .owner, .workspace, .port, .memory_mb, .permanent]')" \
+    '["shop-server","shop-orch","alpha",8090,117,true]' || { _sp_down; return 1; }
+  local out; out="$(cmd_serve list)"
+  assert_contains "$out" "shop-server" || { _sp_down; return 1; }
+  assert_contains "$out" "permanent" || { _sp_down; return 1; }
+  _sp_down
+}
+
+# The steward reported it every tick as unledgered; registered, neither the
+# unit nor a pid of it is - not even a new pid after the unit was recreated.
+test_serve_unledgered_report_skips_a_registered_permanent_unit() {
+  _sp_setup
+  registry_names() { printf 'alpha\n'; }
+  registry_path() { printf '%s/alpha' "$SP"; }
+  ws_product_names() { printf 'shop\n'; }
+  CEL_SERVE_PROC_DATA=$'3900001\t8090\t4096\t60\t/srv/shop\tnode server.js'
+  assert_contains "$(serve_adopt_json | jq -r '.[].unit // empty')" "shop-server" || { _sp_down; return 1; }
+  serve_adopt shop-server shop-orch alpha permanent "" "" || { _sp_down; return 1; }
+  _sp_unit active 3900002
+  CEL_SERVE_PROC_DATA=$'3900002\t8090\t4096\t60\t/srv/shop\tnode server.js'
+  assert_eq "$(serve_adopt_json | jq -c .)" "[]" || { _sp_down; return 1; }
+  _serve_unledgered_report >/dev/null 2>&1
+  [ ! -s "$SP/inbox" ] || { echo "reported a registered unit: $(cat "$SP/inbox")"; _sp_down; return 1; }
+  _sp_down
+}
+
+# Only its owner, or a person, ends it: another agent cannot, nor one that
+# shed its role to look like a person.
+test_serve_permanent_stops_only_for_its_owner_or_a_person() {
+  _sp_setup
+  local P="$SP/launch" f="$CEL_SERVE_STATE/shop-server.json" out
+  _sp_launch() { mkdir -p "$P/$PPID"; printf '%s\0' "$@" > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"; }
+  serve_adopt shop-server shop-orch alpha permanent 0 "" || { _sp_down; return 1; }
+  _sp_launch CEL_ROLE=solo CEL_INBOX_ME=tools-orch
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch serve_stop shop-server 2>&1)" \
+    && { echo "another agent stopped it"; _sp_down; return 1; }
+  assert_contains "$out" "only its owner or a person" || { _sp_down; return 1; }
+  out="$(CEL_PROC_DIR="$P" CEL_INBOX_ME=shop-orch serve_stop shop-server 2>&1)" \
+    && { echo "an agent that shed CEL_ROLE stopped it"; _sp_down; return 1; }
+  [ -f "$f" ] || { echo "a refused stop dropped the record"; _sp_down; return 1; }
+  _sp_acted && { echo "a refused stop acted: $(cat "$SP_CALLS")"; _sp_down; return 1; }
+  _sp_launch CEL_ROLE=solo CEL_INBOX_ME=shop-orch
+  ( CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=shop-orch serve_stop shop-server ) || { echo "its owner was refused"; _sp_down; return 1; }
+  [ ! -f "$f" ] || { echo "its owner's stop kept the record"; _sp_down; return 1; }
+  assert_contains "$(cat "$SP_CALLS")" "stop shop-server.service" || { _sp_down; return 1; }
+  # a person: no agent launch anywhere above
+  serve_adopt shop-server shop-orch alpha permanent 0 "" || { _sp_down; return 1; }
+  printf 'HOME=/h\0' > "$P/$PPID/environ"
+  ( CEL_PROC_DIR="$P" serve_stop shop-server ) || { echo "a person was refused"; _sp_down; return 1; }
+  [ ! -f "$f" ] || { echo "a person's stop kept the record"; _sp_down; return 1; }
+  _sp_down
+}
+
+# Gone - unit collected or never coming back, pid exited - is dropped from the
+# registry with one note to its owner, and nothing is restarted. A unit is
+# gone only once it has stayed gone past the re-creation window.
+test_serve_a_vanished_permanent_server_is_dropped_with_one_note_never_restarted() {
+  _sp_setup
+  export CEL_SERVE_GONE_GRACE_SECONDS=900
+  local f="$CEL_SERVE_STATE/shop-server.json"
+  serve_adopt shop-server shop-orch alpha permanent 0 "" || { _sp_down; return 1; }
+  _sp_unit gone
+  serve_sweep
+  [ -f "$f" ] || { echo "dropped inside the re-creation window"; _sp_down; return 1; }
+  CEL_SERVE_NOW=1950 serve_sweep
+  [ ! -f "$f" ] || { echo "a unit gone past the window stayed registered"; _sp_down; return 1; }
+  CEL_SERVE_NOW=2900 serve_sweep
+  assert_eq "$(grep -c . "$SP/inbox")" 1 || { _sp_down; return 1; }
+  assert_contains "$(cat "$SP/inbox")" "send shop-orch" || { _sp_down; return 1; }
+  _sp_acted && { echo "a vanished server was acted on: $(cat "$SP_CALLS")"; _sp_down; return 1; }
+  # a permanent pid that exited goes at once: a pid never comes back
+  local pid; sleep 60 & pid=$!
+  CEL_SERVE_ADOPT_DATA="$(jq -cn --argjson pid "$pid" --arg s "$(_serve_pid_start "$pid")" \
+    '[{pid:$pid,pid_start:$s,port:0,memory_mb:1,age_seconds:1,worktree:"/srv",command:"sleep",managed:false}]')"
+  serve_adopt "$pid" shop-orch alpha permanent 0 "" || { kill "$pid"; _sp_down; return 1; }
+  assert_eq "$(jq -r .kind "$CEL_SERVE_STATE/pid-$pid.json")" pid || { kill "$pid"; _sp_down; return 1; }
+  kill "$pid"; wait "$pid" 2>/dev/null || true
+  CEL_SERVE_ADOPT_DATA='' serve_sweep
+  [ ! -f "$CEL_SERVE_STATE/pid-$pid.json" ] || { echo "an exited permanent pid stayed registered"; _sp_down; return 1; }
+  assert_eq "$(grep -c . "$SP/inbox")" 2 || { _sp_down; return 1; }
+  _sp_down
+}
+
+# systemd recreating the unit under its name (a follow-main redeploy) is the
+# same server: a new pid, a moment of absence, and the registration stays.
+test_serve_a_unit_recreated_under_its_name_stays_registered() {
+  _sp_setup
+  export CEL_SERVE_GONE_GRACE_SECONDS=900
+  local f="$CEL_SERVE_STATE/shop-server.json"
+  serve_adopt shop-server shop-orch alpha permanent 0 "" || { _sp_down; return 1; }
+  serve_sweep
+  _sp_unit gone; CEL_SERVE_NOW=1300 serve_sweep
+  _sp_unit active 3900002; CEL_SERVE_NOW=1600 serve_sweep
+  CEL_SERVE_NOW=99999 serve_sweep
+  [ -f "$f" ] || { echo "a recreated unit lost its registration"; _sp_down; return 1; }
+  assert_eq "$(jq -r '[.unit, has("gone_since")] | @tsv' "$f")" "$(printf 'shop-server\tfalse')" || { _sp_down; return 1; }
+  [ ! -s "$SP/inbox" ] || { echo "mailed about a recreated unit: $(cat "$SP/inbox")"; _sp_down; return 1; }
+  CEL_SERVE_PROC_DATA=$'3900002\t8090\t4096\t60\t/srv/shop\tnode server.js'
+  assert_eq "$(serve_adopt_json | jq -c .)" "[]" || { _sp_down; return 1; }
+  _sp_down
+}
+
+# A pid inside a user service is that unit's: adopted permanently, the unit is
+# what is registered, so its next pid is still the registered server.
+test_serve_adopting_a_units_pid_permanently_registers_the_unit() {
+  _sp_setup
+  CEL_SERVE_PROC_DATA=$'3900001\t8090\t4096\t60\t/srv/shop\tnode server.js'
+  serve_adopt 3900001 shop-orch alpha permanent "" "" || { _sp_down; return 1; }
+  assert_eq "$(jq -r '[.kind, .unit, .permanent] | @tsv' "$CEL_SERVE_STATE/shop-server.json")" "$(printf 'unit\tshop-server\ttrue')" \
+    || { _sp_down; return 1; }
+  [ ! -e "$CEL_SERVE_STATE/pid-3900001.json" ] || { echo "registered the pid"; _sp_down; return 1; }
+  _sp_down
+}
+
+# WHO MAY SHIELD A SERVER. A permanent registration is undone only by its
+# owner or a person, so an agent registers only for itself - the alias its
+# launch fixed - never for another owner, nor with its role shed. A person may
+# register one for anyone. A unit already registered is not re-registered to
+# someone else.
+test_serve_permanent_adopt_by_an_agent_is_only_for_itself() {
+  _sp_setup
+  local P="$SP/launch" f="$CEL_SERVE_STATE/shop-server.json" out
+  _sp_launch() { mkdir -p "$P/$PPID"; printf '%s\0' "$@" > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"; }
+  _sp_launch CEL_ROLE=solo CEL_INBOX_ME=tools-orch
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch serve_adopt shop-server shop-orch alpha permanent "" "" 2>&1)" \
+    && { echo "an agent registered a server for another owner"; _sp_down; return 1; }
+  assert_contains "$out" "only for itself" || { _sp_down; return 1; }
+  out="$(CEL_PROC_DIR="$P" CEL_INBOX_ME=tools-orch serve_adopt shop-server tools-orch alpha permanent "" "" 2>&1)" \
+    && { echo "an agent that shed CEL_ROLE registered a server"; _sp_down; return 1; }
+  [ ! -e "$f" ] || { echo "a refused adopt left a record"; _sp_down; return 1; }
+  # for itself, it may
+  ( CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch serve_adopt shop-server tools-orch alpha permanent "" "" ) \
+    || { echo "an agent was refused its own registration"; _sp_down; return 1; }
+  assert_eq "$(jq -r .owner "$f")" tools-orch || { _sp_down; return 1; }
+  # registered to tools-orch, it is not re-registered to anyone else - not even by a person
+  printf 'HOME=/h\0' > "$P/$PPID/environ"
+  out="$(CEL_PROC_DIR="$P" serve_adopt shop-server shop-orch alpha permanent "" "" 2>&1)" \
+    && { echo "re-registered under another owner"; _sp_down; return 1; }
+  assert_contains "$out" "registered to tools-orch" || { _sp_down; return 1; }
+  assert_eq "$(jq -r .owner "$f")" tools-orch || { _sp_down; return 1; }
+  _sp_down
+}
+test_serve_a_person_registers_a_permanent_server_for_anyone_and_sees_what_it_runs() {
+  _sp_setup
+  local P="$SP/launch" f="$CEL_SERVE_STATE/shop-server.json"
+  mkdir -p "$P/$PPID"; printf 'HOME=/h\0' > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"
+  ( CEL_PROC_DIR="$P" serve_adopt shop-server shop-orch alpha permanent 8090 "" ) || { echo "a person was refused"; _sp_down; return 1; }
+  assert_eq "$(jq -r '[.owner, .working_directory, .command] | @tsv' "$f")" \
+    "$(printf 'shop-orch\t/srv/shop\t{ path=/opt/shop/run ; argv[]=/opt/shop/run }')" || { _sp_down; return 1; }
+  local out; out="$(cmd_serve list)"
+  assert_contains "$out" "/srv/shop" || { _sp_down; return 1; }
+  assert_contains "$out" "/opt/shop/run" || { _sp_down; return 1; }
+  _sp_down
+}

@@ -356,10 +356,12 @@ cel - the celestial plane
                                 installed; print shows the one-time owner command
   cel serve start <name> --owner <alias> --workspace <ws>
                                 [--ttl 8h] [--port N] -- <command>
-  cel serve list [--json]      ledgered server memory, age and last request
-  cel serve stop <name>        stop a ledgered server
+  cel serve list [--json]      ledgered server memory, age, TTL (or permanent), last request
+  cel serve stop <name>        stop a ledgered server (a permanent one: its owner or a person)
   cel serve adopt [<unit|pid> --owner ... --workspace ...]
-                                list unledgered servers; explicit adoption only
+                                [--ttl 8h | --permanent] [--port N] [--why "..."]
+                                list unledgered servers; explicit adoption only;
+                                --permanent: no TTL, never stopped by any sweep
   cel preview <repo>#<pr> [--port N] [--ttl 8h] [--no-wait] [--qa f] [--head sha]
                                 run an open PR's head from the repo's preview:
                                 block with no provider keys; prints its urls
