@@ -1240,7 +1240,8 @@ test_agents_do_not_answer_or_drop_owner_questions() {
   local role c
   for role in solo orchestrator root; do
     for c in 'cel decide answer 1791100000000000001 1' 'cel decide drop 1791100000000000001 --why moot' \
-             'cel decide answer 1791100000000000001 --text yes --by sam' 'sleep 1; cel decide drop 1 --why x'; do
+             'cel decide answer 1791100000000000001 --text yes --by sam' 'sleep 1; cel decide drop 1 --why x' \
+             $'true\ncel decide answer 1 1'; do
       case "$(guard_classify "$role" "$c")" in "deny an agent does not answer or drop an owner question"*) ;;
         *) echo "$role allowed: $c"; rm -rf "$T"; return 1;; esac
     done

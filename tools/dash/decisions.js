@@ -209,10 +209,13 @@ function renderNeedsYou(force){
   var total=groups.reduce(function(a,g){return a+g.items.filter(function(d){return !NYGONE[d.id]}).length},0);
   if(!total&&!Object.keys(NYGONE).length){host.innerHTML='';$('alerts-h').style.display='none';return}
   $('alerts-h').style.display='';
+  // the Mine chip sits with what the page always shows: the group-by row on
+  // the board (the v2 grid card hides the workspace chips), the chips in a list
+  var mine=LAST.me?'<button class="chipbtn mine'+(nyMineOn()?' on':'')+'" data-mine="1" title="only what is routed to '+esc(LAST.me)+', or to nobody">mine</button>':'';
   var chips='<div class="nychips"><button class="chipbtn'+(NYF?'':' on')+'" data-ws="">all <b>'+total+'</b></button>'+
     groups.map(function(g){return '<button class="chipbtn'+(NYF===g.workspace?' on':'')+'" data-ws="'+esc(g.workspace)+'">'+
       esc(g.workspace)+' <b>'+g.items.filter(nyLive).length+'</b>'+(g.urgent?' <i class="u">!</i>':'')+'</button>'}).join('')+
-    (LAST.me?'<button class="chipbtn mine'+(nyMineOn()?' on':'')+'" data-mine="1" title="only what is routed to '+esc(LAST.me)+', or to nobody">mine</button>':'')+'</div>';
+    (board?'':mine)+'</div>';
   var shown=groups.filter(function(g){return !NYF||g.workspace===NYF});
   var head='<h2>decisions <span class="n">'+total+'</span></h2>'+chips;
   if(board){
@@ -221,7 +224,7 @@ function renderNeedsYou(force){
       return nrec?'<button class="bulk" data-ws="'+esc(g.workspace)+'">'+esc(g.workspace)+': accept all recommended ('+nrec+')</button>':''}).join('');
     var open=NYBULK&&shown.filter(function(g){return g.workspace===NYBULK})[0];
     host.innerHTML=head+
-      '<div class="nyby">group by '+Object.keys(NYBYS).map(function(k){
+      '<div class="nyby">'+mine+' group by '+Object.keys(NYBYS).map(function(k){
         return '<button class="chipbtn'+(k===NYBY?' on':'')+'" data-by="'+k+'">'+esc(NYBYS[k].label)+'</button>'}).join('')+
         (bulk?'<span class="nybulks">'+bulk+'</span>':'')+'</div>'+
       (open?nyBulkPanel(open):'')+
@@ -238,7 +241,7 @@ function renderNeedsYou(force){
       (NYBULK===g.workspace?nyBulkPanel(g):'')+
       g.items.map(function(d){return nyCard(d,false)}).join('')+'</details>';
   }).join('');
-  var mb=host.querySelector('.nychips .chipbtn[data-mine]');
+  var mb=host.querySelector('.chipbtn[data-mine]');
   if(mb)mb.onclick=function(){NYMINE=!nyMineOn();localStorage.setItem('cel-ny-mine',NYMINE?'1':'0');renderNeedsYou(true)};
   Array.prototype.forEach.call(host.querySelectorAll('.nychips .chipbtn[data-ws]'),function(b){
     b.onclick=function(){NYF=b.dataset.ws;localStorage.setItem('cel-ny-filter',NYF);renderNeedsYou(true)}});
