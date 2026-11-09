@@ -35,6 +35,9 @@
 .otherrow input{flex:1 1 180px;min-width:0}
 .nyerr{margin-top:6px;color:var(--bad);font:12px var(--mono)}
 .nycard.gone{opacity:.7}.nygone{font:12px var(--mono);color:var(--bad);margin-bottom:4px}
+/* routed to other people (cel decide ask --topic): shown, never sent from here */
+.nymeta .route{color:var(--accent)}
+.nycard.readonly{opacity:.75}.nyro{font:12px var(--mono);color:var(--dim);margin-bottom:4px}
 .nybulk{border:1px dashed var(--accent);border-radius:10px;padding:8px 13px;margin-bottom:8px}
 .nybulk ol{margin:4px 0 8px;padding-left:20px}
 /* the board: columns grouped by the chosen grouping, scrolling

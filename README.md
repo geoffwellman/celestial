@@ -1658,6 +1658,36 @@ On any other login:
 - a login with no `me:` is treated as nobody's, so it starts no product
   that has a home (fail closed).
 
+**Owner questions go to the people who hold the role.** An agent asks with
+`cel decide ask ... --topic product|qa|design|release|merge|owner` (default
+`owner`). The topic is a role (`product` is `product-lead`, `merge` is
+`approver`), and the route is computed when the question is asked: the asker's
+product (its launch's `CEL_PRODUCT`, or its `<product>-orch`/`-<lane>`
+mailbox), the people holding that role for it, else the workspace's
+`owner`s. The record keeps `topic` and `route: {role, product, people}`; `to`
+stays `owner`. Then:
+
+- `cel decide list --mine` (this login's `me:`), `--for <id>` and
+  `--topic <t>` narrow the queue; `--mine`/`--for` keep the questions routed
+  to that person plus the unrouted ones;
+- the desktop notification for a routed decision fires only on a login whose
+  `me:` is on the route (a login with no `me:`, and an unrouted decision,
+  notify as before);
+- `cel decide answer|drop` is a person's: it records `me:` as who answered
+  (`--by`, if given, must equal it), and a routed question is answered only
+  by its people or by an `owner`, recorded as `by: sam (owner)`. No agent
+  answers or drops one - the guard refuses it for solo, orchestrator, root,
+  lead and member, and `cel decide` refuses any process launched as an agent;
+  core still relays the owner's word, on unrouted questions only. The asker
+  still retires its own question with `cel decide withdraw`;
+- the dashboard answers as `--by <me>`, shows a **mine** chip (on by default
+  when `me:` is set) and a **topic** grouping, and with no `me:` answers only
+  unrouted questions;
+- the steward's daily line counts the routed questions per person.
+
+With no `people:` there is no route, and `cel decide` and the dashboard work
+exactly as before: anyone answers, `--by` is free text.
+
 `cel doctor` reports an error for a malformed `people:` entry, a role that
 is not in the list, a `me:` or `home:` that names nobody, or a `me:` committed
 to `workspace.yaml`. It warns about a `kind: team` workspace with an

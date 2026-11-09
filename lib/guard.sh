@@ -1547,6 +1547,14 @@ guard_classify() { # <role> <command>
     printf 'deny cel run member is cel team add'"'"'s internal launcher - add a member with: cel team add <feature> <role> [--focus f] [--repo r]'
     return 0
   fi
+  # AN OWNER QUESTION IS ANSWERED BY A PERSON: no builder or coordinator
+  # answers or drops one (cel decide refuses any agent too). Core is not
+  # listed: it relays the owner's word on an unrouted question.
+  if { [[ " solo orchestrator root member " == *" $role "* ]] || [ "${CEL_ROLE:-}" = lead ]; } \
+    && _guard_starts "$cmd" 'cel decide (answer|drop)'; then
+    printf 'deny an agent does not answer or drop an owner question - a person does (cel decide answer|drop, or the dashboard); withdraw your own with cel decide withdraw <id> --why <text>'
+    return 0
+  fi
   # A member or a reviewer (by role, or by its launch's CEL_ROLE, whatever
   # directory it stands in) shares its product agent's Rex session.
   if { [ "$role" = member ] || [ "${CEL_ROLE:-}" = member ] || [ "${CEL_ROLE:-}" = reviewer ]; } && _guard_rex_writes "$cmd"; then

@@ -152,8 +152,11 @@ Questions for the owner
   --recommend <n> --blocks "<what waits>" --context "<120+ characters: what
   happened, what each option does, what you recommend and why, what happens if
   nobody answers>"` (add `--pr <repo>#<n>` when it blocks a PR, `--urgent` for
-  live risk, money or blocked work). Act on `ANSWER to "<title>"` mail; withdraw
-  your own questions once they are settled.
+  live risk, money or blocked work, and `--topic product|qa|design|release|merge`
+  when it is that role's call: in a workspace with `people:` it then goes to
+  whoever holds the role for your product). Act on `ANSWER to "<title>"`
+  mail; withdraw your own questions once they are settled. You never answer
+  or drop one yourself: a person does.
 - Do not ask the owner to approve routine actions: local rebuilds and
   restarts, commits, pushes to your own PR branch, and deploys the owner asked
   for. Just do them and say what you did. Ask only for real owner decisions:

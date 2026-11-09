@@ -1805,6 +1805,28 @@ test_cel93_steward_summarises_owner_decisions_once_a_day() {
   assert_eq "$(jq -c 'select(.from == "steward" and (.message | test("owner decision")))' "$f" | grep -c . || true)" "1"
   assert_eq "$(jq -c 'select(.from == "steward" and .kind != "status" and .kind != "resolution")' "$f")" ""
   assert_eq "$(jq -c 'select(.message | test("UNRESOLVED"))' "$f")" ""
+  # nothing routed (no people:): the line reads as it always has
+  assert_eq "$(jq -r 'select(.from == "steward") | .message' "$f" | grep -c 'waiting on' || true)" "0"
+  rm -rf "$T"
+}
+
+# The daily line says who the routed questions wait on, per person; with no
+# routed question it reads exactly as before.
+test_steward_summary_counts_open_decisions_per_person() {
+  _orch_fixture; _nudge_herdr_stub
+  source "$CEL_ROOT/lib/decide.sh"
+  local f="$CEL_INBOX_DIR/alpha.jsonl" i
+  for i in 1 2 3 4; do
+    jq -nc --arg id "17911000000000000$i" --arg n "$i" '{id: $id, ts: "2020-01-01T00:00:00Z", to: "owner", from: "atlas-orch",
+      kind: "decision", title: ("q" + $n), asker: "atlas-orch"}
+      + (if $n == "1" or $n == "2" then {route: {role: "qa", product: "atlas", people: ["jo"]}}
+         elif $n == "3" then {route: {role: "owner", product: null, people: ["sam", "jo"]}} else {} end)' >> "$f"
+  done
+  PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep '{"result":{"agents":[]}}' >/dev/null 2>&1
+  assert_contains "$(jq -r 'select(.from == "steward" and (.message | test("owner decision"))) | .message' "$f")" \
+    "steward: 4 open owner decision(s) in alpha, oldest" || { rm -rf "$T"; return 1; }
+  assert_contains "$(jq -r 'select(.from == "steward" and (.message | test("owner decision"))) | .message' "$f")" \
+    "waiting on jo 3, sam 1; 1 unrouted" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
