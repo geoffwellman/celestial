@@ -1501,6 +1501,38 @@ logs to `~/.local/share/cel/logs/`.
 `--ensure` is idempotent: it starts the service only if it is not already
 answering, so it is safe on a loop.
 
+Agents' own servers go in the `cel serve` ledger. `cel serve start <name>
+--owner <alias> --workspace <ws> [--ttl 8h] [--port N] -- <command>` runs one
+as a memory-accounted `cel-serve-<name>` user unit; `cel serve adopt` lists
+the unledgered preview/dev servers (the steward reports them to each
+product's agent once a day) and `cel serve adopt <unit|pid> --owner <alias>
+--workspace <ws> [--ttl 8h]` takes one into the ledger. A ledgered server is
+stopped by the steward when its TTL runs out, after `serve.idle_hours`
+(default 6; `serve.pressure_idle_hours`, default 1, under memory pressure)
+without a request, or when its checkout is gone, and its owner is mailed the
+restart command.
+
+A **permanent** server is an agent's standing box service - a product's live
+local app in a persistent user unit that its own follow-main unit recreates,
+or a preview its owner said to keep:
+
+```bash
+cel serve adopt shop-live --owner shop-orch --workspace plane --permanent \
+  --port 8090 --why "shop's live app, recreated by shop-follow-main"
+```
+
+It has no TTL and no idle or pressure limit. No sweep stops it - not the
+steward's TTL/idle sweep, not the preview sweep or gc's QA-preview release, not
+the orphan reaper - and the unledgered report no longer lists it. `cel serve
+list` (TTL column `permanent`), the dashboard's server rows and `cel fleet`
+(`box.servers`, and a `server` line under its workspace) show it with owner,
+port and memory. Only `cel serve stop <name>` by its owner (the agent whose
+launch says it is that alias) or a person ends it. A unit is matched by name,
+so systemd recreating it is the same server; adopting a pid that runs inside a
+user service registers that unit. A unit that stays gone for 15 minutes, or a
+pid that exits, is dropped from the registry with one note to its owner and is
+never restarted.
+
 ### Hooks — session-bound actions
 
 Claude's global preferences install the submit hook; `cel run` adds the

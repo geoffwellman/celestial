@@ -24,6 +24,8 @@ _CEL_FLEET=1
 . "${BASH_SOURCE[0]%/*}/memory.sh"
 # shellcheck source=lib/orphans.sh
 . "${BASH_SOURCE[0]%/*}/orphans.sh"
+# shellcheck source=lib/serve.sh
+. "${BASH_SOURCE[0]%/*}/serve.sh"
 
 # The processes with no owner at all, as one field of the box.
 #
@@ -79,6 +81,10 @@ _fleet_solo_line() { # <label> <agent> <worktrees> <mem> [lanes]
 # launched until the product is switched.
 _fleet_legacy_line() { # <label> <agent> <mem> <product>
   printf '  %-12s fleet %-5s mem %s   (retired: cel mode %s solo)\n' "$1" "$2" "$3" "$4"
+}
+# A registered `cel serve` server, under the workspace it was registered to.
+_fleet_server_line() { # <name> <owner> <port> <mem> <ttl-hours|permanent>
+  printf '  server %-12s %-14s :%-6s mem %s   %s\n' "$1" "$2" "$3" "$4" "$5"
 }
 
 # WHERE THE PRODUCT AGENT STANDS, which is the directory its memory is
@@ -275,16 +281,20 @@ _fleet_render() { # <doc>
   orph=""
   [ "${orph_n:-0}" -gt 0 ] 2>/dev/null \
     && orph="   $orph_n orphans ($(mem_human "$(printf '%s' "$1" | jq -r '.box.orphans.rss_mb // 0')")) - cel gc --orphans"
-  printf '%s' "$1" | jq -r --arg box "box $free free of $total$orph" '.workspaces[]
+  printf '%s' "$1" | jq -r --arg box "box $free free of $total$orph" '(.box.servers // []) as $servers
+    | .workspaces[]
     | (if .mail.corrupt then "root mail: UNKNOWN (mailbox corrupt)"
        else "root mail: \(.root.unread) unread, \(.root.open) open" end) as $rootmail
     | "\(.name)   (\(.units | length) products)   \($rootmail)   \($box)"
       as $head
+    | .name as $ws
     | [$head] + [.units[]
         | (if .declared then "\(.name) (\(.repos | join(", ")))" else .name end) as $label
         | if .mode == "solo"
           then "SOLO\t\($label)\t\(.orch)\t\(.solo_worktrees // 0)\t\(.orch_rss_mb // 0)\t\((.lanes // []) | join(","))"
           else "LEGACY\t\($label)\t\(.orch)\t\(.orch_rss_mb // 0)\t\(.name)" end]
+      + [$servers[] | select(.workspace == $ws)
+          | "SERVER\t\(.name)\t\(.owner)\t\(.port // 0)\t\(.memory_mb // 0)\t\(if .permanent then "permanent" else "ttl" end)"]
     | .[]' \
   | while IFS= read -r line; do
       case "$line" in
@@ -295,6 +305,10 @@ _fleet_render() { # <doc>
         SOLO*)
           IFS=$'\t' read -r _ n o t m l <<<"$line"
           _fleet_solo_line "$n" "$o" "$t" "$(mem_human "$m")" "$l"
+          ;;
+        SERVER*)
+          IFS=$'\t' read -r _ n o p m l <<<"$line"
+          _fleet_server_line "$n" "$o" "$p" "$(mem_human "$m")" "$l"
           ;;
         *) printf '%s\n' "$line" ;;
       esac
@@ -376,10 +390,12 @@ _fleet_doc() { # <only> -> the JSON document
     --argjson total "${total:-0}" --argjson avail "${avail:-0}" --argjson used "${used:-0}" \
     --argjson subs "$(_fleet_subscriptions)" \
     --argjson orphans "$(fleet_orphans_json)" \
+    --argjson servers "$(serve_list_json 2>/dev/null || printf '[]')" \
     --arg gen "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{generated_at: $gen, workspaces: ., subscriptions: $subs}
      | .box = {total_mb: $total, available_mb: $avail, used_pct: $used, orphans: $orphans,
-               agents_rss_mb: ([.workspaces[].units[] | .orch_rss_mb // 0] | add // 0)}'
+               agents_rss_mb: ([.workspaces[].units[] | .orch_rss_mb // 0] | add // 0),
+               servers: [$servers[] | {name, owner, workspace, port, memory_mb, permanent}]}'
   mem_tree_snapshot_clear
 }
 

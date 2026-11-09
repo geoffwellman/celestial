@@ -32,7 +32,7 @@ printf '%s\n' "\$*" >> "$T/cel.log"
 if [ "\$1" = run ]; then printf '%q ' "\$@" >> "$T/run.log"; printf '\n' >> "$T/run.log"; exit 0; fi
 if [ "\$1" = serve ]; then
   case "\$2 \$3" in
-    "list --json") printf '[{"name":"widget-preview","owner":"alpha-orch","workspace":"alpha","port":5173,"memory_mb":81,"age_seconds":120,"managed":true}]'; exit 0;;
+    "list --json") printf '[{"name":"widget-preview","owner":"alpha-orch","workspace":"alpha","port":5173,"memory_mb":81,"age_seconds":120,"managed":true,"permanent":false},{"name":"shop-server","owner":"shop-orch","workspace":"alpha","port":8090,"memory_mb":117,"age_seconds":99999,"managed":true,"permanent":true}]'; exit 0;;
     "adopt --json") printf '[{"unit":"vite-old","pid":21,"memory_mb":240,"age_seconds":4000,"worktree":"/tmp/demo","managed":false}]'; exit 0;;
   esac
 fi
@@ -95,7 +95,8 @@ test_v2_services_feed_includes_ledgered_and_unledgered_preview_memory() {
   _v2_boot
   local rows
   rows="$(_v2_get "$(_v2_url services)")"
-  assert_eq "$(printf '%s' "$rows" | jq -r '.items[] | select(.name=="widget-preview") | [.kind,.memory_mb,.owner] | @tsv')" "$(printf 'preview\t81\talpha-orch')"
+  assert_eq "$(printf '%s' "$rows" | jq -r '.items[] | select(.name=="widget-preview") | [.kind,.memory_mb,.owner,.permanent] | @tsv')" "$(printf 'preview\t81\talpha-orch\tfalse')"
+  assert_eq "$(printf '%s' "$rows" | jq -r '.items[] | select(.name=="shop-server") | [.kind,.memory_mb,.owner,.port,.permanent] | @tsv')" "$(printf 'preview\t117\tshop-orch\t8090\ttrue')"
   assert_eq "$(printf '%s' "$rows" | jq -r '.items[] | select(.name=="vite-old") | [.kind,.memory_mb,.state] | @tsv')" "$(printf 'unledgered\t240\tunledgered')"
   assert_contains "$(cat "$T/cel.log")" "serve list --json"
   assert_contains "$(cat "$T/cel.log")" "serve adopt --json"

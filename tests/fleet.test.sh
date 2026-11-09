@@ -760,3 +760,28 @@ test_fleet_serves_a_pre_cel90_cache_with_its_age_and_cache_secs() {
   unset CEL_CACHE CEL_FLEET_CACHE_SECS CEL_FLEET_REFILL_DELAY
   _fleet_teardown
 }
+
+# A REGISTERED SERVER IS PART OF THE BOX. `cel fleet` carries each one with its
+# owner, port and memory, and says which are permanent - in the document and
+# on its workspace's block.
+_fleet_servers_down() { unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_CGROUP_ROOT; _fleet_teardown; }
+test_fleet_lists_registered_servers_with_owner_port_memory_and_permanence() {
+  _fleet_setup
+  export CEL_SERVE_STATE="$T/serve" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_CGROUP_ROOT="$T/cgroup"
+  mkdir -p "$CEL_SERVE_STATE" "$T/cgroup/app/shop-server.service"
+  printf '%s\n' 123456789 > "$T/cgroup/app/shop-server.service/memory.current"
+  printf '#!/usr/bin/env bash\ncase "$*" in *ControlGroup*) echo /app/shop-server.service;; esac\n' > "$CEL_SERVE_SYSTEMCTL"
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+  jq -n '{name:"shop-server",unit:"shop-server",kind:"unit",owner:"shop-orch",workspace:"alpha",port:8090,started_at:100,permanent:true,ttl_seconds:null}' \
+    > "$CEL_SERVE_STATE/shop-server.json"
+  local doc out
+  doc="$(cmd_fleet --json)"
+  assert_eq "$(printf '%s' "$doc" | jq -c '.box.servers')" \
+    '[{"name":"shop-server","owner":"shop-orch","workspace":"alpha","port":8090,"memory_mb":117,"permanent":true}]' \
+    || { _fleet_servers_down; return 1; }
+  out="$(cmd_fleet --workspace alpha)"
+  assert_contains "$out" "server shop-server" || { _fleet_servers_down; return 1; }
+  assert_contains "$out" "permanent" || { _fleet_servers_down; return 1; }
+  case "$(cmd_fleet --workspace beta)" in *shop-server*) echo "beta's block listed alpha's server"; _fleet_servers_down; return 1 ;; esac
+  _fleet_servers_down
+}

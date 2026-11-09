@@ -305,3 +305,19 @@ test_preview_qa_stop_failure_is_retried_by_the_sweep() {
   [ ! -e "$qa" ] && [ ! -f "$CEL_SERVE_STATE/previews/preview-widget-pr7-qa-browser.json" ] || { echo "the sweep left the orphaned QA preview"; _pv_down; return 1; }
   _pv_down
 }
+
+# A permanent server is never a sweep's to stop - not even one whose name a
+# preview record also carries.
+test_preview_sweep_never_stops_a_permanent_server() {
+  _pv_setup
+  mkdir -p "$CEL_SERVE_STATE/previews"
+  jq -n '{name:"preview-widget-pr7",unit:"preview-widget-pr7",kind:"unit",owner:"shop-orch",workspace:"alpha",permanent:true,ttl_seconds:null}' \
+    > "$CEL_SERVE_STATE/preview-widget-pr7.json"
+  jq -n --arg r "$T/ws/repos/widget" --arg w "$(_pv_wt)" \
+    '{name:"preview-widget-pr7",repodir:$r,worktree:$w,head:"x",slug:"acme/widget",pr:7}' > "$CEL_SERVE_STATE/previews/preview-widget-pr7.json"
+  echo MERGED > "$T/pr-state"
+  preview_sweep >/dev/null 2>&1 || true   # the refused teardown reports status 1
+  [ -f "$CEL_SERVE_STATE/preview-widget-pr7.json" ] || { echo "the preview sweep dropped a permanent server"; _pv_down; return 1; }
+  ! grep -q 'stop' "$T/systemctl-calls" 2>/dev/null || { echo "the preview sweep stopped a permanent server"; _pv_down; return 1; }
+  _pv_down
+}

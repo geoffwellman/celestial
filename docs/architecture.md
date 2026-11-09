@@ -293,6 +293,27 @@ also be marked by `cel serve request <name>`. Set `serve.idle_hours` (default
 retention. The steward stops only ledgered servers after TTL, idle timeout, or
 worktree removal, and mails their owner with the recorded restart command.
 
+A server adopted with `cel serve adopt <unit|pid> --owner <alias> --workspace
+<ws> --permanent [--port N] [--why "..."]` is permanent: an agent's standing
+box service, such as a product's live app in a persistent user unit that its
+own follow-main unit recreates. Its record has `permanent: true` and no TTL.
+`serve_sweep` never stops it (no TTL, idle, pressure or worktree reason),
+`_preview_teardown` refuses it (so `preview_sweep` and gc's QA-preview release
+cannot), the orphan reaper (`lib/orphans.sh`, through `serve_permanent_ids`)
+never lists its pid or any process in its unit's cgroup, and the unledgered
+report skips it as it skips every ledgered unit and the pids in its cgroup.
+`serve_stop` ends it only for a person (no agent launch above,
+`cel_agent_role`) or the agent whose launch-verified `CEL_INBOX_ME` is the
+record's owner. A unit is matched by name: a pid adopted permanently inside a
+user service registers that unit, and the unit recreated under its name keeps
+its registration. A unit gone (not loaded, or inactive/failed) for
+`CEL_SERVE_GONE_GRACE_SECONDS` (default 900; the record carries `gone_since`
+meanwhile) or a pid that exited is dropped from the registry with one inbox
+note to its owner and never restarted; an unanswerable user manager changes
+nothing. `cel serve list`, the dashboard's server rows and `cel fleet`
+(`box.servers`, and a `server` line under its workspace) show owner, port,
+memory and `permanent`.
+
 ## Preservation before cleanup
 
 Every GC deletion path checks registry/process evidence and Git state. Dirty

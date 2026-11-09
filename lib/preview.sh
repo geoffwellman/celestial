@@ -114,6 +114,12 @@ _preview_wsdir() { # [workspace] -> wsdir
 _preview_teardown() { # <name>
   local name="$1" meta repodir wt
   meta="$(_preview_meta "$name")"
+  # A permanent server is never a preview's to stop, whatever record shares
+  # its name: only `cel serve stop` by its owner or a person ends it.
+  if [ "$(jq -r '.permanent // false' "$(_serve_file "$name")" 2>/dev/null)" = true ]; then
+    c_warn "cel preview: $name is a registered permanent server - not stopped; cel serve stop $name (its owner or a person) ends it"
+    return 1
+  fi
   if [ -f "$(_serve_file "$name")" ] && ! serve_stop "$name" >/dev/null 2>&1; then
     c_warn "cel preview: could not stop $name - its record and checkout are kept so the next sweep retries"
     return 1

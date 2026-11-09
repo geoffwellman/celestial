@@ -18,6 +18,8 @@
 _CEL_ORPHANS=1
 # shellcheck source=lib/common.sh
 . "${BASH_SOURCE[0]%/*}/common.sh"
+# shellcheck source=lib/serve.sh
+. "${BASH_SOURCE[0]%/*}/serve.sh"   # serve_permanent_ids: registered servers are owned
 
 # The kernel's, unless a test points it at a fixture tree. A real /proc cannot
 # be arranged into "a watcher whose console exited nine days ago" without
@@ -197,6 +199,15 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
   # asking `ss` per candidate would be a subprocess per process on the box.
   local services; services=$'\n'"$(_orphans_service_tree "$pidmap")"$'\n'
 
+  # REGISTERED PERMANENT SERVERS ARE OWNED (`cel serve adopt --permanent`):
+  # their pid, and anything inside their unit, whatever its parent or cwd.
+  local -A perm_pids=()
+  local -a perm_units=()
+  local pk pv
+  while read -r pk pv; do
+    case "$pk" in pid) perm_pids[$pv]=1 ;; unit) [ -n "$pv" ] && perm_units+=("$pv") ;; esac
+  done < <(serve_permanent_ids)
+
   # The candidates: ours, reparented to init, not this shell, not a service,
   # with an argv that is not protected. Classification is unchanged below.
   local -a cands=() links=()
@@ -207,6 +218,12 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
     [ "${st_ppid[$pid]}" = 1 ] || continue
     [ "$pid" = "$$" ] && continue
     case "$services" in *$'\n'"$pid"$'\n'*) continue ;; esac
+    [ -z "${perm_pids[$pid]:-}" ] || continue
+    if [ "${#perm_units[@]}" -gt 0 ]; then
+      local cgl="" cg=""
+      { while IFS= read -r cgl; do case "$cgl" in 0::*) cg="${cgl#0::}"; break ;; esac; done < "$proc/$pid/cgroup"; } 2>/dev/null
+      [ -n "$cg" ] && _serve_cgroup_is_ledgered_unit "$cg" "${perm_units[@]}" && continue
+    fi
     args=""
     while IFS= read -r -d '' part || [ -n "$part" ]; do args="$args$part "; done <"$proc/$pid/cmdline" 2>/dev/null || true
     args="${args% }"

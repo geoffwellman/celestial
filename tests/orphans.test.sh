@@ -492,3 +492,20 @@ test_orphans_hermes_desktop_reaper_preserves_the_owned_process() {
   rm -rf "$t"
   assert_eq "$alive" 1
 }
+
+# A registered permanent server is owned, whatever its parent or its cwd: its
+# pid, and any process inside its unit, is never an orphan.
+test_orphans_never_lists_a_registered_permanent_server() {
+  _orphans_fixture
+  export CEL_SERVE_STATE="$T/serve"; mkdir -p "$CEL_SERVE_STATE"
+  _proc_add "$P" 4050 1 node 30000 "$T/gone" node server.js
+  _proc_add "$P" 4051 1 node 30000 "$T/gone" node app.js
+  printf '0::/user.slice/user-1000.slice/user@1000.service/app.slice/shop-server.service\n' > "$P/4051/cgroup"
+  jq -n '{name:"pid-4050",kind:"pid",pid:4050,owner:"shop-orch",permanent:true}' > "$CEL_SERVE_STATE/pid-4050.json"
+  jq -n '{name:"shop-server",kind:"unit",unit:"shop-server",owner:"shop-orch",permanent:true}' > "$CEL_SERVE_STATE/shop-server.json"
+  local rows; rows="$(orphans_list)"
+  assert_eq "$(_class_of "$rows" 4050)" "" || { unset CEL_SERVE_STATE; rm -rf "$T"; return 1; }
+  assert_eq "$(_class_of "$rows" 4051)" "" || { unset CEL_SERVE_STATE; rm -rf "$T"; return 1; }
+  assert_eq "$(_class_of "$rows" 4010)" "fixture" || { unset CEL_SERVE_STATE; rm -rf "$T"; return 1; }
+  unset CEL_SERVE_STATE; rm -rf "$T"
+}
