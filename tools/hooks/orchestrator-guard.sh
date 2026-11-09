@@ -7,9 +7,11 @@
 # PROMPTS, not hooks, which is exactly why this is a hook and not a permission
 # rule. Never exits non-zero for any reason other than a deny: a broken guard
 # must fail open, not take down every tool call on the box - except in a team
-# member's pane (CEL_ROLE=member), whose scope IS this guard, and for a shell
+# member's pane (CEL_ROLE=member), whose scope IS this guard, for a shell
 # command that looks like a forge review verdict (no agent posts one; the
-# same VERDICT_SHAPED text as the omp and OpenCode adapters): those fail closed.
+# same VERDICT_SHAPED text as the omp and OpenCode adapters), and for a shell
+# command the classifier did not finish in CEL_GUARD_TIMEOUT seconds (default
+# 10, as omp): those fail closed.
 set -uo pipefail
 # A pane that lives in a workspace directory but is NOT an orchestrator - the
 # owner's own assistant, a scratch session - opts out for its whole life with
@@ -57,8 +59,17 @@ path="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.notebook
 verdict=allow
 case "$tool" in
   Bash)
-    if guard_override_honoured "$role" "$cmd"; then exit 0; fi
-    verdict="$(guard_classify "$role" "$cmd")" ;;
+    # The same classifier the omp/pi and OpenCode adapters run, under a
+    # deadline: one that does not finish refuses the call.
+    verdict="$(CEL_ROOT="$CEL_ROOT" timeout -k 2 "${CEL_GUARD_TIMEOUT:-10}" \
+      bash "$CEL_ROOT/tools/hooks/guard-classify.sh" command "$cwd" "$cmd" 2>/dev/null)"
+    case $? in
+      0) ;;
+      124|137)
+        printf 'celestial guard (%s pane): the guard did not finish classifying this command in %ss, so nothing ran - split it into smaller calls\n' "$role" "${CEL_GUARD_TIMEOUT:-10}" >&2
+        exit 2 ;;
+      *) _broken "the classifier failed" <<<"$in" ;;
+    esac ;;
   Read) verdict="$(guard_classify_read "$role" "$path")" ;;
   Edit|Write|MultiEdit|NotebookEdit) verdict="$(guard_classify_path "$role" "$path")" ;;
 esac
