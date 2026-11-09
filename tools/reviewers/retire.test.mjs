@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { parseNative as parseNativeAtLeaf, emptyComposer, checkoutPreserved, validateNativeResponse, validateExitCommitment, validateArchivedRole, validatedProcessEvidence, sessionTopology, selectedRound, durableRound, githubBinary, githubEnv } from './retire.mjs';
+import { INBOX_WATCH_PROGRAMS } from './inbox-watch-programs.mjs';
 
 // These are parser/preservation fixtures, not evidence of real review quality
 // or of the production Rex lifecycle (the latter requires a supported smoke).
@@ -192,6 +193,53 @@ test('a watcher whose tail or shell follows the exact parent is stable infrastru
   assert.deepEqual(polled.processes.map(p => p.pid), [100, 200, 202, 203]);
   assert.deepEqual(validatedProcessEvidence([...shellFollows.slice(0, -1), proc(205, 200, 200, ['sleep', '5'])], r, [], launch), polled);
   refusal(() => validatedProcessEvidence([...shellFollows.slice(0, -1), proc(205, 200, 200, ['sleep', '60'])], r, [], launch), 'unknown_watcher_child', 'protected');
+});
+
+// The pre-#285 `_INBOX_WATCH_JQ`, verbatim (v0.4.0 to main before #285): a
+// watcher started then still runs it after its checkout is updated.
+const PRE_285_WATCH_JQ = String.raw`
+    foreach inputs as $l ({ws: "", m: null};
+      if ($l | startswith("==> ")) then
+        {ws: ($l | ltrimstr("==> ") | rtrimstr(" <==") | ltrimstr($dir) | rtrimstr(".jsonl")), m: null}
+      else .m = (($l | fromjson?) // null) end;
+      select(.m | type == "object") | .ws as $ws | .m
+      | select(.kind != "resolution") | select(.to == $who or .to == "all")
+      | [("w:" + $ws), .kind, .from, ((.message // "") | tostring | gsub("\n"; " "))] | @tsv)`;
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
+const currentWatchJq = () => {
+  const match = fs.readFileSync(path.join(repoRoot, 'lib/inbox.sh'), 'utf8').match(/^_INBOX_WATCH_JQ='([^']*)'$/m);
+  assert.ok(match, 'lib/inbox.sh defines _INBOX_WATCH_JQ');
+  return match[1];
+};
+
+test('a watcher still running an earlier release jq program is recognised; a modified program is not', () => {
+  const launch = fs.mkdtempSync(path.join(os.tmpdir(), 'widget-launch-'));
+  try {
+    fs.mkdirSync(path.join(launch, 'lib'));
+    fs.copyFileSync(path.join(repoRoot, 'lib/inbox.sh'), path.join(launch, 'lib/inbox.sh'));
+    const r = { name: 'widget-pr-7-review', workspace: '/tmp/widget-workspace' };
+    const env = { CEL_REX_RECORD: '/tmp/widget-state/widget-pr-7-review.json', CEL_ROOT: launch, CEL_AGENT_NAME: r.name, CEL_ROLE: 'reviewer', CEL_WORKSPACE: r.workspace };
+    const proc = (pid, ppid, pgrp, argv) => ({ pid, ppid, pgrp, start: String(1000 + pid), comm: path.basename(argv[0]), cwd, exe: `/usr/bin/${path.basename(argv[0])}`, argv, env });
+    const watcherArgs = ['bash', `${launch}/bin/cel`, 'inbox', 'watch', '--parent', '100'];
+    const jq = program => proc(204, 200, 200, ['jq', '-nRr', '--unbuffered', '--arg', 'who', r.name, '--arg', 'dir', '/tmp/widget-inbox/', program]);
+    const tree = program => [proc(100, 1, 100, ['pi']), proc(200, 100, 200, watcherArgs), proc(202, 200, 200, ['tail', '-n', '0', '-F', '-s', '5', '--pid=100', '/tmp/widget-inbox.jsonl']), proc(203, 200, 200, watcherArgs), jq(program)];
+    assert.notEqual(currentWatchJq(), PRE_285_WATCH_JQ);
+    for (const program of [currentWatchJq(), PRE_285_WATCH_JQ]) {
+      assert.deepEqual(validatedProcessEvidence(tree(program), r, [], launch).processes.map(p => p.pid), [100, 200, 202, 203, 204]);
+    }
+    for (const modified of [PRE_285_WATCH_JQ.replace('.kind != "resolution"', '.kind != "status"'), `${PRE_285_WATCH_JQ} `, PRE_285_WATCH_JQ.slice(1), `${currentWatchJq()}\n`, '.']) {
+      refusal(() => validatedProcessEvidence(tree(modified), r, [], launch), 'unknown_watcher_child', 'protected');
+    }
+  } finally { fs.rmSync(launch, { recursive: true, force: true }); }
+});
+
+test('every inbox watch program is listed by hash: the one lib/inbox.sh runs now and the pre-#285 one', () => {
+  const hash = text => createHash('sha256').update(text).digest('hex');
+  // Changing _INBOX_WATCH_JQ fails here until the new program's hash is added
+  // to inbox-watch-programs.mjs (beside the old one, which stays).
+  assert.ok(INBOX_WATCH_PROGRAMS.has(hash(currentWatchJq())), `add ${hash(currentWatchJq())} (lib/inbox.sh _INBOX_WATCH_JQ) to tools/reviewers/inbox-watch-programs.mjs`);
+  assert.ok(INBOX_WATCH_PROGRAMS.has(hash(PRE_285_WATCH_JQ)));
+  for (const entry of INBOX_WATCH_PROGRAMS) assert.match(entry, /^[0-9a-f]{64}$/);
 });
 
 test('Rex UI revisions and clients do not substitute for exact terminal topology', () => {
