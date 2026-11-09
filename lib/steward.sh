@@ -129,18 +129,28 @@ _steward_raise_on_change() { # <ws> <fp> <kind> <message>
 # backlog does not only grow. A `cleared:` status line goes with it, because an
 # item that vanishes silently leaves the operator wondering whether it was
 # fixed or merely lost.
-_steward_clear_id() { # <ws> <id> <message>
-  [ -n "${2:-}" ] || return 0
-  cmd_inbox resolve "$2" --by steward --workspace "$1" >/dev/null 2>&1 || true
-  cmd_inbox send root "cleared: $3" --from steward --workspace "$1" --kind status \
+# ONE LINE PER CHANGE. Every open item under the key goes in one pass: a
+# mailbox from before roll-up holds several, and taking down one per tick said
+# `cleared:` every tick until the last was gone. The line goes out only when
+# something was resolved - a failed resolve leaves the item open, and the next
+# tick tries again rather than having said a false thing.
+_steward_clear_ids() { # <ws> <message> <id...>
+  local ws="$1" msg="$2" id n=0; shift 2
+  for id in "$@"; do
+    [ -n "$id" ] || continue
+    if cmd_inbox resolve "$id" --by steward --workspace "$ws" >/dev/null 2>&1; then n=$((n + 1)); fi
+  done
+  [ "$n" -gt 0 ] || return 0
+  cmd_inbox send root "cleared: $msg" --from steward --workspace "$ws" --kind status \
     >/dev/null 2>&1 || true
-  c_ok "$1: cleared - $3"
+  c_ok "$ws: cleared - $msg"
 }
 
 _steward_clear() { # <ws> <fp> <message>
-  local id; id="$(_inbox_open_fp "$1" "$2" steward root)" || return 0
-  [ -n "$id" ] || return 0
-  _steward_clear_id "$1" "$id" "$3"
+  local ids; ids="$(_inbox_open_fp_ids "$1" "$2" steward root)" || return 0
+  [ -n "$ids" ] || return 0
+  # shellcheck disable=SC2086 # ids are digits, one per line
+  _steward_clear_ids "$1" "$3" $ids
 }
 
 # Every pane herdr can see, one per line. Empty means herdr did not answer,
@@ -172,7 +182,7 @@ _steward_clear_dead_panes() {
       # Herdr pane discovery says nothing about a Rex session's existence.
       case "$pane" in rex/*) continue;; esac
       if printf '%s\n' "$panes" | grep -qxF "$pane"; then continue; fi
-      _steward_clear_id "$ws" "$id" "pane gone"
+      _steward_clear_ids "$ws" "pane gone" "$id"
     done < <(cmd_inbox open --for root --workspace "$ws" --json 2>/dev/null \
       | jq -r 'select(.from == "steward")
                | select(.message | startswith("STALLED WORKER"))
@@ -1394,10 +1404,10 @@ _steward_suite_lock() {
   local raised="$_STEWARD_STATE.suite-lock"
   if [ ! -f "$path" ] || flock -n "$path" -c true >/dev/null 2>&1; then
     [ -f "$raised" ] || return 0
+    # One line per workspace that was told: the clear says it, never a second
+    # `cleared:` beside it.
     for ws in $(registry_names); do
-      _steward_clear "$ws" suite-lock "the suite lock is free again"
-      cmd_inbox send root "cleared: the suite lock is free again - gates are no longer queued" \
-        --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
+      _steward_clear "$ws" suite-lock "the suite lock is free again - gates are no longer queued"
     done
     rm -f "$raised"
     return 0
@@ -2052,17 +2062,18 @@ _steward_rex_generation() {
 # THE WORD IS SENT BEFORE IT IS RECORDED: a send that fails records nothing,
 # so the next round says it again instead of believing root was told.
 _steward_rex_blocked() { # <ws> <version> <why>
-  local ver since stage now msg id
+  local ver since stage now msg id ids
   read -r ver since stage < <(awk '$1 == "rex-upgrade-blocked" { r = $2 " " $3 " " $4 } END { print r }' "$_STEWARD_STATE" 2>/dev/null || true) || true
   now="$(date +%s)"
   case "$since" in ''|*[!0-9]*) since="$now" ;; esac
   if [ "$ver" != "$2" ]; then
     # The older version's item says nothing true any more; the new one says it
     # all. A mailbox that does not parse says nothing this round, and records
-    # nothing, so the next round says it. The old item goes first, or the new
-    # word would land on it as an update and go down with it.
-    id="$(_inbox_open_fp "$1" rex-upgrade-blocked steward root)" || return 0
-    [ -z "$id" ] || cmd_inbox resolve "$id" --by steward --workspace "$1" >/dev/null 2>&1 || true
+    # nothing, so the next round says it. The old items go first - every one,
+    # as a pre-roll-up mailbox can hold several - or the new word would land on
+    # one as an update and go down with it.
+    ids="$(_inbox_open_fp_ids "$1" rex-upgrade-blocked steward root)" || return 0
+    for id in $ids; do cmd_inbox resolve "$id" --by steward --workspace "$1" >/dev/null 2>&1 || true; done
     msg="steward: rex $2 is available, but the managed upgrade will not restart the Rex server: $3"
     set -- "$1" "$2" "$now" 0 "$msg"
   elif [ "${stage:-0}" = 0 ] && [ $((now - since)) -ge 86400 ]; then

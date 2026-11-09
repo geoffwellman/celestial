@@ -576,18 +576,26 @@ _inbox_prune_run() { # <ws> <live roster> <dry 0|1>
 # `cel inbox open` (it asks nobody for anything). Nothing and rc 1 when the
 # mailbox does not parse: whether the item is open is unknown.
 _inbox_open_fp() { # <ws> <fp> [from] [to]
+  local ids; ids="$(_inbox_open_fp_ids "$@")" || return 1
+  [ -z "$ids" ] || printf '%s\n' "${ids##*$'\n'}"
+}
+
+# EVERY open item carrying the key, oldest first. Roll-up keeps it to one, but
+# a mailbox written before roll-up can hold several; whoever takes a condition
+# down must take all of them, or the next pass finds the next one.
+_inbox_open_fp_ids() { # <ws> <fp> [from] [to]
   local f out; f="$(_inbox_file "$1")"
   [ -f "$f" ] || return 0
   [ -n "${2:-}" ] || return 0
   out="$(jq -r -s --arg fp "$2" --arg from "${3:-}" --arg to "${4:-}" '
     ([.[] | select(.kind == "resolution") | .ref]) as $done
-    | [ .[]
-        | select((.fp // "") == $fp)
-        | select(.kind != "update" and .kind != "resolution")
-        | select($from == "" or .from == $from)
-        | select($to == "" or .to == $to)
-        | select([.id] | inside($done) | not) ]
-    | last | (.id // empty)' "$f" 2>/dev/null)" || { _inbox_corrupt "$f"; return 1; }
+    | .[]
+    | select((.fp // "") == $fp)
+    | select(.kind != "update" and .kind != "resolution")
+    | select($from == "" or .from == $from)
+    | select($to == "" or .to == $to)
+    | select([.id] | inside($done) | not)
+    | (.id // empty)' "$f" 2>/dev/null)" || { _inbox_corrupt "$f"; return 1; }
   [ -z "$out" ] || printf '%s\n' "$out"
 }
 
