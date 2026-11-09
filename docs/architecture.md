@@ -166,6 +166,21 @@ containment, not a sandbox: a helper runs as the same user and can still read
 `env.local` or a key file from disk, and `cel-linear` loads the workspace env
 itself when its key is absent.
 
+A reviewer's git is pinned on top of that (`_run_reviewer_git_env`, after the
+scrub): `GIT_EXTERNAL_DIFF`, `GIT_SSH`, `GIT_SSH_COMMAND`,
+`GIT_PROXY_COMMAND`, `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_NAMESPACE`, `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG` are unset (`env
+-u`: git runs an empty `GIT_EXTERNAL_DIFF` as a program), `GIT_PAGER` and
+`PAGER` are `cat`, and config from the environment (`GIT_CONFIG_COUNT`, the
+command-line scope, above any repository's own) sets
+`safe.bareRepository=explicit` - so a bare-repository-shaped directory a PR
+commits is never found from the cwd and its config never read -
+`core.fsmonitor=false` and `core.pager=cat`. `diff.external` is left alone:
+an empty value is a program named "" and breaks every `git diff`. The launch
+also names the reviewer's checkout (`CEL_REVIEW_CHECKOUT`), the one directory
+its `git -C` may name. The guard refuses a reviewer setting, exporting or
+unsetting any `GIT_*` or `PAGER` variable, so its persistent shell keeps them.
+
 Product agents (`solo`, `orchestrator`, lanes, `root`, a role-less `direct`
 agent) and core are NOT scrubbed. Today they inherit the whole pane
 environment above - every owner credential the launching shell, the Herdr or
