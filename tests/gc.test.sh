@@ -1441,6 +1441,74 @@ test_gc_closes_a_finished_extra_reviewer_on_its_own_verdict_only() {
   rm -rf "$T"
 }
 
+# A QA AGENT'S RETIREMENT TAKES ITS PREVIEW WITH IT. Closed as finished (its
+# own approval of the current head) or because its PR merged, the pane goes,
+# its `cel preview --qa` server is stopped and that preview's checkout, data
+# and record removed, and its own checkout released - nothing it ran is left.
+_gc_qa_fixture() {
+  _gc_rv_fixture aaa111 aaa111
+  export CEL_SERVE_STATE="$T/state"
+  QA_CO="$T/reviews/widget-pr-71-qa-browser" QA_PV="$T/ws/.cel/previews/preview-widget-pr71-qa-browser"
+  mkdir -p "$QA_CO" "$QA_PV" "$QA_PV.state/data" "$CEL_SERVE_STATE/previews"
+  reviewers_write "$(reviewers_rows | jq --arg co "$QA_CO" 'map(.focus = "browser" | .kind = "qa" | .agent = "widget-pr-71-qa-browser" | .checkout = $co)')"
+  jq -n --arg wt "$QA_PV" --arg rd "$T/ws/repos/widget" \
+    '{name:"preview-widget-pr71-qa-browser", repo:"widget", pr:71, qa:"browser", head:"aaa111", repodir:$rd, worktree:$wt}' \
+    > "$CEL_SERVE_STATE/previews/preview-widget-pr71-qa-browser.json"
+  printf '{"name":"preview-widget-pr71-qa-browser"}' > "$CEL_SERVE_STATE/preview-widget-pr71-qa-browser.json"
+  serve_stop() { printf 'serve-stop %s\n' "$1" >> "$GC_SINK"; rm -f "$CEL_SERVE_STATE/$1.json"; }
+  _gc_reviewer_agents() {
+    jq -n --arg s "$GC_REVIEW_STATUS" --arg c "$QA_CO" \
+      '{result:{agents:[{pane_id:"w1:p3",name:"widget-pr-71-qa-browser",cwd:$c,agent_status:$s}]}}'
+  }
+  # once its pane is closed nobody stands in its checkout
+  cel_agent_list() { printf '{"result":{"agents":[]}}'; }
+  rex_reviewer_checkout_preserved() { return 1; }
+}
+_gc_qa_gone() { # -> 0 when the pane, the preview and both checkouts are gone
+  assert_contains "$(cat "$GC_SINK")" "close w1:p3" || return 1
+  assert_contains "$(cat "$GC_SINK")" "serve-stop preview-widget-pr71-qa-browser" || { echo "the qa preview's server was not stopped"; return 1; }
+  [ ! -e "$QA_PV" ] || { echo "the qa preview's checkout outlived its agent"; return 1; }
+  [ ! -e "$CEL_SERVE_STATE/previews/preview-widget-pr71-qa-browser.json" ] || { echo "the qa preview's record outlived its agent"; return 1; }
+  [ ! -e "$QA_CO" ] || { echo "the qa agent's checkout outlived it"; return 1; }
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+}
+test_gc_retiring_a_qa_agent_stops_its_preview_and_removes_its_checkouts() {
+  # finished: its own approval of the current head, quiet for the window
+  _gc_qa_fixture
+  jq '."widget#71/qa-browser" = {verdict:"approved", by:"widget-pr-71-qa-browser", head:"aaa111", at:"2026-01-01T00:00:00Z", evidence:[]}' \
+    "$GC_WS/.cel/solo-reviews.json" > "$T/v" && mv "$T/v" "$GC_WS/.cel/solo-reviews.json"
+  local out; out="$(_gc_rv_run 30)"
+  _gc_qa_gone || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "closed the browser QA agent for widget#71" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "preview stopped, checkout removed" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # its PR merged
+  _gc_qa_fixture
+  GC_PR_STATE=MERGED
+  out="$(_gc_reviewers 0 "$(_gc_reviewer_agents)" 2>&1)"
+  _gc_qa_gone || { echo "$out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # blocked is not finished: it waits for whatever stopped it
+  _gc_qa_fixture
+  jq '."widget#71/qa-browser" = {verdict:"blocked", by:"widget-pr-71-qa-browser", head:"aaa111", at:"2026-01-01T00:00:00Z", note:"no preview"}' \
+    "$GC_WS/.cel/solo-reviews.json" > "$T/v" && mv "$T/v" "$GC_WS/.cel/solo-reviews.json"
+  _gc_rv_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "" || { echo "closed a blocked QA agent"; rm -rf "$T"; return 1; }
+  [ -e "$QA_PV" ] || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # a Rex QA agent, retired natively: its preview and checkout go the same way
+  _gc_qa_fixture
+  local rp='rex/session:fixture/block:fixture'
+  reviewers_write "$(reviewers_rows | jq --arg p "$rp" 'map(.pane = $p | .backend = "rex")')"
+  rex_reviewer_retire() { printf '{"status":"retired","reason":"runtime_exited_session_absent_evidence_preserved"}\n'; }
+  out="$(_gc_reviewers 0 "$(_gc_reviewer_agents | jq --arg p "$rp" '.result.agents[0] |= (.pane_id = $p | .backend = "rex")')" 2>&1)"
+  assert_contains "$out" "retired native browser QA agent for widget#71" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GC_SINK")" "serve-stop preview-widget-pr71-qa-browser" || { echo "the Rex QA agent's preview was not stopped"; rm -rf "$T"; return 1; }
+  [ ! -e "$QA_PV" ] && [ ! -e "$QA_CO" ] || { echo "the Rex QA agent's checkouts outlived it"; rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_rows | jq -r length)" 0 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 test_gc_waits_out_the_reviewer_window() {
   _gc_rv_fixture aaa111 aaa111
   _gc_rv_run 29 >/dev/null

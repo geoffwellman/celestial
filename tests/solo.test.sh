@@ -734,3 +734,147 @@ test_solo_approvals_reports_each_reviewer_by_lands_rule() {
   assert_contains "$( cd "$T" && cmd_solo_approvals widget#7)" "$SEC (security)  approved  required: review.extra: lib/auth/session.ts matches" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# ---------------------------------------------------------------- QA agents
+# A QA agent (review.extra kind: qa) is required for UI paths; it records
+# from its own pane (CEL_ROLE=reviewer, its alias the mailbox) with --qa,
+# and evidence named with the head it ran.
+QA=widget-pr-7-qa-browser
+_solo_qa_policy() {
+  cat >> "$T/workspace.yaml" <<'YAML'
+review:
+  model: sonnet
+  extra:
+    - kind: qa
+      focus: browser
+      paths: ['web/**', '**/*.tsx', '**/*.css']
+YAML
+  export STUB_FILES='[[{"filename":"web/Login.tsx","status":"modified"},{"filename":"README.md","status":"modified"}]]'
+  export CEL_SERVE_STATE="$T/state"
+}
+_qa_shot() { # <file name> -> a PNG screenshot at that name in $T/shots
+  mkdir -p "$T/shots"; printf '\x89PNG\r\n\x1a\nIHDR-fixture' > "$T/shots/$1"; printf '%s' "$T/shots/$1"
+}
+_qa_previewed() { # <head> - the browser QA agent's preview of that head is on record
+  mkdir -p "$CEL_SERVE_STATE/previews"
+  jq -n --arg h "$1" '{name:"preview-widget-pr7-qa-browser", repo:"widget", pr:7, qa:"browser", head:$h}' \
+    > "$CEL_SERVE_STATE/previews/preview-widget-pr7-qa-browser.json"
+}
+_qa_as() { # <verdict> <head> [cel solo review args...]
+  local v="$1" h="$2"; shift 2
+  ( export CEL_ROLE=reviewer CEL_INBOX_ME="$QA"; cd "$T" && cmd_solo_review widget#7 "$v" --head "$h" --by "$QA" --qa browser "$@" )
+}
+test_solo_land_refuses_without_a_qa_approval_at_the_head() {
+  _solo_setup; _solo_qa_policy
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged with no QA: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$QA (qa browser; review.extra: web/Login.tsx matches \"**/*.tsx\") has recorded no verdict - start it: cel run reviewer --repo widget --pr 7 --qa browser" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  # the steward's nudge asks the same question
+  assert_eq "$(solo_ready_prs "$T" bundle)" "" || { rm -rf "$T"; return 1; }
+  _qa_previewed "$H"
+  _qa_as approved "$H" --evidence "$(_qa_shot "login-${H:0:12}.png")" --note "login walked" >/dev/null \
+    || { echo "the QA agent could not record"; rm -rf "$T"; return 1; }
+  # the author pushes: the QA approval is for the old head
+  export STUB_HEAD="$B"
+  _review widget#7 approved --head "$B" --by widget-pr-7-review >/dev/null
+  out="$(_land widget#7 2>&1)" && { echo "merged on a stale QA approval"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$QA (qa browser; review.extra: web/Login.tsx matches \"**/*.tsx\") has a verdict for head aaaaaaaaaaaa, not bbbbbbbbbbbb" || { rm -rf "$T"; return 1; }
+  _qa_previewed "$B"
+  _qa_as approved "$B" --evidence "$(_qa_shot "login-${B:0:12}.png")" >/dev/null || { rm -rf "$T"; return 1; }
+  assert_eq "$(solo_ready_prs "$T" bundle)" "widget	7	$B" || { rm -rf "$T"; return 1; }
+  out="$(_land widget#7 2>&1)" || { echo "refused with QA approved at the head: $out"; rm -rf "$T"; return 1; }
+  _merged || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "Reviewed-by: $QA (approved, qa browser)" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# BLOCKED IS NOT APPROVED: a QA agent that could not run the change says so
+# and why; land names it as a gap, never as a pass.
+test_solo_qa_blocked_does_not_count_and_says_why() {
+  _solo_setup; _solo_qa_policy
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out
+  out="$(_qa_as blocked "$H" 2>&1)" && { echo "blocked without a reason: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "a blocked verdict says why - --note" || { rm -rf "$T"; return 1; }
+  _qa_as blocked "$H" --note "repo declares no preview.cmd" >/dev/null || { rm -rf "$T"; return 1; }
+  assert_eq "$(solo_review_get "$T" widget 7 qa-browser | jq -r .verdict)" blocked || { rm -rf "$T"; return 1; }
+  out="$(_land widget#7 2>&1)" && { echo "merged on a blocked QA"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$QA (qa browser; review.extra: web/Login.tsx matches \"**/*.tsx\") could not run the change at aaaaaaaaaaaa: repo declares no preview.cmd" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  assert_eq "$(cd "$T" && cmd_solo_approvals widget#7 --json | jq -c '[.[0].state, (.[0].reviewers[] | select(.kind == "qa") | [.alias, .focus, .state])]')" \
+    "[\"pending\",[\"$QA\",\"browser\",\"blocked\"]]" || { rm -rf "$T"; return 1; }
+  # blocked is a QA agent's word only: a code reviewer always can read the code
+  out="$( (export CEL_ROLE=reviewer CEL_INBOX_ME=widget-pr-7-review; _review widget#7 blocked --head "$H" --by widget-pr-7-review --note x) 2>&1)" \
+    && { echo "a code reviewer recorded blocked"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "blocked is a QA agent's verdict (--qa)" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A QA VERDICT CARRIES ITS EVIDENCE AND STANDS ON A RUN: approved and changes
+# need this slot's preview of that head on record and at least one file -
+# a regular file (no symlink), not empty, the image its name says, named with
+# the head - copied (bytes, sha256, size) beside the verdict. Only the QA
+# agent started for that focus records it.
+test_solo_qa_verdict_needs_head_named_evidence_from_its_own_agent() {
+  _solo_setup; _solo_qa_policy
+  local out good
+  out="$(_qa_as approved "$H" 2>&1)" && { echo "a QA approval with no evidence: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "a QA approved verdict needs --evidence" || { rm -rf "$T"; return 1; }
+  out="$(_qa_as approved "$H" --evidence "$(_qa_shot "login-${H:0:12}.png")" 2>&1)" && { echo "approved with no preview run: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no browser QA preview of widget#7 at aaaaaaaaaaaa is on record" || { rm -rf "$T"; return 1; }
+  _qa_previewed "$B"
+  out="$(_qa_as changes "$H" --evidence "$(_qa_shot "login-${H:0:12}.png")" 2>&1)" && { echo "a preview of another head counted: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no browser QA preview of widget#7 at aaaaaaaaaaaa is on record" || { rm -rf "$T"; return 1; }
+  _qa_previewed "$H"
+  out="$(_qa_as changes "$H" --evidence "$(_qa_shot login.png)" 2>&1)" && { echo "evidence not named with the head: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "is not named with the head it shows (aaaaaaaaaaaa)" || { rm -rf "$T"; return 1; }
+  out="$(_qa_as approved "$H" --evidence "$T/shots/none-${H:0:12}.png" 2>&1)" && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "is not a file" || { rm -rf "$T"; return 1; }
+  ln -s /etc/hostname "$T/shots/link-${H:0:12}.png"
+  out="$(_qa_as approved "$H" --evidence "$T/shots/link-${H:0:12}.png" 2>&1)" && { echo "a symlink was evidence"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "is a symlink" || { rm -rf "$T"; return 1; }
+  : > "$T/shots/empty-${H:0:12}.png"
+  out="$(_qa_as approved "$H" --evidence "$T/shots/empty-${H:0:12}.png" 2>&1)" && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "is empty" || { rm -rf "$T"; return 1; }
+  printf 'not a png' > "$T/shots/fake-${H:0:12}.png"
+  out="$(_qa_as approved "$H" --evidence "$T/shots/fake-${H:0:12}.png" 2>&1)" && { echo "a text file passed as a png"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "is not the image its name says it is" || { rm -rf "$T"; return 1; }
+  out="$(_review widget#7 approved --head "$H" --by "$QA" --qa browser --evidence "$(_qa_shot "a-${H:0:12}.png")" 2>&1)" \
+    && { echo "a QA verdict from no QA pane"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "a browser QA verdict is recorded by the QA agent started for it (cel run reviewer --repo widget --pr 7 --qa browser)" || { rm -rf "$T"; return 1; }
+  out="$( (export CEL_ROLE=reviewer CEL_INBOX_ME=widget-pr-7-review-security; _review widget#7 approved --head "$H" --by widget-pr-7-review-security --focus security --evidence x) 2>&1)" \
+    && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "--evidence is a QA agent's (--qa)" || { rm -rf "$T"; return 1; }
+  out="$(_qa_as approved "$H" --focus security 2>&1)" && { rm -rf "$T"; return 1; }
+  assert_contains "$out" "--focus and --qa name two different agents" || { rm -rf "$T"; return 1; }
+  good="$(_qa_shot "login-${H:0:12}.png")"
+  printf 'console clean\n' > "$T/shots/console-${H:0:12}.log"
+  _qa_as approved "$H" --evidence "$good" --evidence "$T/shots/console-${H:0:12}.log" >/dev/null || { rm -rf "$T"; return 1; }
+  local rec kept="$T/.cel/qa-evidence/widget-pr-7/qa-browser/login-${H:0:12}.png"
+  rec="$(solo_review_get "$T" widget 7 qa-browser)"
+  assert_eq "$(jq -r .by <<<"$rec")" "$QA" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.evidence[0].path' <<<"$rec")" "$kept" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.evidence[0].sha256' <<<"$rec")" "$(sha256sum "$good" | cut -d' ' -f1)" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.evidence[0].size' <<<"$rec")" "$(stat -c %s "$good")" || { rm -rf "$T"; return 1; }
+  [ -f "$kept" ] && [ ! -L "$kept" ] || { echo "evidence not kept as a file"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.evidence | length' <<<"$rec")" 2 || { rm -rf "$T"; return 1; }
+  # the plain reviewer's and a review extra's slots are untouched
+  assert_eq "$(solo_review_get "$T" widget 7)$(solo_review_get "$T" widget 7 review-browser)" "" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# AN ADVISORY QA AGENT (started by hand, not required) blocks only on its
+# `changes` at the head - the same rule as an advisory reviewer; its
+# `blocked` is not a finding about the change and holds nothing up.
+test_solo_land_advisory_qa_changes_blocks_and_blocked_does_not() {
+  _solo_setup; _solo_qa_policy
+  export STUB_FILES='[[{"filename":"README.md"}]]'
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  _qa_previewed "$H"
+  _qa_as changes "$H" --evidence "$(_qa_shot "submit-${H:0:12}.png")" --note "submit does nothing" >/dev/null || { rm -rf "$T"; return 1; }
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged over a QA finding at the head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$QA (qa browser; started by hand, not required by policy) asked for changes at aaaaaaaaaaaa" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  _qa_as blocked "$H" --note "no browser on this box" >/dev/null || { rm -rf "$T"; return 1; }
+  out="$(_land widget#7 2>&1)" || { echo "an advisory blocked held the land: $out"; rm -rf "$T"; return 1; }
+  _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}

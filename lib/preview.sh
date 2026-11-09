@@ -3,7 +3,8 @@
 # it before it merges - any agent, any repo that declares how it previews.
 #
 #   cel preview <repo>#<pr> [--port N] [--ttl 8h] [--workspace W] [--no-wait]
-#   cel preview <repo>#<pr> --stop
+#               [--qa <focus>] [--head <sha>]
+#   cel preview <repo>#<pr> [--qa <focus>] --stop
 #   cel preview --list [--json]
 #
 # The repo says how in workspace.yaml, in a `preview:` block with two
@@ -33,6 +34,13 @@
 # and idle reaping by the steward), so it is never one of the "unledgered"
 # servers. The steward also stops a preview whose PR is closed or merged, and
 # removes its checkout.
+#
+# A QA AGENT'S PREVIEW (`--qa <focus>`, core/roles/pr-qa.md) is its own: its
+# name, unit, checkout and record carry the focus, so it never shares or
+# stops anyone's plain preview of the same PR, and `--head <sha>` refuses to
+# run any head but the one the agent was started for. Retiring the agent
+# (`cel gc`, reviewer_checkout_release in lib/run.sh) stops it and removes
+# its checkout through preview_qa_stop.
 [ -n "${_CEL_PREVIEW:-}" ] && return 0
 _CEL_PREVIEW=1
 # shellcheck source=lib/common.sh
@@ -43,6 +51,8 @@ _CEL_PREVIEW=1
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/serve.sh
 . "${BASH_SOURCE[0]%/*}/serve.sh"
+# shellcheck source=lib/review-policy.sh
+. "${BASH_SOURCE[0]%/*}/review-policy.sh"   # review_focus_valid: a QA agent's focus
 
 _preview_state() { printf '%s/previews' "$(_serve_state)"; }
 _preview_gh() { "${CEL_PREVIEW_GH:-gh}" "$@"; }
@@ -71,9 +81,17 @@ _preview_subst() { # <string> <port> <host> <data>
   s="${s//\{port\}/$2}"; s="${s//\{host\}/$3}"
   printf '%s' "${s//\{data\}/$4}"
 }
-_preview_name() { # <repo> <pr> -> a cel serve name (<=48 chars)
-  local r; r="$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '-')"
-  r="preview-${r:0:30}-pr$2"
+# A cel serve name (<=48 chars). A QA agent's carries `-qa-<focus>` whole;
+# the repo part is cut to make room for it.
+_preview_name() { # <repo> <pr> [qa-focus] -> a cel serve name
+  local r suffix="-pr$2${3:+-qa-$3}" keep
+  r="$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '-')"
+  if [ -z "${3:-}" ]; then
+    r="preview-${r:0:30}$suffix"
+    printf '%s' "${r:0:48}"; return 0
+  fi
+  keep=$((48 - 8 - ${#suffix})); [ "$keep" -ge 1 ] || keep=1
+  r="preview-${r:0:$keep}$suffix"
   printf '%s' "${r:0:48}"
 }
 _preview_meta() { printf '%s/%s.json' "$(_preview_state)" "$1"; }
@@ -89,11 +107,17 @@ _preview_wsdir() { # [workspace] -> wsdir
 # partial, empty or corrupt removes NOTHING on disk: the checkout path must be
 # absolute and end in .cel/previews/<name>, and the repo absolute, before any
 # rm or git runs - a missing key read as "null" or "" would otherwise be a
-# path relative to wherever the caller stands.
+# path relative to wherever the caller stands. A server that will not stop
+# keeps its record and checkout and fails the call (status 1): the next
+# caller or steward sweep tries again, rather than leaving a server running
+# with nothing on record.
 _preview_teardown() { # <name>
   local name="$1" meta repodir wt
   meta="$(_preview_meta "$name")"
-  [ -f "$(_serve_file "$name")" ] && { serve_stop "$name" >/dev/null 2>&1 || c_warn "cel preview: could not stop $name"; }
+  if [ -f "$(_serve_file "$name")" ] && ! serve_stop "$name" >/dev/null 2>&1; then
+    c_warn "cel preview: could not stop $name - its record and checkout are kept so the next sweep retries"
+    return 1
+  fi
   [ -f "$meta" ] || return 0
   repodir="$(jq -r '.repodir // empty' "$meta" 2>/dev/null || true)"
   wt="$(jq -r '.worktree // empty' "$meta" 2>/dev/null || true)"
@@ -110,8 +134,19 @@ _preview_teardown() { # <name>
   rm -f -- "$meta"
 }
 
-preview_start() { # <wsdir> <repo> <pr> <port|0> <ttl-seconds> <wait 0|1>
-  local wsdir="$1" repo="$2" pr="$3" port="$4" ttl="$5" wait="$6"
+# A QA agent's preview goes when the agent does: stopped, its checkout, data,
+# private HOME and ref removed. Quiet when there is none; status 1 when its
+# server would not stop (its record stays, and the steward's preview_sweep
+# stops it once no agent of that name is live).
+preview_qa_stop() { # <repo> <pr> <qa-focus>
+  local name; name="$(_preview_name "$1" "$2" "$3")"
+  [ -f "$(_preview_meta "$name")" ] || [ -f "$(_serve_file "$name")" ] || return 0
+  _preview_teardown "$name" || return 1
+  c_ok "stopped the $3 QA preview of $1#$2"
+}
+
+preview_start() { # <wsdir> <repo> <pr> <port|0> <ttl-seconds> <wait 0|1> [qa-focus] [head]
+  local wsdir="$1" repo="$2" pr="$3" port="$4" ttl="$5" wait="$6" qa="${7:-}" want="${8:-}"
   local cmd; cmd="$(ws_repo_preview "$wsdir" "$repo" cmd)"
   [ -n "$cmd" ] || die "cel preview: repo '$repo' declares no preview.cmd in workspace.yaml - add
     preview: { cmd: \"<how to start it, with --mock>\", url: \"http://{host}:{port}\" }
@@ -125,9 +160,11 @@ preview_start() { # <wsdir> <repo> <pr> <port|0> <ttl-seconds> <wait 0|1>
     || die "cel preview: $slug#$pr not found"
   state="$(jq -r .state <<<"$info")"; head="$(jq -r .headRefOid <<<"$info")"
   [ "$state" = OPEN ] || die "cel preview: $slug#$pr is $state - only an open PR is previewed"
+  [ -z "$want" ] || [ "$head" = "$want" ] \
+    || die "cel preview: $slug#$pr is at ${head:0:12}, not ${want:0:12} - the PR moved since that head; run the head you were started for, or say so and ask for a new round. Nothing started"
 
   local name meta wt data
-  name="$(_preview_name "$repo" "$pr")"; meta="$(_preview_meta "$name")"
+  name="$(_preview_name "$repo" "$pr" "$qa")"; meta="$(_preview_meta "$name")"
   wt="$wsdir/.cel/previews/$name"; data="$wt.state/data"
   # The same head already running is the same preview: the answer is its url.
   if [ -f "$meta" ] && [ "$(jq -r .head "$meta")" = "$head" ] && [ -f "$(_serve_file "$name")" ]; then
@@ -169,7 +206,12 @@ preview_start() { # <wsdir> <repo> <pr> <port|0> <ttl-seconds> <wait 0|1>
   {
     printf '#!/bin/bash\nset -e\ncd %q\n' "$wt"
     printf 'mkdir -p %q\n' "$data"
-    printf 'exec env -i PATH=%q HOME=%q LANG=C.UTF-8 TERM=dumb CEL_PREVIEW=1 PORT=%q' "$PATH" "$HOME" "$port"
+    # A QA agent's preview gets a private, empty HOME under its own state dir
+    # (removed with it): the app it runs cannot read ~/.config tokens or a
+    # CLI's saved login. A plain preview keeps the real HOME, as before.
+    local phome="$HOME"
+    if [ -n "$qa" ]; then phome="$wt.state/home"; printf 'mkdir -p -m 700 %q\n' "$phome"; fi
+    printf 'exec env -i PATH=%q HOME=%q LANG=C.UTF-8 TERM=dumb CEL_PREVIEW=1 PORT=%q' "$PATH" "$phome" "$port"
     while IFS= read -r kv; do
       [ -n "$kv" ] || continue
       k="${kv%%=*}"; v="${kv#*=}"
@@ -200,8 +242,9 @@ preview_start() { # <wsdir> <repo> <pr> <port|0> <ttl-seconds> <wait 0|1>
   ( CEL_SERVE_WORKTREE="$wt" serve_start "$name" "${CEL_INBOX_ME:-$(id -un)}" "$(ws_name "$wsdir")" "$ttl" "$port" -- "$run" ) \
     || { _preview_teardown "$name"; die "cel preview: could not start the server - nothing is left running or recorded"; }
   jq -n --arg name "$name" --arg repo "$repo" --arg slug "$slug" --argjson pr "$pr" --arg head "$head" \
-    --arg repodir "$repodir" --arg worktree "$wt" --arg wsdir "$wsdir" --argjson port "$port" \
-    --args '{name:$name,repo:$repo,slug:$slug,pr:$pr,head:$head,repodir:$repodir,worktree:$worktree,wsdir:$wsdir,port:$port,urls:$ARGS.positional}' \
+    --arg repodir "$repodir" --arg worktree "$wt" --arg wsdir "$wsdir" --argjson port "$port" --arg qa "$qa" \
+    --args '{name:$name,repo:$repo,slug:$slug,pr:$pr,head:$head,repodir:$repodir,worktree:$worktree,wsdir:$wsdir,port:$port,urls:$ARGS.positional}
+      + (if $qa != "" then {qa:$qa} else {} end)' \
     "${urls[@]}" > "$meta"
 
   if [ "$wait" = 1 ]; then
@@ -246,23 +289,36 @@ preview_sweep() {
     # is not recorded yet): left alone for 10 minutes, then treated as dead.
     if ! jq -e '.head' "$f" >/dev/null 2>&1 && [ -n "$(find "$f" -mmin -10 2>/dev/null)" ]; then continue; fi
     if [ ! -f "$(_serve_file "$name")" ]; then _preview_teardown "$name"; continue; fi
+    # A QA agent's preview outlives its agent only when a retirement could
+    # not stop it: once no live agent bears the name that started it (its
+    # server record's owner), it goes. An unreadable roster changes nothing.
+    if jq -e '.qa' "$f" >/dev/null 2>&1 && declare -F cel_agent_list >/dev/null; then
+      local owner roster
+      owner="$(jq -r '.owner // empty' "$(_serve_file "$name")" 2>/dev/null || true)"
+      if [ -n "$owner" ] && roster="$(cel_agent_list 2>/dev/null)" \
+         && printf '%s' "$roster" | jq -e --arg n "$owner" '(.result.agents | type == "array") and ([.result.agents[] | select(.name == $n)] | length == 0)' >/dev/null 2>&1; then
+        _preview_teardown "$name" && c_ok "steward: stopped $name - its QA agent $owner is gone"
+        continue
+      fi
+    fi
     slug="$(jq -r .slug "$f")"; pr="$(jq -r .pr "$f")"
     state="$(_preview_gh pr view "$pr" --repo "$slug" --json state --jq .state 2>/dev/null || true)"
     case "$state" in
       CLOSED|MERGED)
-        _preview_teardown "$name"
-        c_ok "steward: stopped preview of $slug#$pr - the PR is $state" ;;
+        _preview_teardown "$name" && c_ok "steward: stopped preview of $slug#$pr - the PR is $state" ;;
     esac
   done
 }
 
 cmd_preview() {
-  local target="" port=0 ttl=28800 ws="" stop=0 list=0 json=0 wait=1
+  local target="" port=0 ttl=28800 ws="" stop=0 list=0 json=0 wait=1 qa="" want=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --port) port="${2:-}"; shift 2; [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -gt 0 ] && [ "$port" -le 65535 ] || die "cel preview: bad --port" ;;
       --ttl) ttl="${2:-}"; shift 2; ttl="${ttl%h}"; [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "cel preview: --ttl wants hours (8h)"; ttl=$((ttl * 3600)) ;;
       --workspace) ws="${2:-}"; shift 2 ;;
+      --qa) qa="${2:-}"; shift 2; review_focus_valid "$qa" qa || die "cel preview: $(review_focus_refusal "$qa" qa)" ;;
+      --head) want="${2:-}"; shift 2; [[ "$want" =~ ^[0-9a-f]{40}$ ]] || die "cel preview: --head wants the full 40-character commit SHA" ;;
       --stop) stop=1; shift ;;
       --list) list=1; shift ;;
       --json) json=1; shift ;;
@@ -273,18 +329,23 @@ cmd_preview() {
   done
   if [ "$list" -eq 1 ]; then
     if [ "$json" -eq 1 ]; then preview_list_json; return; fi
-    preview_list_json | jq -r '.[] | [ "\(.repo)#\(.pr)", .head[0:12], (if .running then "running" else "stopped" end), .urls[0] ] | @tsv' \
+    preview_list_json | jq -r '.[] | [ "\(.repo)#\(.pr)\(if .qa then " qa " + .qa else "" end)", .head[0:12], (if .running then "running" else "stopped" end), .urls[0] ] | @tsv' \
       | while IFS=$'\t' read -r a b c d; do printf '%-28s %-13s %-8s %s\n' "$a" "$b" "$c" "$d"; done
     return
   fi
   [[ "$target" =~ ^([A-Za-z0-9_.-]+)#([0-9]+)$ ]] \
-    || die "usage: cel preview <repo>#<pr> [--port N] [--ttl 8h] [--no-wait] | <repo>#<pr> --stop | --list"
+    || die "usage: cel preview <repo>#<pr> [--port N] [--ttl 8h] [--no-wait] [--qa <focus>] [--head <sha>] | <repo>#<pr> [--qa <focus>] --stop | --list"
   local repo="${BASH_REMATCH[1]}" pr="${BASH_REMATCH[2]}"
   if [ "$stop" -eq 1 ]; then
+    if [ -n "$qa" ]; then
+      local qname; qname="$(_preview_name "$repo" "$pr" "$qa")"
+      [ -f "$(_preview_meta "$qname")" ] || [ -f "$(_serve_file "$qname")" ] || { c_warn "no $qa QA preview of $repo#$pr"; return 0; }
+      preview_qa_stop "$repo" "$pr" "$qa"; return 0
+    fi
     local name; name="$(_preview_name "$repo" "$pr")"
     [ -f "$(_preview_meta "$name")" ] || [ -f "$(_serve_file "$name")" ] || { c_warn "no preview of $repo#$pr"; return 0; }
     _preview_teardown "$name"; c_ok "stopped the preview of $repo#$pr"; return 0
   fi
   local wsdir; wsdir="$(_preview_wsdir "$ws")"
-  preview_start "$wsdir" "$repo" "$pr" "$port" "$ttl" "$wait"
+  preview_start "$wsdir" "$repo" "$pr" "$port" "$ttl" "$wait" "$qa" "$want"
 }

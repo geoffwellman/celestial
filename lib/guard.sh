@@ -726,12 +726,12 @@ _GUARD_GH_ALIAS_DENY='deny no agent sets, imports or deletes a gh alias - an ali
 # lets that one call skip the rules. Every runtime adapter asks this, through
 # guard-classify.sh or directly, so they agree on it. It has to lead a
 # command: on a line of its own (`CEL_GUARD_ALLOW_ONCE=1` then a newline) it
-# sets a variable and leads nothing. A team member has none (nobody stands
-# over its pane to approve one), and it never covers a forge review verdict:
-# a person gives that on the forge themselves.
+# sets a variable and leads nothing. A team member and a reviewer have none
+# (nobody stands over their panes to approve one), and it never covers a
+# forge review verdict: a person gives that on the forge themselves.
 guard_override_honoured() { # <role> <command> -> 0 when the one-off lets the call through
   [[ "$2" =~ ^CEL_GUARD_ALLOW_ONCE=1[[:space:]] ]] || return 1
-  if [ "$1" = member ] || [ "${CEL_ROLE:-}" = member ]; then return 1; fi
+  if [ "$1" = member ] || [ "${CEL_ROLE:-}" = member ] || [ "${CEL_ROLE:-}" = reviewer ]; then return 1; fi
   local lines first
   lines="$(_guard_lines "$2")"; first="${lines%%$'\n'*}"
   [[ "$first" =~ ^CEL_GUARD_ALLOW_ONCE=1[[:space:]]+[^[:space:]] ]] || return 1
@@ -1523,6 +1523,69 @@ _guard_rex_writes() { # <command> -> 0 when a piece runs a non-read rex command
   return 1
 }
 
+# ── reviewers (CEL_ROLE=reviewer; lib/run.sh `cel run reviewer`) ──────────────
+# A REVIEWER JUDGES; IT CHANGES NOTHING IT JUDGES. Every CEL_ROLE=reviewer -
+# the plain reviewer, an extra one (--focus) and a QA agent (--qa) alike -
+# reads, records its own verdict (cel solo review binds --by to its own
+# mailbox), mails (cel inbox), comments (gh pr comment, gh pr review
+# --comment) and runs the change (cel preview, cel serve, a browser). Its
+# product's agent does everything else. So git, cel and gh are ALLOWLISTS for
+# it, judged per piece that runs them (a review message that mentions `git
+# push` is mail); herdr's writes and any forge write by hand are refused.
+
+# git: every global option stripped (those that run commands - -c,
+# --config-env, --exec-path - refused outright), then a read verb. `fetch`
+# only into remote-tracking refs: no refspec with a colon or a +, no
+# --force, no --upload-pack. A reviewer needs no checkout of its own: cel
+# run reviewer makes its detached checkout before it starts.
+_guard_reviewer_git() { # <segment> -> 0 when allowed
+  local -a t; read -r -a t <<<"$1"
+  local i=1 n=${#t[@]} a
+  while [ "$i" -lt "$n" ]; do
+    case "${t[i]}" in
+      -c|--config-env|--config-env=*|--exec-path|--exec-path=*) return 1 ;;
+      -C|--git-dir|--work-tree|--namespace|--super-prefix) i=$((i + 2)) ;;
+      --version|--help|-h|-v) return 0 ;;
+      -*) i=$((i + 1)) ;;
+      *) break ;;
+    esac
+  done
+  [ "$i" -lt "$n" ] || return 0
+  case "${t[i]}" in
+    diff|log|show|status|rev-parse|ls-files|ls-tree|cat-file|blame|grep|merge-base|describe|range-diff|for-each-ref|show-ref|shortlog|rev-list|name-rev|version|help) return 0 ;;
+    fetch)
+      for a in "${t[@]:i+1}"; do
+        case "$a" in *:*|+*|-f|--force|--upload-pack*|--refmap*) return 1 ;; esac
+      done
+      return 0 ;;
+  esac
+  return 1
+}
+_GUARD_REVIEWER_CEL='^cel$|^cel (help|version|status|fleet|profiles|budget|people)( |$)|^cel solo (review|approvals)( |$)|^cel inbox( |$)|^cel preview( |$)|^cel serve (list|start|stop)( |$)|^cel forge (pr (view|checks|reviews|list)|run (list|view|logs)|repo|whoami)( |$)|^cel (decide|learn) list( |$)|^cel sessions( --json)?$'
+_GUARD_REVIEWER_GH='^gh$|^gh (help|version|status|search|browse|auth status|api|pr (view|diff|checks|list|status|comment|review)|issue (view|list|comment)|run (view|list|watch)|repo view)( |$)'
+_guard_reviewer() { # <command> -> allow | deny <reason>
+  local seg
+  if _guard_forge_raw_write "$1" || _guard_gh_api_writes "$1"; then
+    printf 'deny a reviewer changes no forge state by hand - it records its own verdict (cel solo review) and reports to the product'"'"'s agent'
+    return 0
+  fi
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    case "$seg" in
+      git|git\ *)
+        _guard_reviewer_git "$seg" || { printf 'deny a reviewer runs read-only git (diff, log, show, status, rev-parse, ls-files, cat-file, blame, grep, merge-base, describe, fetch into remote-tracking refs) - it writes no repository and judges the PR as pushed: %s' "$seg"; return 0; } ;;
+      cel|cel\ *)
+        [[ "$seg" =~ $_GUARD_REVIEWER_CEL ]] || { printf 'deny a reviewer runs only cel solo review|approvals, inbox, preview, serve list|start|stop, forge reads, fleet, status, profiles, budget, people, decide|learn list and help - the product'"'"'s agent does the rest: %s' "$seg"; return 0; } ;;
+      gh\ *)
+        [[ "$seg" =~ $_GUARD_REVIEWER_GH ]] || { printf 'deny a reviewer runs only gh reads, gh pr comment and gh pr review --comment - merging, closing, editing and checking out are the product'"'"'s agent'"'"'s: %s' "$seg"; return 0; } ;;
+      herdr\ *)
+        if [[ "$seg" =~ ^herdr\ (agent\ (start|stop|prompt|focus)|worktree|pane\ (close|split|send-text|send-keys|run)|(tab|workspace)\ (create|close))(\ |$) ]]; then
+          printf 'deny a reviewer starts, stops and types into no agents or panes - ask the product'"'"'s agent'; return 0
+        fi ;;
+    esac
+  done < <(_guard_segments "$1")
+  printf allow
+}
+
 guard_classify() { # <role> <command>
   local role="$1" raw="$2" cmd
   # The commands the line runs, one per line, as bash reads it (_guard_lines):
@@ -1561,6 +1624,9 @@ guard_classify() { # <role> <command>
     printf 'deny a team member or reviewer is a window in its product agent'"'"'s Rex session: it runs only read-only rex commands (ls, inspect, capture, block call process) - ask the product agent'
     return 0
   fi
+  # A reviewer is judged by its launch role alone, wherever it stands: a
+  # reviewer pane under a workspace is not that workspace's root.
+  if [ "${CEL_ROLE:-}" = reviewer ]; then _guard_reviewer "$cmd"; return 0; fi
   if [ "$role" = core ]; then
     local cd; cd="$(_guard_core "$cmd")"
     [ -z "$cd" ] || { printf '%s' "$cd"; return 0; }
@@ -1568,12 +1634,6 @@ guard_classify() { # <role> <command>
   # `other` is not the plane's concern.
   case "$role" in solo) _guard_solo "$cmd"; return 0;; esac
   case "$role" in member) _guard_member "$cmd"; return 0;; esac
-  # A reviewer (CEL_ROLE=reviewer) judges a PR; closing or readying one is
-  # its product agent's.
-  if [ "$role" = other ] && [ "${CEL_ROLE:-}" = reviewer ] && _guard_starts "$cmd" 'cel forge pr (close|ready)' 'cel forge run rerun'; then
-    printf 'deny a reviewer closes, readies and reruns nothing - it reports to the product'"'"'s agent, which does'
-    return 0
-  fi
   case "$role" in other) printf allow; return 0;; esac
 
   # A forge changed by hand (curl at its API, tea), anywhere in the line.

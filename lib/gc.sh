@@ -625,8 +625,8 @@ _gc_unknown_clear() { # <pane> <repo> <pr>
 # in both is ONE reviewer - keyed by pane id, so it is never closed or
 # counted twice.
 _gc_reviewer_candidates() { # <rows> <agents-json> -> one JSON object per line
-  local out='[]' repo pr pane agent status rd backend observed ws attributed focus
-  while IFS=$'\x1f' read -r repo pr pane agent rd backend ws focus; do
+  local out='[]' repo pr pane agent status rd backend observed ws attributed focus kind
+  while IFS=$'\x1f' read -r repo pr pane agent rd backend ws focus kind; do
     [ -n "$repo" ] && [ -n "$pane" ] || continue
     # A recorded pane that is not on the roster has gone by other means.
     # `gone` is a stale row, dropped as bookkeeping rather than closed.
@@ -643,16 +643,16 @@ _gc_reviewer_candidates() { # <rows> <agents-json> -> one JSON object per line
     fi
     out="$(printf '%s' "$out" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
       --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg rd "$rd" --arg b "$backend" --arg ws "$ws" \
-      --arg f "$focus" --argjson attributed "$attributed" \
-      '. + [{repo:$r, pr:$p, focus:$f, pane:$pane, agent:$a, status:$s, cwd:$c, repodir:$rd, backend:$b, workspace:$ws, recorded:true, attributed:$attributed}]')"
-  done < <(printf '%s' "$1" | jq -r "$_REVIEWERS_JQ_SCOPE"'.[] | [.repo, (.pr | tostring), .pane, (.agent // ""), (.repodir // ""), (.backend // "herdr"), (rv_ws // ""), (.focus // "")] | join("\u001f")')
-  while IFS=$'\t' read -r repo pr pane agent status backend focus; do
+      --arg f "$focus" --arg k "${kind:-review}" --argjson attributed "$attributed" \
+      '. + [{repo:$r, pr:$p, focus:$f, kind:$k, pane:$pane, agent:$a, status:$s, cwd:$c, repodir:$rd, backend:$b, workspace:$ws, recorded:true, attributed:$attributed}]')"
+  done < <(printf '%s' "$1" | jq -r "$_REVIEWERS_JQ_SCOPE"'.[] | [.repo, (.pr | tostring), .pane, (.agent // ""), (.repodir // ""), (.backend // "herdr"), (rv_ws // ""), (.focus // ""), (.kind // "review")] | join("\u001f")')
+  while IFS=$'\t' read -r repo pr pane agent status backend focus kind; do
     [ -n "$pane" ] || continue
     printf '%s' "$out" | jq -e --arg p "$pane" 'any(.[]; .pane == $p)' >/dev/null 2>&1 && continue
     out="$(printf '%s' "$out" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
       --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg b "${backend:-herdr}" \
-      --arg ws "$(reviewer_pane_workspace "$2" "$pane")" --arg f "$focus" \
-      '. + [{repo:$r, pr:$p, focus:$f, pane:$pane, agent:$a, status:$s, cwd:$c, backend:$b, workspace:$ws, recorded:false}]')"
+      --arg ws "$(reviewer_pane_workspace "$2" "$pane")" --arg f "$focus" --arg k "${kind:-review}" \
+      '. + [{repo:$r, pr:$p, focus:$f, kind:$k, pane:$pane, agent:$a, status:$s, cwd:$c, backend:$b, workspace:$ws, recorded:false}]')"
   done < <(reviewers_discover "$2")
   printf '%s' "$out" | jq -c '.[]'
 }
@@ -680,7 +680,7 @@ _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
 # panes had no row - and applies them under the registry lock to whatever
 # the file says by then. A row this sweep never saw is never touched.
 _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
-  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' attrib='[]' repo pr pane agent status cwd state repodir backend focus recover=()
+  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' attrib='[]' repo pr pane agent status cwd state repodir backend focus kind who recover=()
   reviewers_closed=0
   printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   local rv_what="" rv_prev='{}' rv_next='{}' rv_file
@@ -696,9 +696,13 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       | jq -r '[.repo, .pr, .pane, .agent, .status, .cwd] | @tsv')
     backend="$(printf '%s' "$cand" | jq -r '.backend // "herdr"')"
     repodir="$(printf '%s' "$cand" | jq -r '.repodir // ""')"
-    # An extra reviewer (`cel run reviewer --focus`) is closed by the same
-    # facts as the plain one; only its verdict and its checkout are its own.
+    # An extra reviewer (`cel run reviewer --focus`) or QA agent (`--qa`) is
+    # closed by the same facts as the plain one; only its verdict and its
+    # checkout are its own - and a QA agent's preview, which goes with it.
     focus="$(printf '%s' "$cand" | jq -r '.focus // ""')"
+    kind="$(printf '%s' "$cand" | jq -r '.kind // "review"')"
+    who="reviewer"
+    if [ "$kind" = qa ]; then who="$focus QA agent"; elif [ -n "$focus" ]; then who="$focus reviewer"; fi
     if [ "$backend" = rex ] || [[ "$pane" == rex/* ]]; then
       local retirement retirement_rc=0 retirement_status retirement_reason retirement_detail
       retirement="$(rex_reviewer_retire "$repo" "$pr" "$pane" "$agent" "$dry" "$repodir")" || retirement_rc=$?
@@ -712,7 +716,17 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       elif [ "$retirement_rc" = 0 ] && [ "$dry" = 0 ] && [ "$retirement_status" = retired ]; then
         drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
         reviewers_closed=$((reviewers_closed + 1))
-        c_ok "retired native reviewer for $repo#$pr (pane $pane; native evidence and checkout kept)"
+        # The runtime is retired. A QA agent's preview has nobody driving it
+        # and its checkout is not its evidence (that was copied with its
+        # verdict): both go the way the Herdr paths take them
+        # (reviewer_checkout_release), the checkout still subject to the
+        # retained-native-evidence and occupant vetoes.
+        if [ "$kind" = qa ]; then
+          reviewer_checkout_release "$repo" "$pr" "$pane"
+          c_ok "retired native $who for $repo#$pr (pane $pane; native evidence kept, preview stopped, checkout released)"
+        else
+          c_ok "retired native $who for $repo#$pr (pane $pane; native evidence and checkout kept)"
+        fi
       elif [ "$status" = gone ] && _gc_rex_row_runtime_gone "$agent" "$pane" "$retirement"; then
         # Gone by other means, with no retirement of ours in flight: the row
         # is bookkeeping, and keeping it would refuse every relaunch for the
@@ -751,17 +765,24 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     case "$state" in
       OPEN)
         # FINISHED IS A FACT TOO: idle, an approved verdict recorded for
-        # the head GitHub shows now, and quiet for the window. Its checkout is
-        # kept - `cel run reviewer --repo --pr` brings the reviewer back.
-        if _gc_reviewer_finished "$repo" "$pr" "$cwd" "$repodir" "$pane" "$status" "$focus"; then
+        # the head GitHub shows now, and quiet for the window. A reviewer's
+        # checkout is kept - `cel run reviewer --repo --pr` brings it back; a
+        # QA agent's preview is stopped and its checkout removed, since a
+        # re-test is a new head and a new preview anyway.
+        if _gc_reviewer_finished "$repo" "$pr" "$cwd" "$repodir" "$pane" "$status" "$focus" "$kind"; then
           if [ "$dry" -eq 1 ]; then
-            c_ok "would close the finished reviewer for $repo#$pr (verdict recorded, pane $pane)"
+            c_ok "would close the finished $who for $repo#$pr (verdict recorded, pane $pane)"
           elif lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
-            drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
             local mbr; mbr="$(mem_tree_rss_mb "$cwd" 2>/dev/null || printf 0)"; [[ "$mbr" =~ ^[0-9]+$ ]] || mbr=0
-            c_ok "closed the ${focus:+$focus }reviewer for $repo#$pr (verdict recorded for the current head, pane $pane, freed ~${mbr}M; checkout kept)"
+            if [ "$kind" = qa ]; then
+              reviewer_checkout_release "$repo" "$pr" "$pane"
+              c_ok "closed the $who for $repo#$pr (verdict recorded for the current head, pane $pane, freed ~${mbr}M; preview stopped, checkout removed)"
+            else
+              c_ok "closed the $who for $repo#$pr (verdict recorded for the current head, pane $pane, freed ~${mbr}M; checkout kept)"
+            fi
+            drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
             reviewers_closed=$((reviewers_closed + 1))
-            rv_what="$rv_what${rv_what:+, }$repo#$pr reviewer ~${mbr}M"
+            rv_what="$rv_what${rv_what:+, }$repo#$pr $who ~${mbr}M"
             continue
           else
             c_warn "could not close pane $pane for $repo#$pr - kept"
@@ -791,7 +812,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     # outlives its reviewer is litter. Released before the row is dropped,
     # because the row is where the path is written down.
     reviewer_checkout_release "$repo" "$pr" "$pane"
-    c_ok "closed the ${focus:+$focus }reviewer for $repo#$pr (PR $state, pane $pane)"
+    c_ok "closed the $who for $repo#$pr (PR $state, pane $pane)"
     reviewers_closed=$((reviewers_closed + 1))
   done < <(_gc_reviewer_candidates "$rows" "$agents")
   # A dry run establishes nothing to write: it closes no pane, drops no
@@ -839,9 +860,11 @@ _gc_rex_row_runtime_gone() { # <agent> <pane> <retirement-json>
 # 0 retired (eligible on a dry run), 3 protected, 2 unknown, and 4 when this
 # PR has no Rex reviewer to retire - none at all, or a Herdr one, which keeps
 # its canonical GC path.
-# An extra reviewer is targeted by its focus; with none, the plain reviewer.
-reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1> [focus]
-  local wsdir="$1" repo="$2" pr="$3" dry="$4" focus="${5:-}" roster rows selected pane agent backend result rc=0 status
+# An extra reviewer is targeted by its focus (and a QA agent by its focus and
+# kind `qa`); with none, the plain reviewer. A retired QA agent's preview is
+# stopped with it (lib/preview.sh preview_qa_stop).
+reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1> [focus] [kind]
+  local wsdir="$1" repo="$2" pr="$3" dry="$4" focus="${5:-}" kind="${6:-review}" roster rows selected pane agent backend result rc=0 status
   roster="$(cel_agent_list 2>/dev/null)" \
     && printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
     || { printf '%s\n' '{"status":"unknown","reason":"native_inventory_unreadable"}'; return 2; }
@@ -850,8 +873,8 @@ reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1> [focus]
   # row with no proven workspace is this one's only by the registry key's own
   # rule (lib/run.sh rv_key: no other workspace has the repo).
   selected="$(_gc_reviewer_candidates "$rows" "$roster" \
-    | jq -sc --arg r "$repo" --arg p "$pr" --arg f "$focus" --arg ws "$wsdir" --argjson here "$(_reviewers_here "$wsdir" "$repo")" \
-      '[.[] | select(.repo == $r and (.pr|tostring) == $p and (.focus // "") == $f
+    | jq -sc --arg r "$repo" --arg p "$pr" --arg f "$focus" --arg k "$kind" --arg ws "$wsdir" --argjson here "$(_reviewers_here "$wsdir" "$repo")" \
+      '[.[] | select(.repo == $r and (.pr|tostring) == $p and (.focus // "") == $f and (.kind // "review") == $k
           and (if (.workspace // "") == "" then $here else .workspace == $ws end))]')" \
     || { printf '%s\n' '{"status":"unknown","reason":"candidate_inventory_invalid"}'; return 2; }
   case "$(printf '%s' "$selected" | jq length)" in
@@ -867,6 +890,9 @@ reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1> [focus]
   status="$(printf '%s' "$result" | jq -er '.status | select(type == "string")' 2>/dev/null)" \
     || { printf '%s\n' '{"status":"unknown","reason":"invalid native retirement response"}'; return 2; }
   if [ "$rc" = 0 ] && [ "$dry" = 0 ] && [ "$status" = retired ]; then
+    # A QA agent's preview and checkout go with it, released while its row
+    # still names them (reviewer_checkout_release, as gc's Herdr paths do).
+    [ "$kind" != qa ] || reviewer_checkout_release "$repo" "$pr" "$pane" >&2
     if ! reviewers_update --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
       'map(select(.repo != $r or (.pr|tostring) != $p or .pane != $pane))'; then
       printf '%s' "$result" | jq -c '.status="unknown" | .reason="native runtime retired; reviewer registry cleanup remains owed"'
@@ -882,14 +908,16 @@ reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1> [focus]
   return "$rc"
 }
 
-cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
-  local usage='usage: cel sessions retire-reviewer <repo>#<pr> [--workspace W] [--dry-run]'
+cmd_reviewer_retire() { # repo#pr [--focus F | --qa F] [--workspace W] [--dry-run]
+  local usage='usage: cel sessions retire-reviewer <repo>#<pr> [--focus F | --qa F] [--workspace W] [--dry-run]'
   [ $# -ge 1 ] || die "$usage"
-  local ref="$1" workspace="" dry=0 wsdir repo pr result rc=0
+  local ref="$1" workspace="" dry=0 wsdir repo pr result rc=0 focus="" kind=review
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) [ $# -ge 2 ] || die "$usage"; workspace="$2"; shift 2 ;;
+      --focus) [ $# -ge 2 ] && [ -z "$focus" ] || die "$usage"; focus="$2"; kind=review; shift 2 ;;
+      --qa)    [ $# -ge 2 ] && [ -z "$focus" ] || die "$usage"; focus="$2"; kind=qa; shift 2 ;;
       --dry-run) dry=1; shift ;;
       *) die "$usage" ;;
     esac
@@ -897,10 +925,12 @@ cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
   [[ "$ref" = *#* ]] || die "$usage"
   repo="${ref%%#*}"; pr="${ref#*#}"
   [ -n "$repo" ] && [[ "$pr" =~ ^[0-9]+$ ]] || die "$usage"
+  [ -z "$focus" ] || review_focus_valid "$focus" "$kind" || die "reviewer retirement: $(review_focus_refusal "$focus" "$kind")"
   if [ -n "$workspace" ]; then wsdir="$(registry_require "$workspace")"
   else wsdir="$(ws_current)" || die 'reviewer retirement requires --workspace outside a registered workspace'; fi
   ws_repo_names "$wsdir" | grep -qxF "$repo" || die "reviewer retirement: repo is not in the requested workspace"
-  result="$(reviewer_retire_target "$wsdir" "$repo" "$pr" "$dry")" || rc=$?
+  if [ -n "$focus" ]; then result="$(reviewer_retire_target "$wsdir" "$repo" "$pr" "$dry" "$focus" "$kind")" || rc=$?
+  else result="$(reviewer_retire_target "$wsdir" "$repo" "$pr" "$dry")" || rc=$?; fi
   if [ "$rc" = 4 ]; then
     case "$(printf '%s' "$result" | jq -r .reason)" in
       herdr_reviewer_keeps_gc_path) die 'targeted native retirement supports Rex reviewers; Herdr reviewers retain their canonical GC path' ;;
@@ -931,13 +961,13 @@ gc_reviewer_stop_minutes() {
 
 # Reads/writes rv_prev/rv_next from _gc_reviewers. The clock is keyed by pane
 # AND head, so a push restarts it.
-_gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status> [focus]
+_gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status> [focus] [kind]
   local repo="$1" pr="$2" cwd="$3" repodir="$4" pane="$5" now since key out head mins
   case "$6" in idle|done) ;; *) return 1 ;; esac
   out="$(_gc_reviewer_pr_json "$repo" "$pr" "$cwd" "$repodir" headRefOid)" || return 1
   head="$(printf '%s' "$out" | jq -r '.headRefOid // empty' 2>/dev/null)"
   [ -n "$head" ] || return 1
-  _gc_verdict_recorded "$repo" "$pr" "$head" "${7:-}" || return 1
+  _gc_verdict_recorded "$repo" "$pr" "$head" "${7:-}" "${8:-}" || return 1
   now="${CEL_GC_NOW:-$(date +%s)}"; key="$pane@$head"
   since="$(printf '%s' "$rv_prev" | jq -r --arg k "$key" '.[$k] // empty')"
   [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
@@ -951,13 +981,14 @@ _gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status> [focus]
 
 # An APPROVED verdict for exactly this head, in any workspace, as `cel solo
 # review` records it (solo_review_get, lib/solo.sh) - a finished reviewer
-# must not wait for the merge to be closed. An extra reviewer's is its own
-# slot's (`<repo>#<n>/review-<focus>`). A CHANGES verdict is a reviewer
-# waiting on a re-push: closing it would leave "pushed - re-review" with
-# nobody to read it.
-_gc_verdict_recorded() { # <repo> <pr> <head> [focus]
+# must not wait for the merge to be closed. An extra agent's is its own
+# slot's (`<repo>#<n>/review-<focus>`, `<repo>#<n>/qa-<focus>`). A CHANGES
+# verdict is a reviewer waiting on a re-push, and a QA agent's BLOCKED one is
+# waiting for what stopped it: closing either would leave the next "pushed -
+# re-test" with nobody to read it.
+_gc_verdict_recorded() { # <repo> <pr> <head> [focus] [kind]
   local ws wsdir slot=""
-  [ -z "${4:-}" ] || slot="$(review_slot "$4")"
+  [ -z "${4:-}" ] || slot="$(review_slot "$4" "${5:-review}")"
   while IFS= read -r ws; do
     [ -n "$ws" ] || continue
     wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
@@ -984,7 +1015,7 @@ _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
   local checkout base suffix
   checkout="$(printf '%s' "$cand" | jq -r '.cwd // ""')"
   checkout="$(pane_cwd "$checkout")"
-  base="$(reviewer_checkout_path "$repo" "$pr" "${focus:-}")"
+  base="$(reviewer_checkout_path "$repo" "$pr" "${focus:-}" "${kind:-review}")"
   case "$checkout" in
     "$base") ;;
     "$base".round.*)
@@ -992,10 +1023,11 @@ _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
       checkout="$base.round.$suffix" ;;
     *) checkout="" ;;
   esac
-  adopt="$(printf '%s' "$adopt" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" --arg f "${focus:-}" \
+  adopt="$(printf '%s' "$adopt" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" --arg f "${focus:-}" --arg k "${kind:-review}" \
     --arg a "$agent" --arg b "${backend:-herdr}" --arg co "$checkout" --arg rd "${repodir:-}" --arg ws "$ws" --argjson t "$(date +%s)" \
     '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, backend:$b, started_at:$t}
       + (if $f != "" then {focus:$f} else {} end)
+      + (if $k != "review" then {kind:$k} else {} end)
       + (if $ws != "" then {workspace:$ws} else {} end)
       + (if $co != "" then {checkout:$co} else {} end)
       + (if $rd != "" then {repodir:$rd} else {} end)]')"

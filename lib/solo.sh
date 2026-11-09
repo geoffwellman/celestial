@@ -4,7 +4,7 @@
 # A solo product's PRs are opened directly by its one agent, and the PR itself
 # is the key for the two acts on them:
 #
-#   cel solo review <repo>#<n> approved|changes --head <sha> --by <alias>
+#   cel solo review <repo>#<n> approved|changes|blocked --head <sha> --by <alias>
 #   cel solo land   <repo>#<n>
 #
 # `land` proves policy, ownership, an approval for the exact head from every
@@ -34,10 +34,28 @@ _CEL_SOLO=1
 . "${BASH_SOURCE[0]%/*}/forge.sh"  # forge_*: the PR, its checks, reviews and merge
 # shellcheck source=lib/review-policy.sh
 . "${BASH_SOURCE[0]%/*}/review-policy.sh"  # review_extra_required: the extra reviewers a PR needs
+# shellcheck source=lib/preview.sh
+. "${BASH_SOURCE[0]%/*}/preview.sh"  # _preview_name/_preview_meta: a QA agent's preview record
+
+# Evidence whose name says it is an image must be one: its first bytes are
+# that format's signature. Other files (logs, recordings) pass by name.
+_solo_evidence_type_ok() { # <file>
+  local magic
+  magic="$(head -c 12 -- "$1" | od -An -tx1 | tr -d ' \n')"
+  case "${1,,}" in
+    *.png)         [[ "$magic" == 89504e470d0a1a0a* ]] ;;
+    *.jpg|*.jpeg)  [[ "$magic" == ffd8ff* ]] ;;
+    *.webp)        [[ "$magic" == 52494646????????57454250 ]] ;;
+    *.gif)         [[ "$magic" == 47494638* ]] ;;
+    *) return 0 ;;
+  esac
+}
 
 # One verdict per reviewer of a PR, beside the workspace's other state: the
-# plain reviewer's keyed `<repo>#<n>`, an extra reviewer's `<repo>#<n>/<slot>`
-# (`widget#7/review-security`, lib/review-policy.sh).
+# plain reviewer's keyed `<repo>#<n>`, an extra agent's `<repo>#<n>/<slot>`
+# (`widget#7/review-security`, `widget#7/qa-browser`, lib/review-policy.sh).
+# A QA agent's verdict also lists its evidence, copied under
+# .cel/qa-evidence/<repo>-pr-<n>/<slot>/ so it outlives the agent's checkout.
 _solo_reviews() { printf '%s' "$1/.cel/solo-reviews.json"; }
 _solo_review_key() { printf '%s#%s%s' "$1" "$2" "${3:+/$3}"; } # <repo> <pr> [slot]
 
@@ -87,24 +105,28 @@ solo_plain_approval() { # <wsdir> <repo> <pr> <head> -> approved|changes|stale|n
     elif .verdict == "changes" then "changes" else "none" end' 2>/dev/null || printf none
 }
 
-# THE EXTRA REVIEWERS' WORD ON <head>, by the review policy as it stands now
+# THE EXTRA AGENTS' WORD ON <head>, by the review policy as it stands now
 # and the files the PR touches now (review_extra_required) - never by what
-# was started. One object:
-#   required  each extra reviewer the policy requires: its match (slot, focus,
-#             because, files), its alias, its recorded verdict (or null) and
-#             `state`: approved | changes | stale (a verdict for another head)
-#             | missing (none, or one recorded by anyone but that reviewer)
-#   advisory  each extra reviewer with a verdict on record that the policy
-#             does not require (started by hand with --focus): slot, focus,
-#             alias, verdict, state
+# was started. Extra reviewers and QA agents alike (lib/review-policy.sh);
+# a QA agent's `blocked` (it could not run the change) is never an approval.
+# One object:
+#   required  each extra agent the policy requires: its match (kind, slot,
+#             focus, because, files), its alias, its recorded verdict (or
+#             null) and `state`: approved | changes | blocked | stale (a
+#             verdict for another head) | missing (none, or one recorded by
+#             anyone but that agent)
+#   advisory  each extra agent with a verdict on record that the policy
+#             does not require (started by hand with --focus or --qa):
+#             kind, slot, focus, alias, verdict, state
 #   blocking  the advisory ones whose verdict is `changes` at <head>: a
 #             specialist's finding at the head being merged is a finding,
-#             whoever asked for the specialist
+#             whoever asked for the specialist (an advisory `blocked` says
+#             nothing about the change, and holds nothing up)
 #   ok        every required one approved <head>, and nothing blocks
 # A policy, file list or verdict file that cannot be read fails (status 1,
 # the reason on stderr): absence of evidence is not an approval.
 solo_extra_approvals() { # <wsdir> <repo> <pr> <head> -> JSON
-  local wsdir="$1" repo="$2" pr="$3" head="$4" req f verdicts='{}' slots s aliases='{}' clash clashes='{}'
+  local wsdir="$1" repo="$2" pr="$3" head="$4" req f verdicts='{}' slots s info='{}' kind focus clash
   req="$(_solo_forge review_extra_required "$wsdir" "$repo" "$pr")" || return 1
   f="$(_solo_reviews "$wsdir")"
   if [ -s "$f" ]; then
@@ -115,41 +137,50 @@ solo_extra_approvals() { # <wsdir> <repo> <pr> <head> -> JSON
     ([$req[].slot] + [$v | keys[] | select(startswith($k)) | ltrimstr($k)]) | unique[]')"
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    aliases="$(jq -c --arg s "$s" --arg a "$(review_alias "$repo" "$pr" "${s#review-}")" '.[$s] = $a' <<<"$aliases")"
+    kind="$(review_slot_kind "$s")" focus="$(review_slot_focus "$s")"
     # A reviewer whose alias is cut into another's can never be started
     # (cel run reviewer refuses it), so nothing can ever satisfy its slot.
-    clash="$(review_alias_free "$repo" "$pr" "${s#review-}")" \
-      || clashes="$(jq -c --arg s "$s" --arg c "$clash" '.[$s] = $c' <<<"$clashes")"
+    clash="$(review_alias_free "$repo" "$pr" "$focus" "$kind")" || true
+    info="$(jq -c --arg s "$s" --arg k "$kind" --arg f "$focus" --arg a "$(review_alias "$repo" "$pr" "$focus" "$kind")" \
+      --arg c "$clash" '.[$s] = {kind: $k, focus: $f, alias: $a} + (if $c != "" then {unstartable: $c} else {} end)' <<<"$info")"
   done <<<"$slots"
-  jq -nc --argjson req "$req" --argjson v "$verdicts" --argjson al "$aliases" --argjson cl "$clashes" \
+  jq -nc --argjson req "$req" --argjson v "$verdicts" --argjson in "$info" \
     --arg k "$(_solo_review_key "$repo" "$pr")/" --arg h "$head" '
     def st($r; $a): if ($r | type) != "object" or ($r.by // "") != $a then "missing"
       elif $r.head != $h then "stale"
       elif $r.verdict == "approved" then "approved"
-      elif $r.verdict == "changes" then "changes" else "missing" end;
+      elif $r.verdict == "changes" then "changes"
+      elif $r.verdict == "blocked" then "blocked" else "missing" end;
     ([$req[].slot]) as $rs
-    | { required: [$req[] | ($v[$k + .slot]) as $r | . + {alias: $al[.slot], verdict: $r, state: st($r; $al[.slot])}
-                   + (if $cl[.slot] then {unstartable: $cl[.slot]} else {} end)],
+    | { required: [$req[] | ($v[$k + .slot]) as $r | $in[.slot] as $i
+                   | . + {alias: $i.alias, verdict: $r, state: st($r; $i.alias)}
+                   + (if $i.unstartable then {unstartable: $i.unstartable} else {} end)],
         advisory: [$v | to_entries[] | select(.key | startswith($k)) | (.key | ltrimstr($k)) as $s
-                   | select($rs | index($s) | not)
-                   | {slot: $s, focus: ($s | ltrimstr("review-")), alias: $al[$s], verdict: .value, state: st(.value; $al[$s])}] }
+                   | select($rs | index($s) | not) | $in[$s] as $i
+                   | {kind: $i.kind, slot: $s, focus: $i.focus, alias: $i.alias, verdict: .value, state: st(.value; $i.alias)}] }
     | .blocking = [.advisory[] | select(.state == "changes")]
     | .ok = (all(.required[]; .state == "approved") and (.blocking | length) == 0)'
 }
 
-# What each extra reviewer that stands in the way still owes, one line each,
+# What an extra agent is, in a refusal: `focus security` for a reviewer,
+# `qa browser` for a QA agent.
+_SOLO_JQ_WHAT='def extra_what: if .kind == "qa" then "qa \(.focus)" else "focus \(.focus)" end;
+  def extra_start($repo; $n): if .kind == "qa" then "cel run reviewer --repo \($repo) --pr \($n) --qa \(.focus)"
+    else "cel run reviewer --repo \($repo) --pr \($n) --focus \(.focus)" end;'
+
+# What each extra agent that stands in the way still owes, one line each,
 # with the command that starts it (or reuses it, when it is live).
 solo_extra_gaps() { # <extra-approvals-json> <repo> <pr> <head>
-  printf '%s' "$1" | jq -r --arg repo "$2" --arg n "$3" --arg h "${4:0:12}" "$_REVIEW_JQ_WHY"'
-    "cel run reviewer --repo \($repo) --pr \($n) --focus " as $start
-    | (.required[] | select(.state != "approved")
-       | "\(.alias) (focus \(.focus); \(review_why)) "
+  printf '%s' "$1" | jq -r --arg repo "$2" --arg n "$3" --arg h "${4:0:12}" "$_REVIEW_JQ_WHY$_SOLO_JQ_WHAT"'
+    (.required[] | select(.state != "approved") | extra_start($repo; $n) as $start
+       | "\(.alias) (\(extra_what); \(review_why)) "
          + (if .unstartable then "can never be started, so this PR cannot land: \(.unstartable). Shorten the repo name in workspace.yaml (or move the PR to a repo with a shorter one), or drop \(.focus) from review.extra for these paths"
             elif .state == "changes" then "asked for changes at \($h) - address its findings, push, and ask it to re-review the new head (cel inbox send \(.alias))"
-            elif .state == "stale" then "has a verdict for head \((.verdict.head // "?")[0:12]), not \($h) - ask it to re-review the current head, or start it: \($start)\(.focus)"
-            elif (.verdict | type) == "object" then "has no verdict of its own (the one on record is by \(.verdict.by // "nobody")) - start it: \($start)\(.focus)"
-            else "has recorded no verdict - start it: \($start)\(.focus)" end)),
-      (.blocking[] | "\(.alias) (focus \(.focus); started by hand, not required by policy) asked for changes at \($h) - a finding at the head being merged blocks it: address it, push, and ask it to re-review")'
+            elif .state == "blocked" then "could not run the change at \($h): \(.verdict.note // "no reason given") - fix what stopped it (the repo'"'"'s preview: in workspace.yaml, the box) and ask it to try again (cel inbox send \(.alias)); blocked is not an approval"
+            elif .state == "stale" then "has a verdict for head \((.verdict.head // "?")[0:12]), not \($h) - ask it to re-review the current head, or start it: \($start)"
+            elif (.verdict | type) == "object" then "has no verdict of its own (the one on record is by \(.verdict.by // "nobody")) - start it: \($start)"
+            else "has recorded no verdict - start it: \($start)" end)),
+      (.blocking[] | "\(.alias) (\(extra_what); started by hand, not required by policy) asked for changes at \($h) - a finding at the head being merged blocks it: address it, push, and ask it to re-review")'
 }
 
 # A solo product's PRs that `cel solo land` would merge right now - by the
@@ -221,8 +252,8 @@ _solo_resolve() { # <ref> <workspace-or-empty>
 # as lib/land.sh's do.
 _solo_forge() { CEL_FORGE_GH="${GH:-gh}" "$@"; }
 
-cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--focus F] [--note T] [--workspace W]
-  local usage="usage: cel solo review <repo>#<pr> <approved|changes> --head <full-40-char-sha> --by <reviewer-alias> [--focus FOCUS] [--note TEXT] [--workspace NAME]"
+cmd_solo_review() { # <ref> <approved|changes|blocked> --head <sha> --by <alias> [--focus F | --qa F [--evidence FILE]...] [--note T] [--workspace W]
+  local usage="usage: cel solo review <repo>#<pr> <approved|changes|blocked> --head <full-40-char-sha> --by <reviewer-alias> [--focus FOCUS | --qa FOCUS [--evidence FILE]...] [--note TEXT] [--workspace NAME]"
   [ $# -ge 2 ] || die "$usage"
   # THE AUTHOR DOES NOT APPROVE ITS OWN WORK. A solo agent wrote the PR; a
   # verdict it recorded itself would make the review a formality and let it
@@ -230,20 +261,31 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--focu
   [ "${CEL_ROLE:-}" != solo ] \
     || die "cel solo review: a solo agent does not review its own PR - its reviewer (cel run reviewer --repo <repo> --pr <n>) records the verdict"
   local ref="$1" verdict="$2"; shift 2
-  local by="" note="" workspace="" head="" head_given=0 focus=""
+  local by="" note="" workspace="" head="" head_given=0 focus="" qa=""
+  local -a evidence=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --by)        [ $# -ge 2 ] || die "$usage"; by="$2"; shift 2 ;;
       --note)      [ $# -ge 2 ] || die "$usage"; note="$2"; shift 2 ;;
       --head)      [ $# -ge 2 ] || die "$usage"; head="$2"; head_given=1; shift 2 ;;
       --focus)     [ $# -ge 2 ] || die "$usage"; focus="$2"; shift 2 ;;
+      --qa)        [ $# -ge 2 ] || die "$usage"; qa="$2"; shift 2 ;;
+      --evidence)  [ $# -ge 2 ] || die "$usage"; evidence+=("$2"); shift 2 ;;
       --workspace) [ $# -ge 2 ] || die "$usage"; workspace="$2"; shift 2 ;;
       *) die "cel solo review: unknown argument: $1" ;;
     esac
   done
   # Attributed, and
   # bound to the exact commit the reviewer read - never inferred.
-  case "$verdict" in approved|changes) ;; *) die "cel solo review: verdict must be approved or changes (got: $verdict)";; esac
+  case "$verdict" in approved|changes|blocked) ;; *) die "cel solo review: verdict must be approved, changes or blocked (got: $verdict)";; esac
+  [ -z "$focus" ] || [ -z "$qa" ] || die "cel solo review: --focus and --qa name two different agents (an extra reviewer, a QA agent) - give the one you are. Nothing recorded"
+  # BLOCKED is a QA agent's word: it could not run the change (no preview
+  # declared, a build that will not start, no browser). A code reviewer can
+  # always read the code, so it has no such verdict.
+  [ "$verdict" != blocked ] || [ -n "$qa" ] \
+    || die "cel solo review: blocked is a QA agent's verdict (--qa) - it could not run the change; a reviewer reads the code and says approved or changes. Nothing recorded"
+  [ "${#evidence[@]}" -eq 0 ] || [ -n "$qa" ] \
+    || die "cel solo review: --evidence is a QA agent's (--qa) - a reviewer's findings travel by inbox. Nothing recorded"
   [ -n "$by" ] || die "cel solo review: --by <reviewer-alias> is required - an unattributed verdict is not a review"
   [ "$head_given" -eq 1 ] || die "cel solo review: --head <full-40-char-commit-sha> is required - the verdict covers the commit you reviewed"
   [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "cel solo review: --head must be a full 40-character lowercase commit SHA (got: '$head')"
@@ -260,7 +302,7 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--focu
   # environment - the same trust as the author guard above, which any process
   # on the box could imitate; a Rex reviewer is bound to its PR and alias by
   # cel_assert_reviewer_identity (its receipt).
-  local slot="" f
+  local slot="" f k
   if [ -n "$focus" ]; then
     review_focus_valid "$focus" || die "cel solo review: $(review_focus_refusal "$focus") - nothing recorded"
     [ "$by" = "$(review_alias "$SOLO_REPO" "$SOLO_PR" "$focus")" ] \
@@ -268,16 +310,58 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--focu
     [ "${CEL_ROLE:-}" = reviewer ] && [ "${CEL_INBOX_ME:-}" = "$by" ] \
       || die "cel solo review: a $focus verdict is recorded by the reviewer started for it (cel run reviewer --repo $SOLO_REPO --pr $SOLO_PR --focus $focus), from its own pane - nothing recorded"
     slot="$(review_slot "$focus")"
+  elif [ -n "$qa" ]; then
+    # A QA AGENT'S VERDICT, by the same rule: only from the QA agent started
+    # for that focus, under its alias (lib/review-policy.sh).
+    review_focus_valid "$qa" qa || die "cel solo review: $(review_focus_refusal "$qa" qa) - nothing recorded"
+    [ "$by" = "$(review_alias "$SOLO_REPO" "$SOLO_PR" "$qa" qa)" ] \
+      || die "cel solo review: the $qa QA agent of $SOLO_REPO#$SOLO_PR is $(review_alias "$SOLO_REPO" "$SOLO_PR" "$qa" qa), not '$by' - nothing recorded"
+    [ "${CEL_ROLE:-}" = reviewer ] && [ "${CEL_INBOX_ME:-}" = "$by" ] \
+      || die "cel solo review: a $qa QA verdict is recorded by the QA agent started for it ($(review_start_cmd "$SOLO_REPO" "$SOLO_PR" "$qa" qa)), from its own pane - nothing recorded"
+    slot="$(review_slot "$qa" qa)"
   else
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      [ "$by" != "$(review_alias "$SOLO_REPO" "$SOLO_PR" "$f")" ] \
-        || die "cel solo review: $by is the $f reviewer - record its verdict with --focus $f. Nothing recorded"
-    done < <(review_focus_names)
+    for k in $REVIEW_KINDS; do
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ "$by" != "$(review_alias "$SOLO_REPO" "$SOLO_PR" "$f" "$k")" ] || {
+          [ "$k" = qa ] && die "cel solo review: $by is the $f QA agent - record its verdict with --qa $f. Nothing recorded"
+          die "cel solo review: $by is the $f reviewer - record its verdict with --focus $f. Nothing recorded"
+        }
+      done < <(review_focus_names "$k")
+    done
     if [ "${CEL_ROLE:-}" = reviewer ] && [ -n "${CEL_INBOX_ME:-}" ]; then
       [ "$by" = "$CEL_INBOX_ME" ] \
-        || die "cel solo review: you are $CEL_INBOX_ME, not '$by' - a reviewer records only its own verdict (an extra reviewer's with --focus). Nothing recorded"
+        || die "cel solo review: you are $CEL_INBOX_ME, not '$by' - a reviewer records only its own verdict (an extra reviewer's with --focus, a QA agent's with --qa). Nothing recorded"
     fi
+  fi
+  # A QA VERDICT SHOWS WHAT IT SAW. `approved` and `changes` carry at least
+  # one evidence file (a screenshot, a recording, a log): a regular file, not
+  # a symlink, not empty, an image in fact when its name says png/jpg/webp/gif,
+  # and named with the head it shows. And they stand on a run of that head:
+  # this slot's own preview (`cel preview --qa <focus> --head <sha>`, its
+  # record's qa and head) must be on record when the verdict is. `blocked`
+  # says why in --note instead.
+  local h12="${head:0:12}" e
+  if [ -n "$qa" ]; then
+    [ "$verdict" != blocked ] || [ -n "$note" ] \
+      || die "cel solo review: a blocked verdict says why - --note \"<what stopped you running the change>\". Nothing recorded"
+    if [ "$verdict" != blocked ]; then
+      [ "${#evidence[@]}" -gt 0 ] \
+        || die "cel solo review: a QA $verdict verdict needs --evidence <file> (a screenshot or recording of what you saw, named with the head it shows, e.g. login-$h12.png). Nothing recorded"
+      local pmeta; pmeta="$(_preview_meta "$(_preview_name "$SOLO_REPO" "$SOLO_PR" "$qa")")"
+      jq -e --arg q "$qa" --arg h "$head" '.qa == $q and .head == $h' "$pmeta" >/dev/null 2>&1 \
+        || die "cel solo review: no $qa QA preview of $SOLO_REPO#$SOLO_PR at $h12 is on record - a QA $verdict is of the head you ran: $(printf 'cel preview %s#%s --qa %s --head %s' "$SOLO_REPO" "$SOLO_PR" "$qa" "$head"), then record (or record blocked, saying why it would not run). Nothing recorded"
+    fi
+    for e in "${evidence[@]}"; do
+      [ ! -L "$e" ] || die "cel solo review: evidence $e is a symlink - pass the file itself. Nothing recorded"
+      [ -f "$e" ] || die "cel solo review: evidence $e is not a file. Nothing recorded"
+      [ -s "$e" ] || die "cel solo review: evidence $e is empty. Nothing recorded"
+      case "${e##*/}" in
+        *"$h12"*) ;;
+        *) die "cel solo review: evidence ${e##*/} is not named with the head it shows ($h12) - name each file with the head you ran. Nothing recorded" ;;
+      esac
+      _solo_evidence_type_ok "$e" || die "cel solo review: evidence ${e##*/} is not the image its name says it is. Nothing recorded"
+    done
   fi
 
   if [ "$verdict" = approved ]; then
@@ -298,11 +382,28 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--focu
       || die "cel solo review: --head $head is not #$SOLO_PR's current head (${rhead:-unknown}) - re-review the current head. Nothing recorded"
   fi
 
+  # The evidence is copied beside the verdict - the bytes, never a link - with
+  # its sha256 and size: the QA agent's checkout and preview go when it is
+  # retired, its evidence does not.
+  local evjson='[]'
+  if [ "${#evidence[@]}" -gt 0 ]; then
+    local evdir="$SOLO_WSDIR/.cel/qa-evidence/$SOLO_REPO-pr-$SOLO_PR/$slot" dest sum size
+    mkdir -p "$evdir" || die "cel solo review: could not create $evdir - nothing recorded"
+    for e in "${evidence[@]}"; do
+      dest="$evdir/${e##*/}"
+      if [ "$(readlink -f -- "$e")" != "$(readlink -f -- "$dest" 2>/dev/null)" ]; then
+        rm -f -- "$dest"
+        cp --no-dereference -- "$e" "$dest" || die "cel solo review: could not copy $e to $evdir - nothing recorded"
+      fi
+      sum="$(sha256sum -- "$dest" | cut -d' ' -f1)" size="$(stat -c %s -- "$dest")"
+      evjson="$(jq -c --arg p "$dest" --arg s "$sum" --argjson n "$size" '. + [{path:$p, sha256:$s, size:$n}]' <<<"$evjson")"
+    done
+  fi
   _solo_reviews_update "$SOLO_WSDIR" --arg k "$(_solo_review_key "$SOLO_REPO" "$SOLO_PR" "$slot")" --arg v "$verdict" --arg by "$by" \
-    --arg note "$note" --arg head "$head" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.[$k] = {verdict:$v, by:$by, note:$note, head:$head, at:$at}' \
+    --arg note "$note" --arg head "$head" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ev "$evjson" --arg qa "$qa" \
+    '.[$k] = ({verdict:$v, by:$by, note:$note, head:$head, at:$at} + (if $qa != "" then {evidence:$ev} else {} end))' \
     || die "cel solo review: could not write $(_solo_reviews "$SOLO_WSDIR")"
-  c_ok "$SOLO_REPO#$SOLO_PR reviewed: $verdict by $by${focus:+ ($focus)} (head ${head:0:12})"
+  c_ok "$SOLO_REPO#$SOLO_PR reviewed: $verdict by $by${focus:+ ($focus)}${qa:+ (qa $qa${evidence[0]:+, ${#evidence[@]} evidence file(s)})} (head ${head:0:12})"
 }
 
 # THE REPO'S OWN GATE, AT EXACTLY THE HEAD BEING MERGED. Used only when the
@@ -409,10 +510,11 @@ cmd_solo_land() { # <ref> [--workspace W]
     die "cel solo land: #$num is not approved (review decision=$rd, recorded verdict=$(printf '%s' "$rv" | jq -r '.verdict // "none"' 2>/dev/null || printf none))"
   fi
 
-  # AND EVERY EXTRA REVIEWER THE POLICY REQUIRES, from the files the PR
-  # touches now - not from whoever was started. Each counts only by a verdict
-  # its own alias recorded for exactly this head; a specialist started by hand
-  # (--focus, not required) is advisory, except that its `changes` at this
+  # AND EVERY EXTRA AGENT THE POLICY REQUIRES - extra reviewers and QA
+  # agents, from the files the PR touches now, not from whoever was started.
+  # Each counts only by a verdict its own alias recorded for exactly this
+  # head (a QA agent's `blocked` never counts); one started by hand (--focus
+  # or --qa, not required) is advisory, except that its `changes` at this
   # head blocks (solo_extra_approvals).
   local extra extra_err gaps
   extra_err="$(mktemp)"
@@ -427,7 +529,7 @@ $gaps
 Nothing merged."
   fi
   local extra_by
-  extra_by="$(printf '%s' "$extra" | jq -r '.required[] | "Reviewed-by: \(.alias) (approved, focus \(.focus))"')"
+  extra_by="$(printf '%s' "$extra" | jq -r "$_SOLO_JQ_WHAT"'.required[] | "Reviewed-by: \(.alias) (approved, \(extra_what))"')"
   [ -z "$extra_by" ] || approved_via="$approved_via, and $(printf '%s' "$extra" | jq -r '[.required[].alias] | join(", ")')"
 
   # The latest run of each check, from the forge.
@@ -480,24 +582,27 @@ Nothing merged."
   afk_end completed "merged"
   c_ok "landed $SOLO_REPO#$num on $slug (approved via $approved_via)"
   _solo_land_retire_reviewer "$wsdir" "$SOLO_REPO" "$num" \
-    "$(printf '%s' "$extra" | jq -r '[.required[].focus, .advisory[].focus] | unique[]')"
+    "$(printf '%s' "$extra" | jq -r '[.required[].slot, .advisory[].slot] | unique[]')"
 }
 
 # THE MERGE ENDS THE REVIEW. That PR's Rex reviewers - the plain one and each
-# extra one with a verdict or a policy requirement - are retired through the
-# one targeted path (gc.sh reviewer_retire_target): the same native proof and
-# graceful shutdown `cel gc` uses, never a blind close. It is not part of the
-# land's result - the PR is merged whatever happens here - and a reviewer kept
-# now (mid-turn, mail owed, proof unknown) is retried by every `cel gc` sweep.
-# A Herdr reviewer, or none, is left to that sweep as before.
-_solo_land_retire_reviewer() { # <wsdir> <repo> <pr> [focus, one per line]
-  local out rc reason pane focus who
-  local -a foci=("")
-  while IFS= read -r focus; do [ -z "$focus" ] || foci+=("$focus"); done <<<"${4:-}"
-  for focus in "${foci[@]}"; do
-    rc=0; who="$2#$3${focus:+ ($focus)}"
-    if [ -n "$focus" ]; then
-      out="$(. "$CEL_ROOT/lib/gc.sh" && reviewer_retire_target "$1" "$2" "$3" 0 "$focus")" || rc=$?
+# extra one (reviewer or QA agent) with a verdict or a policy requirement -
+# are retired through the one targeted path (gc.sh reviewer_retire_target):
+# the same native proof and graceful shutdown `cel gc` uses, never a blind
+# close. It is not part of the land's result - the PR is merged whatever
+# happens here - and a reviewer kept now (mid-turn, mail owed, proof
+# unknown) is retried by every `cel gc` sweep. A Herdr reviewer, or none, is
+# left to that sweep as before.
+_solo_land_retire_reviewer() { # <wsdir> <repo> <pr> [slot, one per line]
+  local out rc reason pane slot who focus kind
+  local -a slots=("")
+  while IFS= read -r slot; do [ -z "$slot" ] || slots+=("$slot"); done <<<"${4:-}"
+  for slot in "${slots[@]}"; do
+    rc=0 focus="" kind=""
+    [ -z "$slot" ] || { kind="$(review_slot_kind "$slot")"; focus="$(review_slot_focus "$slot")"; }
+    who="$2#$3${slot:+ ($([ "$kind" = qa ] && printf 'qa ')$focus)}"
+    if [ -n "$slot" ]; then
+      out="$(. "$CEL_ROOT/lib/gc.sh" && reviewer_retire_target "$1" "$2" "$3" 0 "$focus" "$kind")" || rc=$?
     else
       out="$(. "$CEL_ROOT/lib/gc.sh" && reviewer_retire_target "$1" "$2" "$3" 0)" || rc=$?
     fi
@@ -517,7 +622,7 @@ _solo_land_retire_reviewer() { # <wsdir> <repo> <pr> [focus, one per line]
 # applies (solo_plain_approval, solo_extra_approvals): for a view to show
 # "approved" exactly when land would take the reviews. One object:
 #   {ref: "<repo>#<n>", head, state: approved|changes|pending|unknown|n/a, reason,
-#    reviewers: [{alias, focus, required, why, state}]}
+#    reviewers: [{alias, kind, focus, required, why, state}]}
 # `unknown` (with `reason`) when the PR, the policy or its files cannot be
 # read; `n/a` for a ref that is not a solo product's PR in the workspace.
 # Checks, conflicts and the gate are land's other questions, not this.
@@ -536,9 +641,9 @@ solo_approvals_json() { # <wsdir> <repo> <pr>
     || { _solo_approvals_unknown "$repo#$pr" "$extra" "$head"; return 0; }
   jq -nc --arg ref "$repo#$pr" --arg h "$head" --arg plain "$plain" --arg pa "$(review_alias "$repo" "$pr")" \
     --argjson x "$extra" "$_REVIEW_JQ_WHY"'
-    ([{alias: $pa, focus: null, required: true, why: "every pull request", state: $plain}]
-     + [$x.required[] | {alias, focus, required: true, why: review_why, state}]
-     + [$x.advisory[] | {alias, focus, required: false, why: "started by hand", state}]) as $rv
+    ([{alias: $pa, kind: "review", focus: null, required: true, why: "every pull request", state: $plain}]
+     + [$x.required[] | {alias, kind, focus, required: true, why: review_why, state}]
+     + [$x.advisory[] | {alias, kind, focus, required: false, why: "started by hand", state}]) as $rv
     | {ref: $ref, head: $h, reason: null, reviewers: $rv,
        state: (if any($rv[]; .state == "changes") then "changes"
                elif $plain == "approved" and $x.ok then "approved" else "pending" end)}'
@@ -566,7 +671,7 @@ cmd_solo_approvals() { # <ref>... [--workspace W] [--json]
   done
   if [ "$json" = 1 ]; then printf '%s\n' "$all"; return 0; fi
   printf '%s' "$all" | jq -r '.[] | "\(.ref)\(if .head then " at " + .head[0:12] else "" end): \(.state)\(if .reason then " - " + .reason else "" end)",
-    (.reviewers[] | "  \(.alias)\(if .focus then " (" + .focus + ")" else "" end)  \(.state)  \(if .required then "required: " else "advisory: " end)\(.why)")'
+    (.reviewers[] | "  \(.alias)\(if .focus then " (" + (if .kind == "qa" then "qa " else "" end) + .focus + ")" else "" end)  \(.state)  \(if .required then "required: " else "advisory: " end)\(.why)")'
 }
 
 cmd_solo() {
@@ -574,6 +679,6 @@ cmd_solo() {
     review)    shift; cmd_solo_review "$@" ;;
     land)      shift; cmd_solo_land "$@" ;;
     approvals) shift; cmd_solo_approvals "$@" ;;
-    *) die "usage: cel solo review <repo>#<pr> approved|changes --head <sha> --by <alias> [--focus F] | cel solo land <repo>#<pr> | cel solo approvals <repo>#<pr>... [--json]" ;;
+    *) die "usage: cel solo review <repo>#<pr> approved|changes|blocked --head <sha> --by <alias> [--focus F | --qa F [--evidence FILE]...] | cel solo land <repo>#<pr> | cel solo approvals <repo>#<pr>... [--json]" ;;
   esac
 }

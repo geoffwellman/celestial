@@ -247,3 +247,61 @@ test_preview_restart_on_a_new_head_clears_the_unit_and_a_failed_start_rolls_back
   [ ! -d "$(_pv_wt)" ] || { echo "failed start left its checkout"; _pv_down; return 1; }
   _pv_down
 }
+
+# A QA AGENT'S PREVIEW IS ITS OWN: `--qa <focus>` gives it a name, unit,
+# checkout and record of its own beside anyone's plain preview of the PR,
+# `--head` pins it to the head the agent was started for, and retirement
+# (preview_qa_stop) removes that one and nothing else.
+test_preview_for_a_qa_agent_is_its_own_and_pinned_to_its_head() {
+  _pv_setup
+  local out qa="$T/ws/.cel/previews/preview-widget-pr7-qa-browser"
+  out="$(cd "$T/ws" && cmd_preview widget#7 --qa browser --head 0123456789abcdef0123456789abcdef01234567 --no-wait 2>&1)" \
+    && { echo "a preview of another head started: $out"; _pv_down; return 1; }
+  assert_contains "$out" "is at ${PV_HEAD:0:12}, not 0123456789ab" || { _pv_down; return 1; }
+  [ ! -e "$qa" ] || { echo "a refused preview left a checkout"; _pv_down; return 1; }
+  out="$(cd "$T/ws" && cmd_preview widget#7 --qa speed --no-wait 2>&1)" && { _pv_down; return 1; }
+  assert_contains "$out" "no qa focus 'speed' - have: browser exploratory mobile-device" || { _pv_down; return 1; }
+  (cd "$T/ws" && cmd_preview widget#7 --no-wait >/dev/null 2>&1) || { _pv_down; return 1; }
+  out="$(cd "$T/ws" && CEL_INBOX_ME=widget-pr-7-qa-browser cmd_preview widget#7 --qa browser --head "$PV_HEAD" --no-wait 2>&1)" \
+    || { printf '%s\n' "$out"; _pv_down; return 1; }
+  assert_eq "$(git -C "$qa" rev-parse HEAD)" "$PV_HEAD" || { _pv_down; return 1; }
+  assert_contains "$(cat "$T/systemd-calls")" "--unit=cel-serve-preview-widget-pr7-qa-browser" || { _pv_down; return 1; }
+  assert_eq "$(jq -r .qa "$CEL_SERVE_STATE/previews/preview-widget-pr7-qa-browser.json")" browser || { _pv_down; return 1; }
+  assert_eq "$(jq -r .owner "$CEL_SERVE_STATE/preview-widget-pr7-qa-browser.json")" widget-pr-7-qa-browser || { _pv_down; return 1; }
+  # its app runs with a private, empty HOME of its own (the plain one keeps the real one)
+  bash "$qa.state/run.sh" >/dev/null 2>&1; bash "$(_pv_wt).state/run.sh" >/dev/null 2>&1
+  assert_contains "$(cat "$qa.state/data/env.txt")" "HOME=$qa.state/home" || { _pv_down; return 1; }
+  [ -d "$qa.state/home" ] && [ -z "$(ls -A "$qa.state/home")" ] || { echo "the qa HOME is not private and empty"; _pv_down; return 1; }
+  assert_contains "$(cat "$(_pv_wt).state/data/env.txt")" "HOME=$HOME" || { _pv_down; return 1; }
+  preview_qa_stop widget 7 browser >/dev/null 2>&1
+  [ ! -e "$qa" ] || { echo "the qa checkout outlived its retirement"; _pv_down; return 1; }
+  [ ! -f "$CEL_SERVE_STATE/previews/preview-widget-pr7-qa-browser.json" ] || { echo "the qa preview record outlived it"; _pv_down; return 1; }
+  [ -d "$(_pv_wt)" ] && [ -f "$CEL_SERVE_STATE/previews/preview-widget-pr7.json" ] || { echo "retiring the qa agent took the plain preview"; _pv_down; return 1; }
+  # and --stop with --qa stops that one only
+  (cd "$T/ws" && cmd_preview widget#7 --qa browser --no-wait >/dev/null 2>&1) || { _pv_down; return 1; }
+  out="$(cmd_preview widget#7 --qa browser --stop 2>&1)"
+  assert_contains "$out" "stopped the browser QA preview of widget#7" || { _pv_down; return 1; }
+  [ ! -e "$qa" ] && [ -d "$(_pv_wt)" ] || { _pv_down; return 1; }
+  _pv_down
+}
+# A QA PREVIEW THAT WILL NOT STOP IS NOT FORGOTTEN: retirement's stop fails
+# loudly and keeps the record and checkout; the steward's sweep stops it once
+# no live agent bears its owner's name, and leaves it while one does.
+test_preview_qa_stop_failure_is_retried_by_the_sweep() {
+  _pv_setup
+  local qa="$T/ws/.cel/previews/preview-widget-pr7-qa-browser"
+  (cd "$T/ws" && CEL_INBOX_ME=widget-pr-7-qa-browser cmd_preview widget#7 --qa browser --no-wait >/dev/null 2>&1) || { _pv_down; return 1; }
+  local real_stop; real_stop="$(declare -f serve_stop)"
+  serve_stop() { return 1; }
+  preview_qa_stop widget 7 browser >/dev/null 2>&1 && { echo "a failed stop reported success"; _pv_down; return 1; }
+  [ -d "$qa" ] && [ -f "$CEL_SERVE_STATE/previews/preview-widget-pr7-qa-browser.json" ] || { echo "a failed stop dropped the record"; _pv_down; return 1; }
+  eval "$real_stop"
+  cel_agent_list() { printf '{"result":{"agents":[{"name":"widget-pr-7-qa-browser","pane_id":"w1:p1"}]}}'; }
+  preview_sweep >/dev/null 2>&1
+  [ -d "$qa" ] || { echo "the sweep stopped a live QA agent's preview"; _pv_down; return 1; }
+  cel_agent_list() { printf '{"result":{"agents":[]}}'; }
+  local out; out="$(preview_sweep 2>&1)"
+  assert_contains "$out" "its QA agent widget-pr-7-qa-browser is gone" || { _pv_down; return 1; }
+  [ ! -e "$qa" ] && [ ! -f "$CEL_SERVE_STATE/previews/preview-widget-pr7-qa-browser.json" ] || { echo "the sweep left the orphaned QA preview"; _pv_down; return 1; }
+  _pv_down
+}

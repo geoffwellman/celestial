@@ -696,13 +696,15 @@ ws_policy_block() { # <wsdir> [product]
     # An agent's verdict is never posted to the forge (lib/guard.sh refuses it
     # in every role); `review.post` no longer does anything (cel doctor says so).
     printf -- '- review verdicts: recorded by the reviewer with `cel solo review <repo>#<n> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"` and reported by inbox; no agent posts a verdict to the forge (comments only)\n'
-    # Said only when the workspace declares extra reviewers (review.extra,
-    # lib/review-policy.sh), so every other workspace's block is unchanged.
+    # Said only when the workspace declares extra reviewers or QA agents
+    # (review.extra, lib/review-policy.sh), so every other workspace's block
+    # is unchanged.
     local extra
     extra="$(_yqr -r '[((.review // {}) | if type == "object" then (.extra // []) else [] end),
         ((.repos // [])[] | (.review // {}) | if type == "object" then (.extra // []) else [] end)]
-      | [.[] | if type == "array" then .[] else empty end | .focus? | strings] | unique | join(", ")' "$d/workspace.yaml" 2>/dev/null)" || extra=""
-    [ -z "$extra" ] || printf -- '- extra reviewers: review.extra in workspace.yaml requires a specialist reviewer (%s) for a PR that touches its paths; `cel run reviewer` starts them with the plain one and says why, and `cel solo land` needs each one'"'"'s approval of the head\n' "$extra"
+      | [.[] | if type == "array" then .[] else empty end | select(type == "object" and (.focus | type) == "string")
+         | (if .kind == "qa" then "qa " else "" end) + .focus] | unique | join(", ")' "$d/workspace.yaml" 2>/dev/null)" || extra=""
+    [ -z "$extra" ] || printf -- '- extra reviewers: review.extra in workspace.yaml requires a specialist reviewer or QA agent (%s) for a PR that touches its paths; `cel run reviewer` starts them with the plain one and says why, and `cel solo land` needs each one'"'"'s approval of the head (a QA agent'"'"'s `blocked` is not one)\n' "$extra"
   fi
   local lt rpr
   for r in $(ws_repo_names "$d"); do

@@ -2565,6 +2565,137 @@ test_reviewers_discover_reads_each_reviewers_pr_and_focus() {
   assert_eq "$(reviewers_discover "$roster" | awk -F'\t' '{print $1 "#" $2 "@" $3 "[" $7 "]"}' | paste -sd' ' -)" \
     "widget#7@w1:p1[] widget#7@w1:p2[security] celestial#277@w1:p3[db-migration]"
 }
+
+# ------------------------------------------- QA agents (--qa, review.extra kind: qa)
+# A QA agent is an extra agent of its own kind: the pr-qa role (it uses the
+# change, it does not read it), the qa focus pack, its own alias, checkout,
+# role file and registry row, launched as a reviewer (CEL_ROLE=reviewer) and
+# told the exact preview and verdict commands for its head.
+test_qa_agent_gets_its_role_pack_alias_checkout_and_row() {
+  _ws_pr_fixture
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --qa browser 2>&1)" \
+    || { echo "qa agent refused: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-qa-browser --kind pi" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^agent start' "$HERDR_LOG")" 1 || { echo "--qa started more than its own agent"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "CEL_INBOX_ME=widget-pr-12-qa-browser" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "CEL_ROLE=reviewer" || { rm -rf "$T"; return 1; }
+  local body; body="$(cat "$T/.cel/reviews/pr-12/qa-browser.role-reviewer.md")" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "You do not review the code" || { echo "not the pr-qa role"; rm -rf "$T"; return 1; }
+  assert_contains "$body" "# qa focus: browser" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "cel preview widget#12 --qa browser --head $HEAD_SHA" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "--by widget-pr-12-qa-browser --qa browser" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "<approved|changes|blocked>" || { rm -rf "$T"; return 1; }
+  assert_contains "$body" "--evidence" || { rm -rf "$T"; return 1; }
+  local row; row="$(reviewers_find "$T" widget 12 browser qa)" || { echo "no row for the qa agent"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '[.agent, .kind, .focus] | join(" ")' <<<"$row")" "widget-pr-12-qa-browser qa browser" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .checkout <<<"$row")" "$T/reviews/widget-pr-12-qa-browser" || { rm -rf "$T"; return 1; }
+  assert_eq "$(git -C "$T/reviews/widget-pr-12-qa-browser" rev-parse HEAD)" "$HEAD_SHA" || { rm -rf "$T"; return 1; }
+  # neither the plain reviewer's slot nor a review extra's
+  assert_fails reviewers_find "$T" widget 12 || { rm -rf "$T"; return 1; }
+  assert_fails reviewers_find "$T" widget 12 browser || { rm -rf "$T"; return 1; }
+  # its release stops its preview and removes its checkout
+  preview_qa_stop() { printf 'qa-preview-stop %s\n' "$*" >> "$HERDR_LOG"; }
+  reviewer_checkout_release widget 12 "" browser qa
+  [ ! -e "$T/reviews/widget-pr-12-qa-browser" ] || { echo "the qa checkout outlived its release"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "qa-preview-stop widget 12 browser" || { echo "release left the qa preview running"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_qa_agent_flags_are_refused_where_they_do_not_belong() {
+  _ws_pr_fixture
+  local out rc=0
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --qa security 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a reviewer pack launched as qa: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no qa focus 'security' - have: browser exploratory mobile-device" || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --qa browser --focus security 2>&1)" \
+    && { echo "--qa and --focus together launched"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "--focus and --qa name two different agents" || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && _cmd_run_in_subshell orchestrator --repo widget --qa browser --dry-run 2>&1)" \
+    && { echo "--qa accepted for an orchestrator"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "--qa names a PR's QA agent" || { rm -rf "$T"; return 1; }
+  ! grep -q "agent start" "$HERDR_LOG" || { rm -rf "$T"; return 1; }
+  # a QA agent is a helper like any reviewer: counted, and held at the budget
+  export ROSTER; ROSTER="$(_roster_of 7 | jq -c '.result.agents += [{name:"gizmo-pr-3-qa-browser", pane_id:"w4:p1", cwd:"/elsewhere", agent_status:"idle"}]')"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in "agent list") printf '%s\n' "$ROSTER" ;; *) : ;; esac
+  }
+  rc=0; out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --qa browser 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "qa agent started over the budget: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "box agent budget: 8 helper agents live, the limit is 8" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# THE POLICY STARTS QA AGENTS TOO: a plain `cel run reviewer` on a PR that
+# touches UI paths starts the plain reviewer and the QA agent, says why, and
+# reuses both when asked again.
+test_plain_reviewer_starts_the_qa_agents_the_ui_paths_require() {
+  _ws_pr_fixture
+  cat >> "$T/workspace.yaml" <<'YAML'
+  extra:
+    - kind: qa
+      focus: browser
+      paths: ['web/**', '**/*.tsx', '**/*.css']
+    - focus: security
+      paths: ['lib/auth/**']
+YAML
+  gh() {
+    case "$*" in
+      *"pulls/12/files"*) printf '%s\n' '[[{"filename":"src/Login.tsx","status":"modified"},{"filename":"README.md","status":"modified"}]]' ;;
+      *"pr view"*) jq -n --arg h "$HEAD_SHA" '{number:12, state:"OPEN", headRefOid:$h, baseRefName:"main"}' ;;
+      *) return 1 ;;
+    esac
+  }
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
+  assert_contains "$out" "extra reviewers: review.extra may add qa browser, security" || { rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)" || { echo "refused: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-review --kind pi" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-qa-browser --kind pi" || { rm -rf "$T"; return 1; }
+  ! grep -q "agent start widget-pr-12-review-security" "$HERDR_LOG" || { echo "started a reviewer no file asked for"; rm -rf "$T"; return 1; }
+  assert_contains "$out" 'browser QA agent for widget#12: review.extra: src/Login.tsx matches "**/*.tsx"' || { rm -rf "$T"; return 1; }
+  reviewers_find "$T" widget 12 >/dev/null && reviewers_find "$T" widget 12 browser qa >/dev/null \
+    || { echo "the reviewer and the qa agent are not both recorded"; rm -rf "$T"; return 1; }
+  : > "$HERDR_LOG"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") reviewers_rows | jq -c '{result:{agents:[.[] | {name:.agent, pane_id:.pane, cwd:.checkout, agent_status:"idle"}]}}' ;;
+      *) : ;;
+    esac
+  }
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)" || { echo "reuse refused: $out"; rm -rf "$T"; return 1; }
+  ! grep -q "agent start" "$HERDR_LOG" || { echo "a second call started another agent"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "browser QA agent for widget#12 is already running" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# ITS MODEL: role_profiles.qa, else role_profiles.reviewer, else review.model.
+test_qa_agent_model_is_role_profiles_qa_else_reviewer() {
+  _ws_pr_fixture
+  cat >> "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  rv: { runtime: pi, model: claude-sonnet-5-5 }
+  qa-eyes: { runtime: pi, model: claude-sonnet-4-6 }
+role_profiles:
+  reviewer: rv
+  qa: qa-eyes
+YAML
+  local out
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --qa browser --dry-run 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "claude-sonnet-4-6" || { echo "qa did not take role_profiles.qa"; rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --focus security --dry-run 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "claude-sonnet-5-5" || { echo "a focus reviewer took the qa binding"; rm -rf "$T"; return 1; }
+  yq -y -i 'del(.role_profiles.qa)' "$T/workspace.yaml"
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --qa browser --dry-run 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "claude-sonnet-5-5" || { echo "qa did not fall back to role_profiles.reviewer"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The roster names QA agents too, by the checkout their cut name came from.
+test_reviewers_discover_reads_qa_agents_kind_and_focus() {
+  local roster='{"result":{"agents":[
+    {"name":"widget-pr-7-qa-browser","pane_id":"w1:p1","cwd":"/r/widget-pr-7-qa-browser","agent_status":"idle"},
+    {"name":"celestial-pr-277-qa-mobile-devic","pane_id":"w1:p2","cwd":"/r/celestial-pr-277-qa-mobile-device.round.Ab12","agent_status":"done"},
+    {"name":"widget-pr-7-review-security","pane_id":"w1:p3","cwd":"/r/widget-pr-7-review-security","agent_status":"idle"}]}}'
+  assert_eq "$(reviewers_discover "$roster" | awk -F'\t' '{print $1 "#" $2 "@" $3 "[" $8 ":" $7 "]"}' | paste -sd' ' -)" \
+    "widget#7@w1:p1[qa:browser] celestial#277@w1:p2[qa:mobile-device] widget#7@w1:p3[review:security]"
+}
 # Product agents are never counted and never blocked: a full helper budget
 # says nothing to them.
 test_product_agent_is_never_held_against_the_helper_budget() {

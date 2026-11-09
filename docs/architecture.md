@@ -671,11 +671,13 @@ their latest runs on the head come from the same provider-dispatched answer.
 gc and release still call `gh` directly and move onto these operations
 separately.
 
-### Review policy: extra reviewers
+### Review policy: extra reviewers and QA agents
 
 `lib/review-policy.sh` answers which reviewers a PR needs. Every PR has its
 plain reviewer; `review.extra` (workspace-wide, and under a `repos[]` entry,
-joined per focus) adds one per focus pack (`core/roles/focus/reviewer/`)
+joined per slot) adds one per entry - a focus reviewer (`kind: review`, packs
+in `core/roles/focus/reviewer/`) or a QA agent (`kind: qa`, packs in
+`core/roles/focus/qa/`, the feature team's qa packs) -
 whose path globs match a file the PR touches - both sides of a rename, as
 `forge_pr_files` lists them (GitHub refuses a list at its 3000-file cap,
 Forgejo is read page by page). The policy is read with `_yqr` from
@@ -684,29 +686,64 @@ and nothing malformed is skipped: a bad entry, a `review:` that is not a map
 or carries a key Celestial does not know (workspace-wide `runtime`, `model`, `thinking`, the retired `post`,
 `extra`; per repo `extra`), or two `repos:` entries of one name fail the
 read, and `cel doctor` reports the same errors (`review_policy_problems`). A
-repo with no entry asks the forge nothing. An entry's `kind` (default and
-only value `review`) is the seam for other kinds of required agent.
+repo with no entry asks the forge nothing. `review` and `qa` are the kinds;
+any other is refused.
 
-An extra reviewer is a reviewer row of its own: alias, checkout
-(`<reviews>/<repo>-pr-<n>-review-<focus>`), registry row (`focus` beside
-workspace, repo and PR in the key), and verdict slot (`<repo>#<n>/review-<focus>`
+An extra agent is a reviewer row of its own, keyed by its SLOT `<kind>-<focus>`:
+alias `<repo>-pr-<n>-<slot>`, checkout (`<reviews>/<repo>-pr-<n>-<slot>`),
+registry row (`focus` and `kind` - absent for `review` - beside workspace,
+repo and PR in the key), and verdict slot (`<repo>#<n>/<slot>`
 in `.cel/solo-reviews.json`, written only by a caller whose launch says it is
 that alias: `CEL_ROLE=reviewer` and `CEL_INBOX_ME`, which also binds `--by` on
 the plain slot. On Herdr that is the launch environment, the same trust as
 the author guard; a Rex reviewer is bound by its receipt through
-`cel_assert_reviewer_identity`). `reviewers_discover` reads the focus from the checkout a pane stands
-in, so a name cut to 32 characters still says which. `cel gc` closes it on the
-same facts as the plain reviewer - its PR closed, or its own slot approving
-the current head - and `tools/reviewers/retire.mjs` finds a Rex one's round
-by its alias in either key.
+`cel_assert_reviewer_identity`). A `review-` and a `qa-` slot never share a
+name, and `review_alias_free` refuses any focus whose 32-character alias is
+another agent's of either kind. `reviewers_discover` reads the kind and focus
+from the checkout a pane stands in, so a name cut to 32 characters still says
+which. `cel gc` closes it on the same facts as the plain reviewer - its PR
+closed, or its own slot approving the current head - and
+`tools/reviewers/retire.mjs` finds a Rex one's round by its alias in either
+key.
+
+A QA agent (`cel run reviewer --qa <focus>`, role `core/roles/pr-qa.md`) runs
+as a reviewer - guard class, budget class, registry and retirement are the
+reviewer's - but uses the change instead of reading it: `cel preview
+<repo>#<n> --qa <focus> --head <sha>` (`lib/preview.sh`) builds the head from
+the repo's `preview:` block in a preview of its own
+(`preview-<repo>-pr<n>-qa-<focus>`, its own checkout under `.cel/previews/`,
+`env -i`, a `cel serve` unit), refusing any other head. Its verdict may also
+be `blocked` (it could not run the change; `--note` says why), never counted
+as an approval; `approved` and `changes` carry `--evidence` files named with
+the head, copied to `.cel/qa-evidence/<repo>-pr-<n>/<slot>/` and listed in the
+verdict. Its model resolves `role_profiles.qa`, then `role_profiles.reviewer`,
+then `review.model`. Retiring it (`reviewer_checkout_release`, which `cel gc`
+calls for a closed PR, a gone pane and a finished QA agent;
+`reviewer_retire_target` for Rex and `cel solo land`) stops that preview and
+removes its checkout through `preview_qa_stop`, and releases the agent's own
+checkout (a Rex one keeps it as native evidence); the steward's
+`preview_sweep` still stops any preview of a closed PR.
 
 One rule decides "approved": `solo_plain_approval` (the recorded verdict or
 the forge's decision, at the head) and `solo_extra_approvals` (each required
-extra reviewer's own verdict at the head, computed from the PR's files at
-that moment; a hand-started one that is not required counts only when its
-`changes` is at the head, and then blocks). `cel solo land`, `solo_ready_prs`
-(the steward's land nudge) and `cel solo approvals` (the dashboard's PR
-approval) all call them.
+extra agent's own verdict at the head, computed from the PR's files at
+that moment, `blocked` never an approval; a hand-started one that is not
+required counts only when its `changes` is at the head, and then blocks).
+`cel solo land`, `solo_ready_prs` (the steward's land nudge) and `cel solo
+approvals` (the dashboard's PR approval) all call them.
+
+Every `CEL_ROLE=reviewer` - plain, focus and QA - is one guard class,
+decided by that launch role before the cwd-derived role (`_guard_reviewer`):
+git, cel and gh are allowlists for it (git read verbs after any global
+option, `-c` refused, `fetch` only into remote-tracking refs; cel `solo
+review|approvals`, `inbox`, `preview`, `serve list|start|stop`, forge and
+fleet reads; gh reads and comments), herdr agent and pane writes and forge
+writes by hand are refused, and `guard_override_honoured` gives it no one-off
+override. A QA preview's evidence binding, private `HOME` and stop retry live
+in `lib/solo.sh` (`cel solo review --qa` needs the slot's preview record at
+that head; evidence is copied with sha256 and size) and `lib/preview.sh` (a
+failed stop keeps the record; `preview_sweep` stops a QA preview whose owner
+is no longer live).
 
 ## Credentials
 
