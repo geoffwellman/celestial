@@ -1192,8 +1192,15 @@ wherever it stands. git, cel and gh are allowlists for it: git read verbs
 only (`diff`, `log`, `show`, `status`, `rev-parse`, `ls-files`, `cat-file`,
 `blame`, `grep`, `merge-base`, `describe`, `range-diff`, `for-each-ref`,
 `show-ref`, and `fetch` into remote-tracking refs - no refspec colon, `+` or
-`--force`), whatever global options lead (`-c`, which can run a command, is
-refused); cel `solo review|approvals`, `inbox`, `preview`, `serve
+`--force`), whatever global options lead (`-c`, which can run a command, and
+`-p`/`--paginate`, which runs the pager, are refused). A read verb's flags
+that write a file, run a program or pager or change config are refused too,
+in every spelling (separate or attached argument, quoted, abbreviated,
+clustered): `--output`, `--ext-diff`, `--textconv`, `cat-file --filters`,
+`grep -O`/`--open-files-in-pager`, `--show-signature`, `--help` and `git help
+<topic>`, `fetch --upload-pack` and `--set-upstream`; `git diff`, `log -p`,
+`show`, `range-diff` and `grep` themselves stay. Then cel `solo
+review|approvals`, `inbox`, `preview`, `serve
 list|start|stop`, forge reads, `fleet`, `status`, `profiles`, `budget`,
 `people`, `decide|learn list` and `help`; gh reads, `gh pr comment` and `gh pr
 review --comment`. Everything else - pushes, merges by any tool, `cel solo

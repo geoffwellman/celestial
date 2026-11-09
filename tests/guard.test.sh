@@ -1316,3 +1316,40 @@ test_a_reviewer_judges_and_changes_nothing() {
   assert_eq "$(CEL_ROLE=solo guard_classify solo 'cel solo land widget#3')" allow || return 1
   CEL_ROLE= guard_override_honoured other 'CEL_GUARD_ALLOW_ONCE=1 git push' || { echo "a person's one-off override refused"; return 1; }
 }
+# A READ VERB IS NOT A READ WHEN ITS FLAGS WRITE OR RUN. diff, log, show,
+# range-diff and grep stay a reviewer's, but not the flags that write a file
+# (--output), run a program or pager (--ext-diff, --textconv, --filters,
+# grep -O/--open-files-in-pager, --show-signature, git -p/--paginate,
+# --help, git help <topic>) or change config (fetch --set-upstream,
+# --upload-pack) - in every spelling: separate or attached argument,
+# clustered short options, quoted, and the abbreviations parse-options takes.
+_RV_FLAG_DENY=( 'git diff --output=/tmp/x' 'git diff --output /tmp/x' 'git log -p --output=x' 'git log --output x'
+  'git show --output=x HEAD' 'git range-diff --output=x a...b' 'git diff --ou=x' 'git diff "--output=x"' "git diff '--output' x"
+  'git diff --out""put=x' 'git diff \--output=x' 'git log --outp=x'
+  'git grep -Ovim foo' 'git grep -O vim foo' 'git grep -O foo' 'git grep -iO foo' 'git grep -nOless foo'
+  'git grep --open-files-in-pager foo' 'git grep --open-files-in-pager=vim foo' 'git grep --open-f foo'
+  'git cat-file --textconv HEAD:f' 'git cat-file --filters HEAD:f' 'git cat-file --textc HEAD:f' 'git cat-file --filt HEAD:f'
+  'git diff --textconv' 'git log -p --textconv' 'git show --textconv HEAD' 'git blame --textconv f' 'git grep --textconv x'
+  'git diff --ext-diff' 'git log -p --ext-diff' 'git show --ext-diff' 'git range-diff --ext-diff a...b' 'git diff --ext'
+  'git -c diff.external=x diff' 'git -cdiff.external=x diff' 'git -c core.pager=x log'
+  'git fetch --upload-pack=x origin' 'git fetch --upload-pack x origin' 'git fetch --upload-p=x origin' 'git fetch --upl x origin'
+  'git fetch --set-upstream origin main' 'git fetch --set-up origin main'
+  'git log --show-signature' 'git show --show-signature HEAD' 'git log --show-sig'
+  'git -p log' 'git --paginate log' 'git -p diff' 'git log --help' 'git --help' 'git diff --help' 'git help log' 'git help -w log'
+  'git help --web log' 'git help -i log' 'git help -m log' 'git help --man log' )
+_RV_FLAG_ALLOW=( 'git diff origin/main...HEAD' 'git diff --stat origin/main...HEAD' 'git diff --text a b' 'git diff -a'
+  'git diff --no-ext-diff' 'git diff --no-textconv' 'git log -p -3' 'git log -p --stat' 'git log --format=%H%x09%s -5'
+  'git log --pretty=format:%h' 'git show HEAD' 'git show --stat HEAD' 'git show HEAD:README.md' 'git range-diff a...b'
+  'git range-diff --stat a...b' 'git grep -n foo' 'git grep -in foo' 'git grep -e foo -- lib' 'git grep --count foo'
+  'git cat-file -p HEAD' 'git cat-file -t HEAD' 'git rev-list --filter=blob:none HEAD' 'git diff -Oorder.txt'
+  'git diff --output-indicator-new=+' 'git log -- --output=x' 'git log -h' 'git help' 'git help -a' 'git help -g'
+  'git fetch origin main' 'git fetch --prune origin' 'git --no-pager log -p' 'git -P diff' )
+test_a_reviewer_reads_without_flags_that_write_or_run() {
+  local c
+  for c in "${_RV_FLAG_DENY[@]}"; do
+    _deny "$(CEL_ROLE=reviewer guard_classify other "$c")" "reviewer flag: $c" || return 1
+  done
+  for c in "${_RV_FLAG_ALLOW[@]}"; do
+    assert_eq "$(CEL_ROLE=reviewer guard_classify other "$c")" allow || { echo "reviewer read refused: $c"; return 1; }
+  done
+}

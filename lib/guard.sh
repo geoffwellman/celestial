@@ -1534,32 +1534,70 @@ _guard_rex_writes() { # <command> -> 0 when a piece runs a non-read rex command
 # push` is mail); herdr's writes and any forge write by hand are refused.
 
 # git: every global option stripped (those that run commands - -c,
-# --config-env, --exec-path - refused outright), then a read verb. `fetch`
-# only into remote-tracking refs: no refspec with a colon or a +, no
-# --force, no --upload-pack. A reviewer needs no checkout of its own: cel
-# run reviewer makes its detached checkout before it starts.
+# --config-env, --exec-path, and -p/--paginate, which runs the pager -
+# refused outright), then a read verb. `fetch` only into remote-tracking
+# refs: no refspec with a colon or a +, no --force. A reviewer needs no
+# checkout of its own: cel run reviewer makes its detached checkout before it
+# starts.
+#
+# A READ VERB'S FLAGS CAN STILL WRITE OR RUN, so these are refused on every
+# verb (from each verb's `git <verb> -h` and man page):
+#   --output=<file>            diff/log/show/range-diff write the diff to a file
+#   --ext-diff                 runs the external diff program
+#   --textconv                 runs a textconv filter (diff, log, show, blame,
+#                              grep, cat-file; diff/log/show's default stays)
+#   --filters                  cat-file runs the clean/smudge filters
+#   --open-files-in-pager, -O  grep runs a pager or editor (diff's -O<orderfile>
+#                              only reads, and stays)
+#   --show-signature           log/show run gpg
+#   --upload-pack              fetch runs that program
+#   --set-upstream             fetch writes branch config
+#   --help, help <topic>       run man, info or a browser (-h prints usage)
+# In every spelling: `--opt x` and `--opt=x`, a quoted or backslashed token,
+# any abbreviation (parse-options takes unique prefixes: fetch --upl, cat-file
+# --textc), and grep's -O clustered (-iO, -Ovim, -O vim). An abbreviation
+# that is exactly another, harmless option (--text, --filter) stays. Paths
+# after `--` are not flags.
+_GUARD_REVIEWER_GIT_RUNS=' output ext-diff textconv filters open-files-in-pager show-signature upload-pack set-upstream help '
 _guard_reviewer_git() { # <segment> -> 0 when allowed
   local -a t; read -r -a t <<<"$1"
-  local i=1 n=${#t[@]} a
+  local i=1 n=${#t[@]} a k verb name
+  for k in "${!t[@]}"; do t[k]="${t[k]//[\'\"\\]/}"; done
   while [ "$i" -lt "$n" ]; do
     case "${t[i]}" in
-      -c|--config-env|--config-env=*|--exec-path|--exec-path=*) return 1 ;;
+      -c|-c?*|--config-env|--config-env=*|--exec-path|--exec-path=*|-p|--paginate|--help) return 1 ;;
       -C|--git-dir|--work-tree|--namespace|--super-prefix) i=$((i + 2)) ;;
-      --version|--help|-h|-v) return 0 ;;
+      --version|-h|-v) return 0 ;;
       -*) i=$((i + 1)) ;;
       *) break ;;
     esac
   done
   [ "$i" -lt "$n" ] || return 0
-  case "${t[i]}" in
-    diff|log|show|status|rev-parse|ls-files|ls-tree|cat-file|blame|grep|merge-base|describe|range-diff|for-each-ref|show-ref|shortlog|rev-list|name-rev|version|help) return 0 ;;
-    fetch)
+  verb="${t[i]}"
+  case "$verb" in
+    diff|log|show|status|rev-parse|ls-files|ls-tree|cat-file|blame|grep|merge-base|describe|range-diff|for-each-ref|show-ref|shortlog|rev-list|name-rev|version|fetch) ;;
+    help)
       for a in "${t[@]:i+1}"; do
-        case "$a" in *:*|+*|-f|--force|--upload-pack*|--refmap*) return 1 ;; esac
+        case "$a" in -a|--all|-g|--guides) ;; *) return 1 ;; esac
       done
       return 0 ;;
+    *) return 1 ;;
   esac
-  return 1
+  for a in "${t[@]:i+1}"; do
+    case "$a" in
+      --) break ;;
+      --text|--filter|--filter=*) ;;
+      --?*)
+        name="${a#--}"; name="${name%%=*}"
+        [[ "$_GUARD_REVIEWER_GIT_RUNS" =~ \ ${name//[^A-Za-z-]/_}[A-Za-z-]*\  ]] && return 1 ;;
+      -[!-]*)
+        if [ "$verb" = grep ] && [[ "$a" == *O* ]]; then return 1; fi ;;
+    esac
+    if [ "$verb" = fetch ]; then
+      case "$a" in *:*|+*|-f|--force|--refmap*) return 1 ;; esac
+    fi
+  done
+  return 0
 }
 _GUARD_REVIEWER_CEL='^cel$|^cel (help|version|status|fleet|profiles|budget|people)( |$)|^cel solo (review|approvals)( |$)|^cel inbox( |$)|^cel preview( |$)|^cel serve (list|start|stop)( |$)|^cel forge (pr (view|checks|reviews|list)|run (list|view|logs)|repo|whoami)( |$)|^cel (decide|learn) list( |$)|^cel sessions( --json)?$'
 _GUARD_REVIEWER_GH='^gh$|^gh (help|version|status|search|browse|auth status|api|pr (view|diff|checks|list|status|comment|review)|issue (view|list|comment)|run (view|list|watch)|repo view)( |$)'
@@ -1572,7 +1610,7 @@ _guard_reviewer() { # <command> -> allow | deny <reason>
   while IFS= read -r seg || [ -n "$seg" ]; do
     case "$seg" in
       git|git\ *)
-        _guard_reviewer_git "$seg" || { printf 'deny a reviewer runs read-only git (diff, log, show, status, rev-parse, ls-files, cat-file, blame, grep, merge-base, describe, fetch into remote-tracking refs) - it writes no repository and judges the PR as pushed: %s' "$seg"; return 0; } ;;
+        _guard_reviewer_git "$seg" || { printf 'deny a reviewer runs read-only git (diff, log, show, status, rev-parse, ls-files, cat-file, blame, grep, merge-base, describe, fetch into remote-tracking refs), and none of the flags that write a file, run a program or pager or change config (--output, --ext-diff, --textconv, --filters, grep -O/--open-files-in-pager, --show-signature, -p/--paginate, --help, --upload-pack, --set-upstream, -c) - it writes no repository and judges the PR as pushed: %s' "$seg"; return 0; } ;;
       cel|cel\ *)
         [[ "$seg" =~ $_GUARD_REVIEWER_CEL ]] || { printf 'deny a reviewer runs only cel solo review|approvals, inbox, preview, serve list|start|stop, forge reads, fleet, status, profiles, budget, people, decide|learn list and help - the product'"'"'s agent does the rest: %s' "$seg"; return 0; } ;;
       gh\ *)
