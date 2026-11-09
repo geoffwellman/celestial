@@ -657,7 +657,9 @@ resolved and passes as arguments; it reads neither from its environment.
 That is for a GitHub repo: the bash side also passes the repo's forge and
 owner/name (`forge_repo`), and a Forgejo repo's PR state is read with `cel
 forge pr view` as the workspace - never from GitHub, whose mirror numbers
-other PRs the same - and must name exactly that owner/name and PR.
+other PRs the same - and must name exactly that owner/name and PR. `cel gc`
+judges a Herdr reviewer of a Forgejo repo the same way (`forge_pr_view`,
+same checks; anything else is UNKNOWN, kept).
 Other caller variables (`GH_CONFIG_DIR`, `GH_EDITOR`, `BROWSER`, ...) still
 reach gh - the environment is not scrubbed. The system directories are where
 root installs the distribution's packages and are normally root-owned, but

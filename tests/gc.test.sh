@@ -1222,6 +1222,44 @@ test_gc_keeps_an_unreadable_deleted_folder_reviewer_with_one_warning() {
   rm -rf "$T"
 }
 
+# A HERDR REVIEWER OF A FORGEJO REPO is judged by Forgejo (forge_pr_view as
+# the workspace), never gh, whose mirror numbers other PRs the same: merged or
+# closed closes it; open, unreadable, or an answer naming another repository
+# or PR keeps it (UNKNOWN for the last three).
+_gc_forgejo_reviewer_fixture() {
+  _gc_deleted_reviewer_fixture
+  printf 'name: demo\nrepos:\n  - name: widget\n    url: git@forgejo.example:acme/widget.git\n    forge: forgejo\n    host: http://forgejo.example\n' > "$T/ws/workspace.yaml"
+  git -C "$T/ws/repos/widget" remote set-url origin git@forgejo.example:acme/widget.git
+  GC_FJ="$T/fj"; : > "$GC_FJ"; GC_FJ_URL="" GC_FJ_NUMBER=""
+  forge_pr_view() {
+    printf '%s\n' "$*" >> "$GC_FJ"
+    [ "$GC_PR_STATE" != UNKNOWN ] || return 1
+    jq -nc --arg s "$(printf '%s' "$GC_PR_STATE" | tr 'A-Z' 'a-z')" --argjson n "${GC_FJ_NUMBER:-41}" \
+      --arg u "${GC_FJ_URL:-http://forgejo.example/acme/widget/pulls/41}" \
+      '{number:$n, state:$s, head_sha:"1111111111111111111111111111111111111111", head_ref:"feature", url:$u}'
+  }
+}
+
+test_gc_herdr_reviewer_of_a_forgejo_repo_is_judged_by_forgejo() {
+  local c state url num want out
+  for c in 'MERGED|||close' 'CLOSED|||close' 'OPEN|||kept' 'UNKNOWN|||unknown' \
+    'MERGED|http://forgejo.example/other/widget/pulls/41||unknown' 'MERGED||42|unknown'; do
+    IFS='|' read -r state url num want <<< "$c"
+    _gc_forgejo_reviewer_fixture
+    GC_PR_STATE="$state" GC_FJ_URL="$url" GC_FJ_NUMBER="$num"
+    out="$(_gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" 2>&1)"
+    assert_eq "$(cat "$GC_GH")" "" || { echo "$c: gh was asked"; rm -rf "$T"; return 1; }
+    assert_eq "$(sort -u "$GC_FJ")" "$T/ws widget 41" || { echo "$c"; rm -rf "$T"; return 1; }
+    case "$want" in
+      close) assert_eq "$(cat "$GC_SINK")" "close w1:p5" || { echo "$c: $out"; rm -rf "$T"; return 1; } ;;
+      *) assert_eq "$(cat "$GC_SINK")" "" || { echo "$c: $out"; rm -rf "$T"; return 1; }
+         assert_eq "$(reviewers_find "$T/ws" widget 41 | jq -r .pane)" w1:p5 || { echo "$c"; rm -rf "$T"; return 1; } ;;
+    esac
+    if [ "$want" = unknown ]; then assert_contains "$out" "UNKNOWN: cannot read the state of widget#41" || { rm -rf "$T"; return 1; }; fi
+    rm -rf "$T"
+  done
+}
+
 # Kept as UNKNOWN for a day is a thing root should hear about - once, not on
 # every tick after it.
 test_gc_reports_a_reviewer_unknown_for_a_day_to_root_once() {
