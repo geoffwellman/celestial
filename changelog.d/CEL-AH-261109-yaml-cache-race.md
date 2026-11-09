@@ -1,0 +1,3 @@
+### Fixed
+- YAML-to-JSON cache (`lib/yaml.sh`): concurrent first reads of one file (background subshells, process substitutions) no longer collide on a shared `$$` temp and fail an `mv`. Each publish uses its own `mktemp` beside the entry (same filesystem, atomic rename) and removes it on failure. A lost rename counts as success only for a content-hashed key whose entry now in place is valid JSON; without `md5sum` (a `nohash-` key) it fails rather than serve an older text's entry. Covers the `workspace.local.yaml` merge too.
+- Manifest cache (`lib/manifest.sh`): its conversion temps use a `mktemp` stem instead of `$$.$RANDOM`, which subshells could repeat.

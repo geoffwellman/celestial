@@ -32,16 +32,19 @@ _manifest_json() { # -> path of a JSON copy of $CEL_MANIFEST
   fi
   mkdir -p "$d" 2>/dev/null || return 1
   # Convert the text just compared, not whatever the file holds a moment later.
-  local tmp="$d/.$key.$$.$RANDOM"
-  printf '%s' "$text" > "$tmp.yaml" 2>/dev/null || { rm -f "$tmp.yaml"; return 1; }
+  # The temps share a mktemp stem beside the cache: subshells share $$ (and
+  # $RANDOM is 15 bits), so a $$-named stem is not this reader's own.
+  local tmp; tmp="$(mktemp "$d/.$key.XXXXXX" 2>/dev/null)" || return 1
+  printf '%s' "$text" > "$tmp.yaml" 2>/dev/null || { rm -f "$tmp" "$tmp.yaml"; return 1; }
   h="$(md5sum < "$tmp.yaml")"; h="${h%% *}"
   if [ ${#h} -ne 32 ] || ! { yq -c . "$tmp.yaml" > "$tmp.json" 2>/dev/null && [ -s "$tmp.json" ]; }; then
-    rm -f "$tmp.yaml" "$tmp.json"; return 1
+    rm -f "$tmp" "$tmp.yaml" "$tmp.json"; return 1
   fi
   # the JSON before its text: a matching text always has its parse beside it
   mv -f "$tmp.json" "$d/$key.$h.json" && mv -f "$tmp.yaml" "$d/$key.$h.yaml" \
     && printf '%s\n' "$h" > "$tmp.cur" && mv -f "$tmp.cur" "$d/$key.current" \
-    || { rm -f "$tmp.yaml" "$tmp.json" "$tmp.cur"; return 1; }
+    || { rm -f "$tmp" "$tmp.yaml" "$tmp.json" "$tmp.cur"; return 1; }
+  rm -f "$tmp"
   local old stale=()
   for old in "$d/$key".????????????????????????????????.json "$d/$key".????????????????????????????????.yaml "$d/$key.json"; do
     [ -e "$old" ] || continue

@@ -112,6 +112,27 @@ test_manifest_cache_keeps_only_the_current_conversion_and_forks_nothing_on_a_hit
   rm -rf "$B"
 }
 
+# Concurrent first reads each convert through a temp of their own. Subshells
+# share $$, and $RANDOM can repeat (it is seeded the same here to make the
+# collision certain), so neither may name the temp.
+test_manifest_cache_concurrent_first_reads_all_succeed_and_leave_no_temps() {
+  local B i; B="$(mktemp -d)"
+  local CEL_MANIFEST="$B/agents.yaml" CEL_MANIFEST_CACHE="$B/cache"
+  printf 'agents:\n  claude:\n    bin: racy\n' > "$CEL_MANIFEST"
+  yq() { command yq "$@"; local rc=$?; sleep 0.3; return "$rc"; }
+  for i in 1 2 3 4 5 6; do
+    ( rc=0; j="$(RANDOM=7; _manifest_json 2>/dev/null)" || rc=$?
+      jq -r .agents.claude.bin "$j" > "$B/out.$i" 2>/dev/null || true; printf '%s' "$rc" > "$B/rc.$i" ) &
+  done
+  wait
+  unset -f yq
+  for i in 1 2 3 4 5 6; do
+    assert_eq "$(cat "$B/rc.$i"):$(cat "$B/out.$i")" "0:racy"
+  done
+  assert_eq "$(find "$B/cache" -name '.*' -type f | wc -l | tr -d ' ')" 0
+  rm -rf "$B"
+}
+
 # AH-261018: pi resumes through its own native `--session`, so a restart keeps
 # the original session file instead of starting fresh; omp keeps `--resume`.
 test_manifest_declares_native_session_resume_for_pi_and_omp() {
