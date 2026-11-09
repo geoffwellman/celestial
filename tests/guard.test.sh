@@ -1283,7 +1283,7 @@ _RV_DENY=( 'git commit -m fix' 'git push origin HEAD:CEL-x' 'git -C /tmp/r push'
   'herdr agent start x' 'herdr agent prompt x hi' 'herdr pane close p1' 'herdr pane send-text p1 x' 'herdr worktree create x'
   'CEL_GUARD_ALLOW_ONCE=1 git push origin HEAD:x' 'CEL_GUARD_ALLOW_ONCE=1 cel solo land widget#3' )
 _RV_ALLOW=( 'git fetch origin main' 'git fetch origin' 'git diff origin/main...HEAD' 'git log --oneline -5' 'git show HEAD:README.md'
-  'git status' 'git --no-pager log -3' 'git -C /x diff --stat' 'git -P show HEAD' 'git rev-parse HEAD' 'git ls-files'
+  'git status' 'git --no-pager log -3' 'git diff --stat' 'git -P show HEAD' 'git rev-parse HEAD' 'git ls-files'
   'git cat-file -p HEAD' 'git blame lib/x.sh' 'git grep foo' 'git merge-base HEAD origin/main' 'git describe --tags'
   'git range-diff a...b' 'git for-each-ref refs/heads' 'git show-ref' 'git --version' 'git'
   'cel' 'cel help' 'cel version' 'cel status' 'cel fleet' 'cel profiles' 'cel budget'
@@ -1294,17 +1294,26 @@ _RV_ALLOW=( 'git fetch origin main' 'git fetch origin' 'git diff origin/main...H
   'cel preview widget#3 --qa browser --stop' 'cel preview --list' 'cel serve list' 'cel decide list' 'cel learn list'
   'gh pr comment 3 --body x' 'gh pr review 3 --comment -b x' 'gh pr view 3' 'gh pr diff 3' 'gh pr checks 3' 'gh api repos/o/r/pulls/3'
   'herdr agent list' 'npx playwright screenshot http://localhost:4600 /tmp/x.png' 'bun test' 'ls -la' )
-test_a_reviewer_judges_and_changes_nothing() {
-  local c role
-  for role in other root orchestrator solo core member; do
-    for c in "${_RV_DENY[@]}"; do
-      if CEL_ROLE=reviewer guard_override_honoured "$role" "$c"; then echo "a reviewer's one-off override honoured: $c"; return 1; fi
-      _deny "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" "reviewer standing as $role: $c" || return 1
-    done
-    for c in "${_RV_ALLOW[@]}"; do
-      assert_eq "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" allow || { echo "reviewer standing as $role refused: $c"; return 1; }
-    done
+# The same cases for every role a reviewer may stand as, one test per role
+# (each alone stays well inside the per-test limit on a loaded box).
+_rv_judges_as() { # <role>
+  local c role="$1"
+  for c in "${_RV_DENY[@]}"; do
+    if CEL_ROLE=reviewer guard_override_honoured "$role" "$c"; then echo "a reviewer's one-off override honoured: $c"; return 1; fi
+    _deny "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" "reviewer standing as $role: $c" || return 1
   done
+  for c in "${_RV_ALLOW[@]}"; do
+    assert_eq "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" allow || { echo "reviewer standing as $role refused: $c"; return 1; }
+  done
+}
+test_a_reviewer_judges_and_changes_nothing_as_other() { _rv_judges_as other; }
+test_a_reviewer_judges_and_changes_nothing_as_root() { _rv_judges_as root; }
+test_a_reviewer_judges_and_changes_nothing_as_orchestrator() { _rv_judges_as orchestrator; }
+test_a_reviewer_judges_and_changes_nothing_as_solo() { _rv_judges_as solo; }
+test_a_reviewer_judges_and_changes_nothing_as_core() { _rv_judges_as core; }
+test_a_reviewer_judges_and_changes_nothing_as_member() { _rv_judges_as member; }
+test_a_reviewer_judges_and_changes_nothing() {
+  local c
   # a reviewer under a workspace is still a reviewer, not that workspace's root
   local T; T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"; mkdir -p "$T/repos/widget"
   for c in 'git push origin HEAD:main' 'cel solo land widget#3'; do
@@ -1315,4 +1324,83 @@ test_a_reviewer_judges_and_changes_nothing() {
   assert_eq "$(CEL_ROLE=solo guard_classify solo 'git push -u origin HEAD')" allow || return 1
   assert_eq "$(CEL_ROLE=solo guard_classify solo 'cel solo land widget#3')" allow || return 1
   CEL_ROLE= guard_override_honoured other 'CEL_GUARD_ALLOW_ONCE=1 git push' || { echo "a person's one-off override refused"; return 1; }
+}
+# A READ VERB IS NOT A READ WHEN ITS FLAGS WRITE OR RUN. diff, log, show,
+# range-diff and grep stay a reviewer's, but not the flags that write a file
+# (--output), run a program or pager (--ext-diff, --textconv, --filters,
+# grep -O/--open-files-in-pager, --show-signature, git -p/--paginate,
+# --help, git help <topic>) or change config (fetch --set-upstream,
+# --upload-pack) - in every spelling: separate or attached argument,
+# clustered short options, quoted, and the abbreviations parse-options takes.
+_RV_FLAG_DENY=( 'git diff --output=/tmp/x' 'git diff --output /tmp/x' 'git log -p --output=x' 'git log --output x'
+  'git show --output=x HEAD' 'git range-diff --output=x a...b' 'git diff --ou=x' 'git diff "--output=x"' "git diff '--output' x"
+  'git diff --out""put=x' 'git diff \--output=x' 'git log --outp=x'
+  'git grep -Ovim foo' 'git grep -O vim foo' 'git grep -O foo' 'git grep -iO foo' 'git grep -nOless foo'
+  'git grep --open-files-in-pager foo' 'git grep --open-files-in-pager=vim foo' 'git grep --open-f foo'
+  'git cat-file --textconv HEAD:f' 'git cat-file --filters HEAD:f' 'git cat-file --textc HEAD:f' 'git cat-file --filt HEAD:f'
+  'git diff --textconv' 'git log -p --textconv' 'git show --textconv HEAD' 'git blame --textconv f' 'git grep --textconv x'
+  'git diff --ext-diff' 'git log -p --ext-diff' 'git show --ext-diff' 'git range-diff --ext-diff a...b' 'git diff --ext'
+  'git -c diff.external=x diff' 'git -cdiff.external=x diff' 'git -c core.pager=x log'
+  'git fetch --upload-pack=x origin' 'git fetch --upload-pack x origin' 'git fetch --upload-p=x origin' 'git fetch --upl x origin'
+  'git fetch --set-upstream origin main' 'git fetch --set-up origin main'
+  'git log --show-signature' 'git show --show-signature HEAD' 'git log --show-sig'
+  'git -p log' 'git --paginate log' 'git -p diff' 'git log --help' 'git --help' 'git diff --help' 'git help log' 'git help -w log'
+  'git help --web log' 'git help -i log' 'git help -m log' 'git help --man log' )
+_RV_FLAG_ALLOW=( 'git diff origin/main...HEAD' 'git diff --stat origin/main...HEAD' 'git diff --text a b' 'git diff -a'
+  'git diff --no-ext-diff' 'git diff --no-textconv' 'git log -p -3' 'git log -p --stat' 'git log --format=%H%x09%s -5'
+  'git log --pretty=format:%h' 'git show HEAD' 'git show --stat HEAD' 'git show HEAD:README.md' 'git range-diff a...b'
+  'git range-diff --stat a...b' 'git grep -n foo' 'git grep -in foo' 'git grep -e foo -- lib' 'git grep --count foo'
+  'git cat-file -p HEAD' 'git cat-file -t HEAD' 'git rev-list --filter=blob:none HEAD' 'git diff -Oorder.txt'
+  'git diff --output-indicator-new=+' 'git log -- --output=x' 'git log -h' 'git help' 'git help -a' 'git help -g'
+  'git fetch origin main' 'git fetch --prune origin' 'git --no-pager log -p' 'git -P diff' )
+test_a_reviewer_reads_without_flags_that_write_or_run() {
+  local c
+  for c in "${_RV_FLAG_DENY[@]}"; do
+    _deny "$(CEL_ROLE=reviewer guard_classify other "$c")" "reviewer flag: $c" || return 1
+  done
+  for c in "${_RV_FLAG_ALLOW[@]}"; do
+    assert_eq "$(CEL_ROLE=reviewer guard_classify other "$c")" allow || { echo "reviewer read refused: $c"; return 1; }
+  done
+}
+# NOR WHEN THE SHELL OR GIT'S SURROUNDINGS SUPPLY WHAT THE WORDS DO NOT SAY.
+# A reviewer's git command is taken literally: no $ (variables, $(...),
+# $'...', $"..."), backtick, brace expansion or unquoted glob before `--` -
+# any of them can become --output after the guard has read the line. No
+# VAR= assignment or env/command/exec/sudo wrapper in front of git, and no
+# GIT_* or PAGER variable set, exported or unset anywhere (the persistent
+# shell keeps it for the next git). No --git-dir, --work-tree or
+# --namespace, and -C only to its own checkout (CEL_REVIEW_CHECKOUT, from its
+# launch): a PR can commit a bare-repository-shaped directory whose config
+# runs programs. fetch --recurse-submodules runs git in submodules too.
+_RV_ENV_DENY=( 'git diff $X' 'git diff ${X}' 'git diff "$X"' 'git diff $(echo --output=x)' 'git diff `echo --output=x`'
+  "git diff \$'--output=x'" 'git diff $"--output=x"' 'git diff --{output,stat}=x' 'git diff --out{put,}=x' 'git diff {a..b}'
+  'git diff HEAD *' 'git grep foo ?' 'git log [a]*' 'git grep -e foo $HOME'
+  'GIT_EXTERNAL_DIFF=/tmp/x git diff' 'GIT_PAGER=x git log' 'GIT_SSH_COMMAND=x git fetch origin' 'PAGER=x git log'
+  'FOO=1 git diff' 'env GIT_EXTERNAL_DIFF=x git diff' 'env git diff' 'env -u GIT_CONFIG_COUNT git diff' '/usr/bin/env git diff'
+  'command git diff' 'exec git diff' 'sudo git diff' 'bash -c "GIT_PAGER=x git log"'
+  'export GIT_EXTERNAL_DIFF=/tmp/x' 'export GIT_PAGER=x; git log' 'export PAGER=x' 'unset GIT_CONFIG_COUNT' 'unset PAGER'
+  'export -n GIT_PAGER' 'declare -x GIT_DIR=/tmp/x' 'readonly GIT_DIR' 'read -r GIT_PAGER <<< x' 'printf -v GIT_PAGER x'
+  'X=GIT_PAGER; export $X=less' 'declare -n r=GIT_PAGER' 'mapfile -t PAGER < f'
+  'git --git-dir=/tmp/evil diff' 'git --git-dir /tmp/evil diff' 'git --work-tree=/tmp diff' 'git --work-tree /tmp diff'
+  'git --namespace=x log' 'git --namespace x log' 'git -C sub diff' 'git -C /tmp/elsewhere diff' 'git -C /rv/pr/sub diff'
+  'git -C /rv/pr -C sub diff' 'git -C ../.. diff'
+  'git fetch --recurse-submodules origin' 'git fetch --recurse-submodules=yes origin' 'git fetch --recurse-sub origin'
+  'git fetch --recurse-submodules-default=yes origin' 'git -c submodule.recurse=true fetch origin' )
+_RV_ENV_ALLOW=( 'git -C /rv/pr diff --stat' 'git -C /rv/pr/ log -3' 'git diff -- *.sh' 'git log -- lib/*'
+  "git log --format='%h [%s]'" 'git grep -e "foo.*bar"' "git diff -- 'lib/*.sh'" 'git fetch --no-recurse-submodules origin'
+  'cd sub && git diff' 'timeout 60 git fetch origin' 'echo $HOME' 'ls $PWD' 'git diff 2>&1'
+  'cel inbox send widget-orch "set GIT_PAGER and git diff a b"' 'gh pr comment 3 --body "PAGER=less is fine"'
+  # a redirect writes a file, not a repository: notes and evidence are a reviewer's to write
+  'git diff HEAD > /tmp/notes.txt' 'git diff origin/main...HEAD | tee review.txt' )
+test_a_reviewer_git_command_is_taken_literally() {
+  local c
+  for c in "${_RV_ENV_DENY[@]}"; do
+    _deny "$(CEL_REVIEW_CHECKOUT=/rv/pr CEL_ROLE=reviewer guard_classify other "$c")" "reviewer env/expansion: $c" || return 1
+  done
+  for c in "${_RV_ENV_ALLOW[@]}"; do
+    assert_eq "$(CEL_REVIEW_CHECKOUT=/rv/pr CEL_ROLE=reviewer guard_classify other "$c")" allow || { echo "reviewer read refused: $c"; return 1; }
+  done
+  assert_eq "$(HOME=/home/x CEL_REVIEW_CHECKOUT=/home/x/rv CEL_ROLE=reviewer guard_classify other 'git -C ~/rv diff')" allow || return 1
+  # no checkout from the launch: -C goes nowhere
+  _deny "$(CEL_REVIEW_CHECKOUT= CEL_ROLE=reviewer guard_classify other 'git -C /rv/pr diff')" "reviewer -C without a checkout" || return 1
 }

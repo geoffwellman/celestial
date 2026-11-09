@@ -805,22 +805,28 @@ _guard_cel_env_tamper() { # <command> -> 0 when it does
   local decl='(^|[[:space:];&|(])(export|declare|typeset|local|readonly)'
   re="$decl"'[[:space:]][^;&|]*(CEL|HERDR)_'
   [[ "$s" =~ $re ]] && return 0
-  # an operand whose name is an expansion, quoted or not
-  re="$decl"'([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+["'"'"']?(\$|`)'
-  [[ "$s" =~ $re ]] && return 0
-  # a nameref: `declare -n r=...` makes r another variable's name
-  re='(^|[[:space:];&|(])(declare|typeset|local)([[:space:]]+-[A-Za-z]*)*[[:space:]]+-[A-Za-z]*n'
-  [[ "$s" =~ $re ]] && return 0
-  # `$X=`, `${X}=`, `$(...)=` - eval, env, printf -v or read assigning through an expansion
-  re='\$(\{[^}]*\}|\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)["'"'"']?='
-  [[ "$s" =~ $re ]] && return 0
-  re='(^|[[:space:];&|(])(printf[[:space:]]+-v|read|mapfile|readarray)([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+["'"'"']?(\$|`)'
-  [[ "$s" =~ $re ]] && return 0
+  _guard_env_name_expansion "$s" && return 0
   # shell code or options for cel's own bash
   re='(^|[^A-Za-z0-9_])(BASH_ENV|ENV|SHELLOPTS|BASHOPTS)='
   [[ "$s" =~ $re ]] && return 0
   [[ "$s" == *BASH_FUNC_* ]] && return 0
   re="$decl"'([[:space:]]+-[-A-Za-z+]*)*[[:space:]]+-[A-Za-z]*f'
+  [[ "$s" =~ $re ]]
+}
+# A VARIABLE WHOSE NAME THE GUARD CANNOT READ: export/declare/typeset/local/
+# readonly with an operand that starts with `$` or a backquote, a nameref
+# (`declare -n`), an assignment to `$X`, `${X}` or `$(...)` (eval, env,
+# printf -v and read reach a variable that way), and printf -v/read/mapfile
+# into an expansion.
+_guard_env_name_expansion() { # <command> -> 0 when it sets one
+  local s="$1" re decl='(^|[[:space:];&|(])(export|declare|typeset|local|readonly)'
+  re="$decl"'([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+["'"'"']?(\$|`)'
+  [[ "$s" =~ $re ]] && return 0
+  re='(^|[[:space:];&|(])(declare|typeset|local)([[:space:]]+-[A-Za-z]*)*[[:space:]]+-[A-Za-z]*n'
+  [[ "$s" =~ $re ]] && return 0
+  re='\$(\{[^}]*\}|\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)["'"'"']?='
+  [[ "$s" =~ $re ]] && return 0
+  re='(^|[[:space:];&|(])(printf[[:space:]]+-v|read|mapfile|readarray)([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+["'"'"']?(\$|`)'
   [[ "$s" =~ $re ]]
 }
 _GUARD_CEL_ENV_DENY='deny cel reads who is asking from its environment - a line that runs cel while setting, emptying, exporting or declaring a CEL_* or HERDR_* variable, a variable whose name is an expansion ($X, ${X}, $(...)) or a nameref, or shell code for it (BASH_ENV, ENV, SHELLOPTS, BASHOPTS, BASH_FUNC_*, export -f), is refused for every agent; run cel as you are (--workspace <name> picks a workspace, cel inbox send --from names a sender)'
@@ -1533,46 +1539,176 @@ _guard_rex_writes() { # <command> -> 0 when a piece runs a non-read rex command
 # it, judged per piece that runs them (a review message that mentions `git
 # push` is mail); herdr's writes and any forge write by hand are refused.
 
-# git: every global option stripped (those that run commands - -c,
-# --config-env, --exec-path - refused outright), then a read verb. `fetch`
-# only into remote-tracking refs: no refspec with a colon or a +, no
-# --force, no --upload-pack. A reviewer needs no checkout of its own: cel
-# run reviewer makes its detached checkout before it starts.
+# git: every global option stripped, then a read verb. Refused outright: the
+# global options that run commands (-c, --config-env, --exec-path, and
+# -p/--paginate, which runs the pager) and those that point git at another
+# repository, whose config could run programs (--git-dir, --work-tree,
+# --namespace, and -C to anywhere but the reviewer's own checkout,
+# CEL_REVIEW_CHECKOUT from its launch, spelled as an absolute or ~ path).
+# `fetch` only into remote-tracking refs: no refspec with a colon or a +, no
+# --force, no --recurse-submodules (git in each submodule, with its config).
+# A reviewer needs no checkout of its own: cel run reviewer makes its
+# detached checkout before it starts.
+#
+# A READ VERB'S FLAGS CAN STILL WRITE OR RUN, so these are refused on every
+# verb (from each verb's `git <verb> -h` and man page):
+#   --output=<file>            diff/log/show/range-diff write the diff to a file
+#   --ext-diff                 runs the external diff program
+#   --textconv                 runs a textconv filter (diff, log, show, blame,
+#                              grep, cat-file; diff/log/show's default stays)
+#   --filters                  cat-file runs the clean/smudge filters
+#   --open-files-in-pager, -O  grep runs a pager or editor (diff's -O<orderfile>
+#                              only reads, and stays)
+#   --show-signature           log/show run gpg
+#   --upload-pack              fetch runs that program
+#   --set-upstream             fetch writes branch config
+#   --help, help <topic>       run man, info or a browser (-h prints usage)
+# In every spelling: `--opt x` and `--opt=x`, a quoted or backslashed token,
+# any abbreviation (parse-options takes unique prefixes: fetch --upl, cat-file
+# --textc), and grep's -O clustered (-iO, -Ovim, -O vim). An abbreviation
+# that is exactly another, harmless option (--text, --filter) stays. Paths
+# after `--` are not flags.
+_GUARD_REVIEWER_GIT_RUNS=' output ext-diff textconv filters open-files-in-pager show-signature upload-pack set-upstream help '
 _guard_reviewer_git() { # <segment> -> 0 when allowed
   local -a t; read -r -a t <<<"$1"
-  local i=1 n=${#t[@]} a
+  local i=1 n=${#t[@]} a k verb name
+  for k in "${!t[@]}"; do t[k]="${t[k]//[\'\"\\]/}"; done
   while [ "$i" -lt "$n" ]; do
     case "${t[i]}" in
-      -c|--config-env|--config-env=*|--exec-path|--exec-path=*) return 1 ;;
-      -C|--git-dir|--work-tree|--namespace|--super-prefix) i=$((i + 2)) ;;
-      --version|--help|-h|-v) return 0 ;;
+      -c|-c?*|--config-env|--config-env=*|--exec-path|--exec-path=*|-p|--paginate|--help) return 1 ;;
+      --git-dir|--git-dir=*|--work-tree|--work-tree=*|--namespace|--namespace=*) return 1 ;;
+      -C)
+        [ -n "${CEL_REVIEW_CHECKOUT:-}" ] && [[ "${t[i+1]:-}" == [/~]* ]] || return 1
+        _guard_norm / "${t[i+1]}" || return 1
+        name="$_GN"; _guard_norm / "$CEL_REVIEW_CHECKOUT" || return 1
+        [ "$name" = "$_GN" ] || return 1
+        i=$((i + 2)) ;;
+      --super-prefix) i=$((i + 2)) ;;
+      --version|-h|-v) return 0 ;;
       -*) i=$((i + 1)) ;;
       *) break ;;
     esac
   done
   [ "$i" -lt "$n" ] || return 0
-  case "${t[i]}" in
-    diff|log|show|status|rev-parse|ls-files|ls-tree|cat-file|blame|grep|merge-base|describe|range-diff|for-each-ref|show-ref|shortlog|rev-list|name-rev|version|help) return 0 ;;
-    fetch)
+  verb="${t[i]}"
+  case "$verb" in
+    diff|log|show|status|rev-parse|ls-files|ls-tree|cat-file|blame|grep|merge-base|describe|range-diff|for-each-ref|show-ref|shortlog|rev-list|name-rev|version|fetch) ;;
+    help)
       for a in "${t[@]:i+1}"; do
-        case "$a" in *:*|+*|-f|--force|--upload-pack*|--refmap*) return 1 ;; esac
+        case "$a" in -a|--all|-g|--guides) ;; *) return 1 ;; esac
       done
       return 0 ;;
+    *) return 1 ;;
   esac
+  for a in "${t[@]:i+1}"; do
+    case "$a" in
+      --) break ;;
+      --text|--filter|--filter=*) ;;
+      --?*)
+        name="${a#--}"; name="${name%%=*}"; name="${name//[^A-Za-z-]/_}"
+        [[ "$_GUARD_REVIEWER_GIT_RUNS" =~ \ ${name}[A-Za-z-]*\  ]] && return 1
+        if [ "$verb" = fetch ] && [[ ' recurse-submodules recurse-submodules-default ' =~ \ ${name}[A-Za-z-]*\  ]]; then return 1; fi ;;
+      -[!-]*)
+        if [ "$verb" = grep ] && [[ "$a" == *O* ]]; then return 1; fi ;;
+    esac
+    if [ "$verb" = fetch ]; then
+      case "$a" in *:*|+*|-f|--force|--refmap*) return 1 ;; esac
+    fi
+  done
+  return 0
+}
+
+# A REVIEWER'S GIT COMMAND IS TAKEN LITERALLY. The rules above read the words
+# as written; the shell may make others of them. So in a piece of the line
+# that runs git: no `$` (a variable, $(...), $'...', $"..."), no backquote,
+# no brace expansion ({a,b}, {a..b}) and no unquoted glob (* ? [) before a
+# `--` (a PR can commit a file named --output=x) - and nothing in front of
+# git that changes its environment: no VAR= assignment, no env, command,
+# exec, sudo or doas. Pieces are split at ; & | ( ) and newlines, quotes
+# included, which errs towards deny (_guard_reviewer_pieces). Sets _GRG to
+# the piece refused.
+_guard_reviewer_pieces() { # <command> -> _GRP_RAW[i], and _GRP_NORM[i] its normalised verb
+  local s="${1//[;&|()]/$'\n'}"
+  mapfile -t _GRP_RAW <<<"$s"
+  mapfile -t _GRP_NORM < <(printf '%s\n' "${_GRP_RAW[@]}" | _guard_normalise)
+}
+_guard_reviewer_git_unliteral() { # (after _guard_reviewer_pieces) -> 0 when a git piece is not literal
+  local i p w b
+  local -a t
+  for i in "${!_GRP_RAW[@]}"; do
+    case "${_GRP_NORM[i]-}" in git|git\ *) ;; *) continue ;; esac
+    p="${_GRP_RAW[i]}"; _GRG="$p"
+    read -r -a t <<<"${p//[\'\"\\]/ }"
+    for w in "${t[@]}"; do
+      b="${w##*/}"
+      [ "$b" != git ] || break
+      [[ ! "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || return 0
+      case "$b" in env|command|exec|sudo|doas) return 0 ;; esac
+    done
+    _guard_word_expands "$p" && return 0
+  done
+  return 1
+}
+_guard_word_expands() { # <one command> -> 0 when the shell would expand one of its words
+  local p="$1" i c q="" w="" dd=0
+  [[ "$p" == *'$'* || "$p" == *'`'* ]] && return 0
+  [[ "$p" =~ \{[^}]*(,|\.\.)[^}]*\} ]] && return 0
+  for ((i = 0; i < ${#p}; i++)); do
+    c="${p:i:1}"
+    if [ -n "$q" ]; then [ "$c" != "$q" ] || q=""; continue; fi
+    case "$c" in
+      \'|\") q="$c" ;;
+      \\) i=$((i + 1)); w="${w}x" ;;
+      ' '|$'\t') [ "$w" != -- ] || dd=1; w="" ;;
+      '*'|'?'|'[') [ "$dd" = 1 ] || return 0; w="$w$c" ;;
+      *) w="$w$c" ;;
+    esac
+  done
+  return 1
+}
+# NOR DOES IT CHANGE GIT'S ENVIRONMENT FOR LATER: its shell may persist
+# between commands, so a piece (other than a cel or gh command, whose text is
+# mail or a comment) that sets, exports, declares, reads into or unsets a
+# GIT_* or PAGER variable, or a variable whose name is an expansion
+# (_guard_env_name_expansion), is refused. The launch pins them (lib/run.sh
+# _run_reviewer_git_env).
+_GUARD_REVIEWER_ENV='GIT_[A-Za-z0-9_]*|PAGER'
+_guard_reviewer_env_tamper() { # (after _guard_reviewer_pieces) -> 0 when a piece does
+  local i p re1 re2
+  re1='(^|[^A-Za-z0-9_])('"$_GUARD_REVIEWER_ENV"')='
+  re2='(^|[[:space:]`])(export|declare|typeset|local|readonly|unset|env|read|mapfile|readarray|printf)[[:space:]](.*[^A-Za-z0-9_$])?('"$_GUARD_REVIEWER_ENV"')([^A-Za-z0-9_]|$)'
+  for i in "${!_GRP_RAW[@]}"; do
+    case "${_GRP_NORM[i]-}" in cel|cel\ *|gh|gh\ *) continue ;; esac
+    p="${_GRP_RAW[i]}"
+    if [[ "$p" =~ $re1 ]] || [[ "$p" =~ $re2 ]] || _guard_env_name_expansion "$p"; then return 0; fi
+  done
   return 1
 }
 _GUARD_REVIEWER_CEL='^cel$|^cel (help|version|status|fleet|profiles|budget|people)( |$)|^cel solo (review|approvals)( |$)|^cel inbox( |$)|^cel preview( |$)|^cel serve (list|start|stop)( |$)|^cel forge (pr (view|checks|reviews|list)|run (list|view|logs)|repo|whoami)( |$)|^cel (decide|learn) list( |$)|^cel sessions( --json)?$'
 _GUARD_REVIEWER_GH='^gh$|^gh (help|version|status|search|browse|auth status|api|pr (view|diff|checks|list|status|comment|review)|issue (view|list|comment)|run (view|list|watch)|repo view)( |$)'
 _guard_reviewer() { # <command> -> allow | deny <reason>
-  local seg
+  local seg _GRG=""
+  local -a _GRP_RAW=() _GRP_NORM=()
   if _guard_forge_raw_write "$1" || _guard_gh_api_writes "$1"; then
     printf 'deny a reviewer changes no forge state by hand - it records its own verdict (cel solo review) and reports to the product'"'"'s agent'
     return 0
   fi
+  # The two checks below fork once, and only for a line that could fail them.
+  if [[ "$1" == *git* || "$1" == *GIT_* || "$1" == *PAGER* || "$1" == *'$'* || "$1" == *'`'* ]]; then
+    _guard_reviewer_pieces "$1"
+    if _guard_reviewer_env_tamper; then
+      printf 'deny a reviewer sets, exports, reads into and unsets no GIT_* or PAGER variable, nor one whose name is an expansion - git reads them before its options, and the reviewer'"'"'s launch fixes them'
+      return 0
+    fi
+    if _guard_reviewer_git_unliteral; then
+      printf 'deny a reviewer'"'"'s git command is taken literally: no $, backquote, brace expansion or unquoted glob before --, and no VAR= or env/command/exec/sudo in front of git - spell the words out: %s' "$_GRG"
+      return 0
+    fi
+  fi
   while IFS= read -r seg || [ -n "$seg" ]; do
     case "$seg" in
       git|git\ *)
-        _guard_reviewer_git "$seg" || { printf 'deny a reviewer runs read-only git (diff, log, show, status, rev-parse, ls-files, cat-file, blame, grep, merge-base, describe, fetch into remote-tracking refs) - it writes no repository and judges the PR as pushed: %s' "$seg"; return 0; } ;;
+        _guard_reviewer_git "$seg" || { printf 'deny a reviewer runs read-only git (diff, log, show, status, rev-parse, ls-files, cat-file, blame, grep, merge-base, describe, fetch into remote-tracking refs), and none of the flags that write a file, run a program or pager, change config or point git at another repository (--output, --ext-diff, --textconv, --filters, grep -O/--open-files-in-pager, --show-signature, -p/--paginate, --help, --upload-pack, --set-upstream, fetch --recurse-submodules, -c, --git-dir, --work-tree, --namespace, -C outside its own checkout) - it writes no repository and judges the PR as pushed: %s' "$seg"; return 0; } ;;
       cel|cel\ *)
         [[ "$seg" =~ $_GUARD_REVIEWER_CEL ]] || { printf 'deny a reviewer runs only cel solo review|approvals, inbox, preview, serve list|start|stop, forge reads, fleet, status, profiles, budget, people, decide|learn list and help - the product'"'"'s agent does the rest: %s' "$seg"; return 0; } ;;
       gh\ *)

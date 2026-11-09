@@ -1191,16 +1191,37 @@ judges, and the guard knows it by its launch role (`CEL_ROLE=reviewer`)
 wherever it stands. git, cel and gh are allowlists for it: git read verbs
 only (`diff`, `log`, `show`, `status`, `rev-parse`, `ls-files`, `cat-file`,
 `blame`, `grep`, `merge-base`, `describe`, `range-diff`, `for-each-ref`,
-`show-ref`, and `fetch` into remote-tracking refs - no refspec colon, `+` or
-`--force`), whatever global options lead (`-c`, which can run a command, is
-refused); cel `solo review|approvals`, `inbox`, `preview`, `serve
-list|start|stop`, forge reads, `fleet`, `status`, `profiles`, `budget`,
-`people`, `decide|learn list` and `help`; gh reads, `gh pr comment` and `gh pr
-review --comment`. Everything else - pushes, merges by any tool, `cel solo
-land`, `cel afk|release|update|learn add|mode|decide ask|ws|team|run|gc`,
-starting or stopping agents or panes - is refused, and no
-`CEL_GUARD_ALLOW_ONCE=1` override is honoured for a reviewer: nobody stands
-over its pane to approve one.
+`show-ref`, and `fetch` into remote-tracking refs - no refspec colon, `+`,
+`--force` or `--recurse-submodules`), whatever global options lead (`-c`,
+which can run a command, `-p`/`--paginate`, which runs the pager, and
+`--git-dir`, `--work-tree`, `--namespace` and `-C` to anywhere but its own
+checkout, which point git at another repository's config, are refused). A
+read verb's flags that write a file, run a program or pager or change config
+are refused too, in every spelling (separate or attached argument, quoted,
+abbreviated, clustered): `--output`, `--ext-diff`, `--textconv`, `cat-file
+--filters`, `grep -O`/`--open-files-in-pager`, `--show-signature`, `--help`
+and `git help <topic>`, `fetch --upload-pack` and `--set-upstream`; `git
+diff`, `log -p`, `show`, `range-diff` and `grep` themselves stay. A
+reviewer's git command is taken literally: no `$`, backquote, brace
+expansion or unquoted glob before `--`, and no `VAR=` or `env`, `command`,
+`exec` or `sudo` in front of git; it sets, exports and unsets no `GIT_*` or
+`PAGER` variable. Its launch pins git's environment (pager `cat`,
+`safe.bareRepository=explicit`, no `GIT_EXTERNAL_DIFF` or `GIT_SSH_COMMAND`;
+[docs/architecture.md](docs/architecture.md#launch-environment-by-role)), so
+a bare-repository-shaped directory a PR commits runs nothing when the
+reviewer stands in it. Then cel `solo review|approvals`, `inbox`, `preview`,
+`serve list|start|stop`, forge reads, `fleet`, `status`, `profiles`,
+`budget`, `people`, `decide|learn list` and `help`; gh reads, `gh pr comment`
+and `gh pr review --comment`. Everything else - pushes, merges by any tool,
+`cel solo land`, `cel afk|release|update|learn add|mode|decide
+ask|ws|team|run|gc`, starting or stopping agents or panes - is refused, and
+no `CEL_GUARD_ALLOW_ONCE=1` override is honoured for a reviewer: nobody
+stands over its pane to approve one.
+
+The guard's job for a reviewer is no git or forge writes and no merges; it is
+not a filesystem sandbox. A reviewer may write files - notes, QA evidence -
+so a shell redirect (`git diff > notes.txt`, `| tee`) is allowed: it writes
+no more than `echo` does, and nothing in a repository's state.
 
 ## Agents talk without hijacking your keyboard
 

@@ -211,6 +211,25 @@ _run_launch_scrub() { # <keep-name...> -> ` bash -c '<scrub>' cel-launch-clean '
     "$_RUN_SECRET_NAMES" "${keep# }"
 }
 
+# A REVIEWER'S GIT IS PINNED AT LAUNCH. The guard (lib/guard.sh
+# _guard_reviewer_git) reads the words of a git command; git also reads its
+# environment and every repository config it finds. So, after the scrub, a
+# reviewer's runtime starts without the variables that name a program, a
+# repository or config (env -u: git takes an empty GIT_EXTERNAL_DIFF as a
+# program to run), with cat as its pager, and with config in the environment
+# (GIT_CONFIG_COUNT - command-line scope, above any repository's own):
+# safe.bareRepository=explicit, so a bare-repository-shaped directory a PR
+# commits is never discovered from the cwd and its config never read;
+# core.fsmonitor=false; core.pager=cat. diff.external is not set: an empty
+# value is a program named "" and breaks every git diff, and the only config
+# a reviewer's git can read is its own checkout's and the owner's.
+_RUN_REVIEWER_GIT_UNSET='GIT_EXTERNAL_DIFF GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE GIT_NAMESPACE GIT_CONFIG_PARAMETERS GIT_CONFIG'
+_run_reviewer_git_env() { # -> `env -u ... K=V ...` for the end of a reviewer's prefix
+  local n out=env
+  for n in $_RUN_REVIEWER_GIT_UNSET; do out="$out -u $n"; done
+  printf '%s GIT_PAGER=cat PAGER=cat GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=explicit GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false GIT_CONFIG_KEY_2=core.pager GIT_CONFIG_VALUE_2=cat' "$out"
+}
+
 # The one credential a direct (non-gateway) profile authenticates with: its
 # model's provider `key_env` (agents.yaml providers). Nothing for a gateway
 # route, a provider signed in through its CLI, or a model naming no provider
@@ -269,6 +288,7 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
       # shellcheck disable=SC2086  # $sets is a word list on purpose
       out="$out $(_run_launch_scrub $sets ${LAUNCH_ENV_KEEP[@]+"${LAUNCH_ENV_KEEP[@]}"})" ;;
   esac
+  [ "$role" != reviewer ] || out="$out $(_run_reviewer_git_env)"
   [ -z "$oc_cmd" ] || out="$out $oc_cmd"
   printf '%s ' "$out"
 }
@@ -3008,7 +3028,8 @@ $(_run_reviewer_focus_brief "$repo" "$pr" "$review_focus")"
       [ -z "$lane" ] || LAUNCH_ENV_EXTRA+=("CEL_LANE=$lane") ;;
     # Pane alias is the reader identity, passed explicitly so delivery never
     # depends on the pane's cwd.
-    reviewer) inbox_me="$agent_name" ;;
+    # Its checkout is the one directory its git -C may name (lib/guard.sh).
+    reviewer) inbox_me="$agent_name"; LAUNCH_ENV_EXTRA=("CEL_REVIEW_CHECKOUT=$(printf '%q' "$cwd")") ;;
     # A team member: its alias is its mailbox, and the guard reads its team
     # and role from these.
     member) inbox_me="$agent_name"

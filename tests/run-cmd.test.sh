@@ -1718,6 +1718,81 @@ test_product_agent_and_core_launch_env_still_inherit_the_callers_environment() {
   done
   rm -rf "$T"
 }
+# A REVIEWER'S GIT IS PINNED AT LAUNCH: the git variables that name a program,
+# a repository or config are dropped whatever the pane carries, the pager is
+# cat, and config from the environment (command-line scope, above any
+# repository's own) refuses a bare repository found by walking up from the
+# cwd - a PR can commit one, with a config that runs programs - and turns off
+# fsmonitor. A member's launch is unchanged.
+_RV_GIT_PROBED="GIT_EXTERNAL_DIFF GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE GIT_NAMESPACE GIT_CONFIG_PARAMETERS GIT_CONFIG GIT_PAGER PAGER GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2"
+test_reviewer_launch_pins_its_git_environment() {
+  _ws
+  # shellcheck disable=SC2086
+  _probe_runtime "$T/got" $_RV_GIT_PROBED
+  local line n; local -a seeded=()
+  for n in $_RV_GIT_PROBED; do seeded+=("$n=fixture-$n"); done
+  line="$(_run_launch_env reviewer "$T" /r.md "" pi)"
+  env "${seeded[@]}" bash -c "$line $T/probe"
+  assert_eq "$(cat "$T/got")" "$(_expect_probe GIT_EXTERNAL_DIFF='<unset>' GIT_SSH='<unset>' GIT_SSH_COMMAND='<unset>' GIT_PROXY_COMMAND='<unset>' \
+    GIT_EXEC_PATH='<unset>' GIT_DIR='<unset>' GIT_WORK_TREE='<unset>' GIT_NAMESPACE='<unset>' GIT_CONFIG_PARAMETERS='<unset>' GIT_CONFIG='<unset>' \
+    GIT_PAGER=cat PAGER=cat GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=explicit \
+    GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false GIT_CONFIG_KEY_2=core.pager GIT_CONFIG_VALUE_2=cat)" || { rm -rf "$T"; return 1; }
+  line="$(_run_launch_env member "$T" /r.md "" pi)"
+  env "${seeded[@]}" bash -c "$line $T/probe"
+  case "$(cat "$T/got")" in "GIT_EXTERNAL_DIFF=fixture-GIT_EXTERNAL_DIFF;"*) ;; *) echo "a member's git environment changed"; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+# ...and that is what stops a committed bare-repository-shaped directory: a
+# reviewer that cds into it and runs git reads none of its config.
+test_reviewer_launch_refuses_a_committed_bare_repository() {
+  _ws
+  local R="$T/checkout" ran="$T/ran"
+  git init -q "$R" && git -C "$R" config user.email fixture@example.invalid && git -C "$R" config user.name fixture
+  git init -q --bare "$R/evil.git"
+  git -C "$R/evil.git" config core.pager "touch $ran"
+  git -C "$R/evil.git" config diff.external "touch $ran"
+  : > "$R/evil.git/objects/.keep"; : > "$R/evil.git/refs/heads/.keep"
+  git -C "$R" add -A && git -C "$R" commit -qm fixture || { rm -rf "$T"; return 1; }
+  git -C "$R" ls-files --error-unmatch evil.git/config >/dev/null || { echo "the bare-shaped directory is not committed"; rm -rf "$T"; return 1; }
+  cat > "$T/probe" <<EOF
+#!/usr/bin/env bash
+cd '$R/evil.git' && git config --get core.pager > '$T/got' 2>&1; git log -1 >> '$T/got' 2>&1; true
+EOF
+  chmod +x "$T/probe"
+  # the hole: a plain shell reads the nested repository's config
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 bash -c "$T/probe"
+  case "$(cat "$T/got")" in "touch $ran"*) ;; *) echo "fixture: the bare-shaped directory was not read as a repository: $(cat "$T/got")"; rm -rf "$T"; return 1;; esac
+  # the reviewer's launch: git refuses it outright
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 bash -c "$(_run_launch_env reviewer "$T" /r.md "" pi) $T/probe"
+  case "$(cat "$T/got")" in *"cannot use bare repository"*) ;; *) echo "a reviewer's git read the nested repository: $(cat "$T/got")"; rm -rf "$T"; return 1;; esac
+  case "$(cat "$T/got")" in *"touch $ran"*) echo "a reviewer's git read the nested config"; rm -rf "$T"; return 1;; esac
+  [ ! -e "$ran" ] || { echo "the nested repository's program ran"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The launch also names the reviewer's own checkout, the one place git -C may
+# point (lib/guard.sh _guard_reviewer_git).
+test_reviewer_launch_names_its_checkout() {
+  _ws_pr_fixture
+  _probe_runtime "$T/agent-env" CEL_REVIEW_CHECKOUT GIT_PAGER
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start") bash -c "$typed_prefix $T/probe" ;;
+      *) : ;;
+    esac
+  }
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_eq "$(cat "$T/agent-env")" "$(_expect_probe "CEL_REVIEW_CHECKOUT=$(reviewer_checkout_path widget 12)" GIT_PAGER=cat)" \
+    || { reviewer_checkout_release widget 12; _ws_gateway_clean; return 1; }
+  reviewer_checkout_release widget 12
+  _ws_gateway_clean
+}
 # The real launches, end to end through the line typed into the pane.
 test_reviewer_launch_never_carries_the_callers_secrets_and_keeps_its_gateway_token() {
   _ws_pr_fixture
