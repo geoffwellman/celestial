@@ -546,36 +546,28 @@ _gc_reviewer_pr_state() { # <repo> <pr> [cwd] [repodir] -> MERGED|CLOSED|OPEN|UN
 }
 
 _gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> PR JSON in gh's words, or fail
-  local out cwd wsdir="" rd="" desc slug f="$5"
+  local out cwd wsdir="" rd="" desc provider slug f="$5"
   cwd="$(pane_cwd "${3:-}")"
-  # A FORGEJO REPO'S PR IS ASKED OF FORGEJO, never gh: a GitHub mirror
-  # numbers other PRs the same. Its forge is forge_repo's answer for the
-  # reviewer's workspace - its checkout's, else the row's recorded clone's.
+  # THE REPO IS ASKED OF THE FORGE ITS WORKSPACE DECLARES, by owner/name, or
+  # not at all. Its forge is forge_repo's answer for the reviewer's workspace
+  # (its checkout's, else the row's recorded clone's): a Forgejo repo's PR
+  # is asked of Forgejo, a GitHub repo's of gh by its declared slug. A repo
+  # no workspace resolves - forge_repo refused it, or the workspace is not
+  # known - is never guessed at by name: GitHub's same-named repo (the old
+  # mirror of a repo that moved to Forgejo) numbers other PRs the same, and
+  # a merged mirror PR would close the reviewer of an open one. Unresolved
+  # is a failure, which every caller reads as UNKNOWN: kept.
   if [ -n "$cwd" ] && [ -d "$cwd" ]; then wsdir="$(ws_of_checkout "$cwd")" || wsdir=""; fi
   [ -n "$wsdir" ] || IFS=$'\t' read -r wsdir rd < <(_gc_reviewer_ws "$1" "${4:-}") || true
-  if [ -n "$wsdir" ]; then
-    desc="$(forge_repo "$wsdir" "$1" "${rd:-${4:-$wsdir/repos/$1}}" 2>/dev/null)" || desc=""
-    if [ "$(printf '%s' "$desc" | jq -r '.provider // empty' 2>/dev/null)" = forgejo ]; then
-      _gc_reviewer_forgejo_pr "$wsdir" "$1" "$2" "$desc"
-      return
-    fi
-  fi
-  # Asked from the reviewer's own checkout when it still has one, because
-  # that is where gh can resolve the repository from its remote.
-  if [ -n "$cwd" ] && [ -d "$cwd" ]; then
-    out="$(_gc_gh "$cwd" pr view "$2" --json "$f" 2>/dev/null)" || return 1
-  else
-    # The folder is gone: resolve the GitHub repo the way `cel run
-    # reviewer` does - declared url, else the clone's origin - never
-    # from the folder name. The bare name is the last resort.
-    IFS=$'\t' read -r wsdir slug < <(_gc_reviewer_slug "$1" "${4:-}") || true
-    if [ -n "${slug:-}" ] && [ -n "${wsdir:-}" ]; then
-      out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json "$f" 2>/dev/null)" || return 1
-    else
-      local bin; bin="$(cel_gh_bin)" || return 1
-      out="$(cel_gh_run "$bin" pr view "$2" --repo "$1" --json "$f" 2>/dev/null)" || return 1
-    fi
-  fi
+  [ -n "$wsdir" ] || return 1
+  desc="$(forge_repo "$wsdir" "$1" "${rd:-${4:-$wsdir/repos/$1}}" 2>/dev/null)" || return 1
+  provider="$(printf '%s' "$desc" | jq -r '.provider // empty' 2>/dev/null)"
+  slug="$(printf '%s' "$desc" | jq -er '"\(.owner | strings)/\(.repo | strings)"' 2>/dev/null)" || return 1
+  case "$provider" in
+    forgejo) _gc_reviewer_forgejo_pr "$wsdir" "$1" "$2" "$desc"; return ;;
+    github)  out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json "$f" 2>/dev/null)" || return 1 ;;
+    *)       return 1 ;;
+  esac
   printf '%s' "$out"
 }
 
@@ -612,15 +604,6 @@ _gc_reviewer_ws() { # <repo> [repodir] -> wsdir<TAB>repodir, or fail
   fi
   [ -n "$wsdir" ] || return 1
   printf '%s\t%s\n' "$wsdir" "$repodir"
-}
-
-# That workspace and the repo's GitHub slug (declared url, else the clone's
-# origin), for a repo on GitHub.
-_gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
-  local wsdir repodir slug
-  IFS=$'\t' read -r wsdir repodir < <(_gc_reviewer_ws "$1" "${2:-}") || return 1
-  slug="$(ws_repo_github_slug "$wsdir" "$1" "$repodir" 2>/dev/null)" || return 1
-  printf '%s\t%s\n' "$wsdir" "$slug"
 }
 
 # KEPT AS UNKNOWN FOR A DAY IS A BLOCKER. The fail-safe keeps a reviewer

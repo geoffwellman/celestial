@@ -646,8 +646,11 @@ test_gc_rejects_unknown_arguments_and_names_box() {
 # reviewer runs in the orchestrator's own checkout, not under ~/.herdr/worktrees.
 _gc_reviewer_fixture() {
   T="$(mktemp -d)"
-  export HOME="$T/home" CEL_REVIEWERS_STATE="$T/reviewers.json"
+  export HOME="$T/home" CEL_REVIEWERS_STATE="$T/reviewers.json" CEL_REGISTRY="$T/registry.yaml"
   mkdir -p "$HOME" "$T/ws/repos/widget"
+  # gc asks only about a repo its workspace declares: widget on GitHub.
+  printf 'name: rvws\nrepos:\n  - name: widget\n    url: git@github.com:acme/widget.git\n' > "$T/ws/workspace.yaml"
+  registry_add rvws "$T/ws" ""
   GC_SINK="$T/sink"; : > "$GC_SINK"
   GC_PR_STATE=MERGED
   GC_REVIEW_STATUS=idle
@@ -1256,6 +1259,29 @@ test_gc_herdr_reviewer_of_a_forgejo_repo_is_judged_by_forgejo() {
          assert_eq "$(reviewers_find "$T/ws" widget 41 | jq -r .pane)" w1:p5 || { echo "$c"; rm -rf "$T"; return 1; } ;;
     esac
     if [ "$want" = unknown ]; then assert_contains "$out" "UNKNOWN: cannot read the state of widget#41" || { rm -rf "$T"; return 1; }; fi
+    rm -rf "$T"
+  done
+}
+
+# A REPO NO WORKSPACE RESOLVES IS NEVER ASKED OF GITHUB BY NAME. A declared
+# `forge: forgejo` whose lookup fails (an ssh alias with no `host:`), an
+# undeclared non-GitHub url, or a reviewer whose workspace is not registered
+# is UNKNOWN, kept: GitHub's same-named repo - the old mirror of a repo that
+# moved - numbers other PRs the same, and its merged #41 would close the
+# reviewer of an open Forgejo #41.
+test_gc_unresolved_repo_reviewer_is_kept_and_gh_is_never_asked() {
+  local yaml out
+  for yaml in $'name: demo\nrepos:\n  - name: widget\n    url: git@forgejo-alias:acme/widget.git\n    forge: forgejo\n' \
+    $'name: demo\nrepos:\n  - name: widget\n    url: git@forgejo.example:acme/widget.git\n' unregistered; do
+    _gc_forgejo_reviewer_fixture
+    if [ "$yaml" = unregistered ]; then printf '' > "$CEL_REGISTRY"
+    else printf '%s' "$yaml" > "$T/ws/workspace.yaml"; fi
+    GC_PR_STATE=MERGED
+    out="$(_gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" 2>&1)"
+    assert_eq "$(cat "$GC_GH")" "" || { echo "gh was asked: $(cat "$GC_GH")"; rm -rf "$T"; return 1; }
+    assert_eq "$(cat "$GC_FJ")" "" || { rm -rf "$T"; return 1; }
+    assert_eq "$(cat "$GC_SINK")" "" || { echo "$out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "UNKNOWN: cannot read the state of widget#41" || { rm -rf "$T"; return 1; }
     rm -rf "$T"
   done
 }
