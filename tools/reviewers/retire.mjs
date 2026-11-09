@@ -615,7 +615,7 @@ export function githubEnv(toolPath, token, base = process.env) {
 }
 
 export async function retire(options) {
-  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, declared = [], githubUser = '', repodir = '', ghBin = '', toolPath = '' } = options;
+  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, forge = '', declared = [], githubUser = '', repodir = '', ghBin = '', toolPath = '' } = options;
   let proofPath;
   const rex = (args, opts) => command(process.env.CEL_REX_BIN || 'rex', ['--autostart=false', ...args], opts);
   const gh = () => {
@@ -629,6 +629,19 @@ export async function retire(options) {
     requireProof(['OPEN', 'MERGED', 'CLOSED'].includes(value.state) && /^[a-f0-9]{40}$/.test(value.headRefOid) && typeof value.headRefName === 'string' && value.headRefName, 'unknown_remote_pr');
     return value;
   };
+  // A Forgejo repo's PR is read from its own forge, never GitHub (a GitHub
+  // mirror numbers other PRs the same): `cel forge pr view` as the workspace,
+  // with lib/forge.sh's token and host rules. Its answer must name exactly
+  // this PR of the slug the bash side resolved (forge_repo), and is kept in
+  // GitHub's words, which the round and the evidence already speak.
+  const forgejo = () => {
+    const result = spawnSync('bash', [path.join(process.env.CEL_ROOT, 'bin/cel'), 'forge', 'pr', 'view', `${repo}#${number}`, '--json', '--workspace', wsname], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000, maxBuffer: 1048576 });
+    requireProof(!result.error && result.status === 0, 'forge_unavailable');
+    const value = JSON.parse(result.stdout);
+    requireProof(object(value) && value.number === Number(number) && ['open', 'merged', 'closed'].includes(value.state) && /^[a-f0-9]{40}$/.test(value.head_sha) && typeof value.head_ref === 'string' && value.head_ref && typeof value.url === 'string' && value.url.endsWith(`/${slug}/pulls/${number}`), 'unknown_remote_pr');
+    return { state: value.state.toUpperCase(), headRefOid: value.head_sha, headRefName: value.head_ref };
+  };
+  const remotePullRequest = () => forge === 'forgejo' ? forgejo() : gh();
   const snapshot = inspect => {
     const saved = jsonFile(receipt, true), r = saved.value;
     const parent = fs.lstatSync(path.dirname(receipt));
@@ -639,11 +652,11 @@ export async function retire(options) {
     requireProof(['idle', 'done'].includes(r.agent_status), 'reviewer_not_idle', 'protected');
     requireProof(Number.isInteger(r.pid) && r.pid > 1 && typeof r.pid_start === 'string' && path.isAbsolute(r.cwd) && path.isAbsolute(r.workspace) && path.isAbsolute(r.agent_session?.value || ''), 'incomplete_runtime_receipt');
     requireProof(!repodir || path.resolve(repodir) === path.join(r.workspace, 'repos', repo), 'requested_workspace_repository_mismatch');
-    // An exited generation has nothing to retire; it is never asked of GitHub.
+    // An exited generation has nothing to retire; it is never asked of its forge.
     requireProof(liveGeneration({ pid: r.pid, start: r.pid_start }), 'runtime_generation_exited');
     // A reviewer exists for one pull request. While it is open, a new push or
     // a re-review request can still arrive: only a merged or closed PR ends it.
-    const remote = gh();
+    const remote = remotePullRequest();
     requireProof(remote.state !== 'OPEN', 'pull_request_open', 'protected');
     const tree = descendants(r.pid), root = tree[0];
     requireProof(root.start === r.pid_start && ['pi', 'pi-coding-agent'].includes(root.argv[0]) && ['node', 'pi', 'bun'].some(name => path.basename(root.exe).startsWith(name)), 'runtime_generation_mismatch');
@@ -767,7 +780,7 @@ export async function retire(options) {
     }
     requireProof(!proofPath, 'native_exit_commitment_unavailable');
     requireProof(fs.existsSync(receipt), 'receipt_and_retirement_proof_unavailable');
-    requireProof(/^[^/\s]+\/[^/\s]+$/.test(slug) && wsname, 'invalid_workspace_arguments');
+    requireProof(['github', 'forgejo'].includes(forge) && /^[^/\s]+\/[^/\s]+$/.test(slug) && wsname, 'invalid_workspace_arguments');
     const preflight = snapshot();
     const nonce = crypto.randomUUID();
     const inspect = await nativeHandshake(receipt, preflight.identity, 'inspect', nonce);
@@ -841,8 +854,8 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
   if (process.argv[2] === '--checkout-preserved') {
     process.exitCode = checkoutPreserved(process.argv[3], process.argv[4]) ? 0 : 1;
   } else {
-    const [repo, pr, pane, agent, dry, receipt, wsname, slug, helpers = '', githubUser = '', repodir = '', ghBin = '', toolPath = ''] = process.argv.slice(2);
-    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir, ghBin, toolPath });
+    const [repo, pr, pane, agent, dry, receipt, wsname, slug, helpers = '', githubUser = '', repodir = '', ghBin = '', toolPath = '', forge = ''] = process.argv.slice(2);
+    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, forge, declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir, ghBin, toolPath });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exitCode = result.status === 'retired' || (dry === '1' && result.status === 'eligible') ? 0 : result.status === 'protected' ? 3 : 2;
   }

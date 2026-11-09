@@ -43,7 +43,13 @@ NODE
   printf 'Reviewer fixture role\n' > "$RR_WS/.cel/reviews/pr-71/role-reviewer.md"
   export PI_CODING_AGENT_DIR="$RR_T/pi"
   chmod 700 "$CEL_REX_STATE"
-  printf 'name: bundle\n' > "$RR_WS/workspace.yaml"
+  # The repo's declared url names its forge (forge_repo): GitHub by default,
+  # Forgejo when the test sets RR_FORGE=forgejo.
+  if [ "${RR_FORGE:-github}" = forgejo ]; then
+    printf 'name: bundle\nrepos:\n  - name: widget\n    url: git@forgejo.example:acme/widget.git\n    forge: forgejo\n    host: http://forgejo.example\n' > "$RR_WS/workspace.yaml"
+  else
+    printf 'name: bundle\nrepos:\n  - name: widget\n    url: git@github.com:acme/widget.git\n' > "$RR_WS/workspace.yaml"
+  fi
   printf 'review evidence\n' > "$RR_CO/artifacts/result.txt"
   registry_add bundle "$RR_WS" ""
   cat > "$RR_T/runtime.mjs" <<'NODE'
@@ -119,6 +125,12 @@ if (cmd === 'gh') {
   if (state.ghFailure) process.exit(1);
   if (state.ghMalformed) { console.log('{}'); process.exit(0); }
   emit({state:state.prState,headRefOid:state.head,headRefName:'review-widget',number:71,url:'https://github.com/acme/widget/pull/71'});
+} else if (cmd === 'cel' && args[0] === 'forge') {
+  // `cel forge pr view <repo>#<n> --json --workspace <name>`: lib/forge.sh's
+  // normalised answer, as Forgejo's pull request reads in Celestial's words.
+  if (args[1] !== 'pr' || args[2] !== 'view') process.exit(90);
+  if (state.forgeFailure) process.exit(1);
+  emit({number:state.forgeNumber||71,state:state.prState.toLowerCase(),head_sha:state.head,head_ref:'review-widget',base_ref:'main',author:'acme',draft:false,mergeable:'unknown',merged_at:null,url:state.forgeUrl||'http://forgejo.example/acme/widget/pulls/71',labels:[]});
 } else if (cmd === 'cel') {
   if (args[0] !== 'inbox' || args[1] !== 'count') process.exit(91);
   if (state.mailFailure) process.exit(1);
@@ -238,7 +250,6 @@ _rr_start() {
   RR_PID_START="$(_rex_pid_start "$RR_PID")"
   printf '#!/usr/bin/env bash\nexec %q %q "$@"\n' "$RR_NODE" "$RR_T/bin/cel" > "$CEL_ROOT/bin/cel"
   ws_name() { printf bundle; }
-  ws_repo_github_slug() { printf acme/widget; }
   local i
   for ((i=0;i<100;i++)); do [ -s "$RR_T/ready" ] && break; sleep .02; done
   [ -s "$RR_T/ready" ] || return 1
@@ -344,6 +355,8 @@ test_gc_rex_completed_exact_head_approved_rounds_retire_and_preserve_evidence() 
     assert_eq "$(jq -r '.nativeLiveAtKill // false' "$RR_T/boundary.json")" false || return
     # Mailbox queries must bind the exact alias and receipt's workspace.
     jq -se --arg a "$RR_ALIAS" 'any(.[]; .cmd=="cel" and (.args|index($a))!=null and (.args|index("--all-workspaces"))!=null and (.args|index("bundle"))!=null)' "$RR_T/calls.jsonl" >/dev/null || return
+    # A GitHub repo's PR is read from GitHub, by the declared url's slug.
+    jq -se 'any(.[]; .cmd=="gh" and (.args|index("acme/widget"))!=null) and all(.[]; .cmd!="cel" or .args[0]!="forge")' "$RR_T/calls.jsonl" >/dev/null || return
     jq -se '
       [to_entries[] | select(.value.cmd=="rex" and (.value.args|index("kill"))!=null)] as $close |
       ($close|length)==1 and
@@ -601,6 +614,67 @@ test_gc_rex_dry_run_keeps_runtime_receipt_registry_and_checkout() {
   _rr_fixture
   _rr_gc 1
   _rr_kept
+}
+
+# A repo on Forgejo (declared forge: forgejo) has its reviewer retired by the
+# same proofs, its PR read from its own forge (`cel forge pr view`, as the
+# workspace) - never from GitHub, where a mirror numbers other PRs the same.
+test_gc_rex_forgejo_repo_reviewer_retires_from_its_forge() {
+  local state
+  export RR_FORGE=forgejo
+  for state in MERGED CLOSED; do
+    _rr_fixture
+    _rr_set ".prState=\"$state\""
+    _rr_gc
+    _rr_exited || return
+    [ ! -e "$RR_RECEIPT" ] || return 1
+    assert_eq "$(reviewers_rows | jq length)" 0 || return
+    assert_eq "$reviewers_closed" 1 || return
+    assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
+    _rr_preserved || return
+    assert_eq "$(jq -s '[.[] | select(.cmd=="gh")] | length' "$RR_T/calls.jsonl")" 0 || return
+    jq -se 'any(.[]; .cmd=="cel" and .args==["forge","pr","view","widget#71","--json","--workspace","bundle"])' "$RR_T/calls.jsonl" >/dev/null || return
+    # the proof packet keeps the forge's answer in the round's own words
+    jq -se --arg h "$RR_HEAD" --arg s "$state" 'any(.[]; .stage=="prepared" and .remote==({state:$s,headRefOid:$h,headRefName:"review-widget"}))' \
+      "$CEL_REX_STATE"/retirements/*.json >/dev/null || return
+    _rr_cleanup
+  done
+  unset RR_FORGE
+}
+
+# Fail-closed as on GitHub: an open PR, an unreadable forge, or an answer for
+# another repository or PR keeps the reviewer, before any inbox is asked.
+test_gc_rex_forgejo_open_or_unproven_pr_keeps_the_reviewer() {
+  local condition reason
+  export RR_FORGE=forgejo
+  for condition in '.prState="OPEN"|' '.forgeFailure=true|forge_unavailable' \
+    '.forgeUrl="http://forgejo.example/other/widget/pulls/71"|unknown_remote_pr' '.forgeNumber=72|unknown_remote_pr'; do
+    reason="${condition#*|}"
+    _rr_fixture; _rr_set "${condition%%|*}"
+    _rr_gc; _rr_kept || return
+    if [ -n "$reason" ]; then assert_contains "$(cat "$RR_T/gc.out")" "retirement incomplete for widget#71: $reason" || return
+    else ! grep -q 'retirement incomplete' "$RR_T/gc.out" || return 1; fi
+    assert_eq "$(jq -s '[.[] | select(.cmd=="gh" or (.cmd=="cel" and .args[0]!="forge"))] | length' "$RR_T/calls.jsonl")" 0 || return
+    _rr_cleanup
+  done
+  unset RR_FORGE
+}
+
+# A repo whose forge cannot be resolved has no slug, and a slug or forge that
+# is not exactly owner/name on github or forgejo is refused before anything
+# is asked of a forge, Rex or the inbox.
+test_gc_rex_unresolved_or_malformed_forge_slug_is_refused() {
+  _rr_fixture
+  printf 'name: bundle\nrepos:\n  - name: widget\n    url: git@forgejo-alias:acme/widget.git\n    forge: forgejo\n' > "$RR_WS/workspace.yaml"
+  _rr_gc; _rr_kept || return
+  assert_contains "$(cat "$RR_T/gc.out")" "retirement incomplete for widget#71: invalid_workspace_arguments" || return
+  local args out rc
+  for args in 'acme/widget/x|forgejo' 'forgejo.example/acme/widget|forgejo' '|forgejo' 'acme widget|forgejo' 'acme/widget|' 'acme/widget|gitlab'; do
+    rc=0; out="$("$RR_NODE" "$CEL_ROOT/tools/reviewers/retire.mjs" widget 71 "$RR_PANE" "$RR_ALIAS" 1 "$RR_RECEIPT" bundle "${args%%|*}" '' '' "$RR_WS/repos/widget" "$GH" "$PATH" "${args#*|}")" || rc=$?
+    assert_eq "$rc $(printf '%s' "$out" | jq -r '[.status, .reason] | join(" ")')" "2 unknown invalid_workspace_arguments" || { echo "$args: $out"; return 1; }
+  done
+  assert_eq "$(jq -s '[.[] | select(.cmd=="gh" or .cmd=="cel" or .cmd=="rex")] | length' "$RR_T/calls.jsonl")" 0 || return
+  _rr_preserved
 }
 
 # A pane off the roster whose PID generation exited, with no retirement proof

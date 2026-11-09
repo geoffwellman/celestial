@@ -531,10 +531,10 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
   return 0
 }
 
-# THE STATE OF ONE PULL REQUEST, asked of GitHub directly rather than
+# THE STATE OF ONE PULL REQUEST, asked of its forge directly rather than
 # inferred from a branch: a reviewer has no worktree and no branch of its
 # own, only the PR number it was started for. Anything that is not one of the
-# three states GitHub actually returns is UNKNOWN, and unknown is never
+# three states the forge actually returns is UNKNOWN, and unknown is never
 # closed - this file's whole history is bugs where "could not tell" was
 # treated as "nothing there".
 _gc_reviewer_pr_state() { # <repo> <pr> [cwd] [repodir] -> MERGED|CLOSED|OPEN|UNKNOWN
@@ -545,9 +545,21 @@ _gc_reviewer_pr_state() { # <repo> <pr> [cwd] [repodir] -> MERGED|CLOSED|OPEN|UN
   case "$state" in MERGED|CLOSED|OPEN) printf '%s' "$state";; *) printf UNKNOWN;; esac
 }
 
-_gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> gh pr view JSON, or fail
-  local out cwd wsdir slug f="$5"
+_gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> PR JSON in gh's words, or fail
+  local out cwd wsdir="" rd="" desc slug f="$5"
   cwd="$(pane_cwd "${3:-}")"
+  # A FORGEJO REPO'S PR IS ASKED OF FORGEJO, never gh: a GitHub mirror
+  # numbers other PRs the same. Its forge is forge_repo's answer for the
+  # reviewer's workspace - its checkout's, else the row's recorded clone's.
+  if [ -n "$cwd" ] && [ -d "$cwd" ]; then wsdir="$(ws_of_checkout "$cwd")" || wsdir=""; fi
+  [ -n "$wsdir" ] || IFS=$'\t' read -r wsdir rd < <(_gc_reviewer_ws "$1" "${4:-}") || true
+  if [ -n "$wsdir" ]; then
+    desc="$(forge_repo "$wsdir" "$1" "${rd:-${4:-$wsdir/repos/$1}}" 2>/dev/null)" || desc=""
+    if [ "$(printf '%s' "$desc" | jq -r '.provider // empty' 2>/dev/null)" = forgejo ]; then
+      _gc_reviewer_forgejo_pr "$wsdir" "$1" "$2" "$desc"
+      return
+    fi
+  fi
   # Asked from the reviewer's own checkout when it still has one, because
   # that is where gh can resolve the repository from its remote.
   if [ -n "$cwd" ] && [ -d "$cwd" ]; then
@@ -567,10 +579,28 @@ _gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> gh pr view JS
   printf '%s' "$out"
 }
 
-# Which workspace a reviewer's repo belongs to, and its GitHub slug: the row's
-# recorded clone first, else the first registered workspace with that repo.
-_gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
-  local repo="$1" repodir="${2:-}" wsdir="" ws slug
+# A Forgejo repo's PR (forge_pr_view, as the workspace) in the gh words this
+# pass reads: {state: MERGED|CLOSED|OPEN, headRefOid}. The answer must be
+# exactly this PR of this owner/name - its number, and a url ending in
+# /<owner>/<name>/pulls/<n> - with a full head; anything else fails, which
+# every caller reads as UNKNOWN: kept.
+_gc_reviewer_forgejo_pr() { # <wsdir> <repo> <pr> <forge_repo descriptor>
+  local out tail
+  [[ "$3" =~ ^[1-9][0-9]*$ ]] || return 1
+  tail="$(printf '%s' "$4" | jq -er '"/\(.owner | strings)/\(.repo | strings)/pulls/"' 2>/dev/null)$3" || return 1
+  out="$(forge_pr_view "$1" "$2" "$3" 2>/dev/null)" || return 1
+  printf '%s' "$out" | jq -ec --argjson n "$3" --arg tail "$tail" '
+    select(type == "object" and .number == $n and (.state | IN("open", "merged", "closed"))
+      and (.head_sha | type == "string" and test("^[a-f0-9]{40}$"))
+      and (.url | type == "string" and endswith($tail)))
+    | {state: (.state | ascii_upcase), headRefOid: .head_sha}' 2>/dev/null
+}
+
+# Which workspace a reviewer's repo belongs to, and the clone to read it
+# from: the row's recorded clone first, else the first registered workspace
+# with that repo.
+_gc_reviewer_ws() { # <repo> [repodir] -> wsdir<TAB>repodir, or fail
+  local repo="$1" repodir="${2:-}" wsdir="" ws
   if [ -n "$repodir" ] && [ -d "$repodir" ]; then wsdir="$(ws_of_checkout "$repodir")" || wsdir=""; fi
   if [ -z "$wsdir" ]; then
     repodir=""
@@ -581,7 +611,15 @@ _gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
     done < <(registry_names 2>/dev/null || true)
   fi
   [ -n "$wsdir" ] || return 1
-  slug="$(ws_repo_github_slug "$wsdir" "$repo" "$repodir" 2>/dev/null)" || return 1
+  printf '%s\t%s\n' "$wsdir" "$repodir"
+}
+
+# That workspace and the repo's GitHub slug (declared url, else the clone's
+# origin), for a repo on GitHub.
+_gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
+  local wsdir repodir slug
+  IFS=$'\t' read -r wsdir repodir < <(_gc_reviewer_ws "$1" "${2:-}") || return 1
+  slug="$(ws_repo_github_slug "$wsdir" "$1" "$repodir" 2>/dev/null)" || return 1
   printf '%s\t%s\n' "$wsdir" "$slug"
 }
 
@@ -758,7 +796,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     state="$(_gc_reviewer_pr_state "$repo" "$pr" "$cwd" "$repodir")"
     if [ "$state" = UNKNOWN ]; then
       [ "$dry" -eq 1 ] || _gc_unknown_note "$pane" "$repo" "$pr" \
-        "$(_gc_reviewer_slug "$repo" "$repodir" | cut -f1)"
+        "$(_gc_reviewer_ws "$repo" "$repodir" | cut -f1)"
     else
       [ "$dry" -eq 1 ] || _gc_unknown_clear "$pane" "$repo" "$pr"
     fi
