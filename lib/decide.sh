@@ -10,6 +10,109 @@
 _CEL_DECIDE=1
 # shellcheck source=lib/inbox.sh
 . "${BASH_SOURCE[0]%/*}/inbox.sh"
+# shellcheck source=lib/identity.sh
+. "${BASH_SOURCE[0]%/*}/identity.sh"
+
+# ROUTING (people: in workspace.yaml). A question names a topic; the topic is
+# a role; the route is the people holding that role for the asker's product,
+# else the workspace's owners, computed once at ask time and kept on the
+# record as `route: {role, product, people}`. `to` stays "owner", so every
+# reader that knew decisions before routing still finds them. With no
+# people: (or nobody holding the role and no owner) there is no route and
+# nothing below changes: anyone answers, --by is free text.
+_DECIDE_TOPICS="product qa design release merge owner"
+_decide_topic_role() { # <topic> -> the people role it is routed to
+  case "$1" in
+    product) printf product-lead ;; merge) printf approver ;;
+    qa|design|release|owner) printf '%s' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The asker's product: its launch's CEL_PRODUCT, else the longest declared
+# product whose name prefixes the mailbox (<p>-orch, <p>-lead, <p>-<lane>).
+_decide_asker_product() { # <wsdir> <asker>
+  if [ -n "${CEL_PRODUCT:-}" ]; then printf '%s' "$CEL_PRODUCT"; return 0; fi
+  local p best=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$2" in "$p"-*) [ "${#p}" -le "${#best}" ] || best="$p" ;; esac
+  done < <(ws_product_names "$1" 2>/dev/null)
+  printf '%s' "$best"
+}
+
+_decide_route() { # <ws> <asker> <topic> -> route json, or nothing
+  local wsdir role product holders
+  wsdir="$(registry_path "$1" 2>/dev/null || true)"
+  [ -n "$wsdir" ] && [ -f "$wsdir/workspace.yaml" ] || return 0
+  [ "$(ws_people_json "$wsdir" 2>/dev/null || printf '[]')" != "[]" ] || return 0
+  role="$(_decide_topic_role "$3")" || return 0
+  product="$(_decide_asker_product "$wsdir" "$2")"
+  holders="$(ws_role_holders "$wsdir" "$product" "$role" 2>/dev/null || true)"
+  [ -n "$holders" ] || holders="$(ws_role_holders "$wsdir" "$product" owner 2>/dev/null || true)"
+  [ -n "$holders" ] || return 0
+  jq -nc --arg r "$role" --arg p "$product" --arg h "$holders" \
+    '{role: $r, product: (if $p == "" then null else $p end), people: ($h | split("\n") | map(select(. != "")))}'
+}
+
+# What THIS LOGIN is to each open decision, the one rule `list`, the
+# dashboard and `answer|drop` all read: `me` (its person in that workspace,
+# or null), `mine` (unrouted, or routed to me) and `answerable` (unrouted, or
+# me holds the route, or me is an owner - workspace-wide or for the route's
+# product). An unrouted decision reads topic `owner`.
+_decide_annotate() { # <records, one per line> -> the same records, annotated
+  local ws wsdir me people
+  for ws in $(jq -r '.workspace' <<< "$1" | awk 'NF && !seen[$0]++'); do
+    wsdir="$(registry_path "$ws" 2>/dev/null || true)"; me=""; people='[]'
+    if [ -n "$wsdir" ] && [ -f "$wsdir/workspace.yaml" ]; then
+      me="$(ws_me "$wsdir")"
+      people="$(ws_people_json "$wsdir" 2>/dev/null || true)"; [ -n "$people" ] || people='[]'
+    fi
+    jq -c --arg ws "$ws" --arg me "$me" --argjson people "$people" '
+      select(.workspace == $ws) | . as $d
+      | (($d.route.people // []) | length > 0) as $routed
+      | ($me != "" and (($d.route.people // []) | index($me)) != null) as $held
+      | ($me != "" and ([$people[]? | objects | select(.id == $me)
+          | ((.roles // []) + ((.products // {})[$d.route.product // ""] // []))[]?] | index("owner")) != null) as $owner
+      | $d + {topic: ($d.topic // "owner"), me: (if $me == "" then null else $me end),
+              mine: (($routed | not) or $held), answerable: (($routed | not) or $held or $owner)}' <<< "$1"
+  done
+}
+
+# Who the resolution records, or a refusal. An agent never answers or drops
+# an owner question (core relays the owner's word only on an unrouted one).
+# With me: set the answer is recorded under me, and --by may only repeat it;
+# a routed question is answered by its people, or by an owner as
+# "<id> (owner)". With no me: --by is free text, as before, on an unrouted
+# question only.
+_decide_by() { # <verb> <record> <--by value or ""> -> by
+  local verb="$1" rec="$2" by="$3" ann asker id role me routed where
+  ann="$(_decide_annotate "$rec")"
+  asker="$(jq -r .asker <<< "$ann")"; id="$(jq -r .id <<< "$ann")"
+  routed="$(jq -r '(.route.people // []) | length > 0' <<< "$ann")"
+  role="$(cel_agent_role)"
+  case "$role" in
+    "") ;;
+    core|console)
+      [ "$routed" = false ] || die "cel decide $verb: an agent does not answer an owner question - $asker waits for a person (core relays the owner's word only on an unrouted one)" ;;
+    *) die "cel decide $verb: an agent does not answer an owner question - $asker waits for a person" ;;
+  esac
+  me="$(jq -r '.me // ""' <<< "$ann")"
+  if [ -n "$me" ]; then
+    [ -z "$by" ] || [ "$by" = "$me" ] \
+      || die "cel decide $verb: --by $by is not this login's person (me: $me) - an answer is recorded under who gave it"
+    by="$me"
+  fi
+  [ -n "$by" ] || by="$(_inbox_me)"
+  if [ "$routed" = true ]; then
+    where="$(jq -r '.route | "\(.role)\(if (.product // "") != "" then " for " + .product else "" end) (\(.people | join(", ")))"' <<< "$ann")"
+    [ -n "$me" ] || die "cel decide $verb: $id is routed to $where; this login names no person (no me: in its workspace.local.yaml) - only they or an owner answer it"
+    jq -e '.answerable' <<< "$ann" >/dev/null \
+      || die "cel decide $verb: $id is routed to $where; this login is $me - only they or an owner answer it"
+    jq -e --arg m "$me" '.route.people | index($m) != null' <<< "$ann" >/dev/null || by="$me (owner)"
+  fi
+  printf '%s' "$by"
+}
 
 # The open owner decisions in one workspace, one JSON object per line, oldest
 # first. A re-ask is an `update` naming the record; its fields win, so the
@@ -92,7 +195,7 @@ cel decide - the owner's one queue of decisions, across every workspace
 
   cel decide ask --title <one line> [--option <label>::<tradeoff>]... [--recommend <n>]
                  --context <what/why, options, recommendation, if unanswered> [--blocks <what waits on it>] [--urgent] [--workspace w]
-                 [--supersedes <id>] [--pr <repo>#<num>]...
+                 [--supersedes <id>] [--pr <repo>#<num>]... [--topic product|qa|design|release|merge|owner]
       file a question for the owner; prints its id. The asker is who you are
       (cel inbox whoami), never a flag. Re-asking the same title updates the
       open record instead of adding a second one. --urgent is for live risk,
@@ -103,14 +206,24 @@ cel decide - the owner's one queue of decisions, across every workspace
       the owner now, what each option does in practice, what you recommend
       and why, and what happens if nobody answers. --pr links a PR the
       question blocks (repeatable): while it is open the steward does not
-      nudge that PR as a worker finding.
-  cel decide list [--json] [--workspace w] [--asker <alias>]
+      nudge that PR as a worker finding. --topic (default owner) routes it,
+      when the workspace declares people:, to whoever holds that role for
+      your product (product-lead, qa, design, release, approver, owner), else
+      to its owners; only they, or an owner, may answer it.
+  cel decide list [--json] [--workspace w] [--asker <alias>] [--mine | --for <id>] [--topic <t>]
       every open owner decision in every workspace, oldest first; --workspace
       and --asker narrow it (an agent's own questions: --asker <product>-orch).
+      --mine (this login's person, me: in workspace.local.yaml) and --for <id>
+      keep the ones routed to that person, plus the unrouted ones; --topic
+      keeps one topic (an unrouted question is topic owner).
   cel decide answer <id> <option-number|"free text"|--text <text>|--option <n>> [--by who]
       digits pick that option when it exists, else they are the answer; resolve it and mail `ANSWER to "<title>": ...` to the asker's inbox.
+      A person answers, never an agent. With me: set the answer is recorded
+      as me (--by may only repeat it); a routed question is answered by its
+      people, or by an owner, recorded as "<id> (owner)".
   cel decide drop <id> --why <text> [--by who]
-      resolve a question that no longer matters; the asker is told why.
+      resolve a question that no longer matters; the asker is told why. Who
+      may drop it is who may answer it.
   cel decide withdraw <id> --why <text>
       the ASKER closes its own question (settled in chat, moot after a merge).
       Who you are is derived (cel inbox whoami); nobody else may withdraw it.
@@ -124,7 +237,7 @@ EOS
 }
 
 _decide_ask() {
-  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade urgent=false supersedes="" prs="[]"
+  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade urgent=false supersedes="" prs="[]" topic=owner
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) title="$2"; shift 2 ;;
@@ -139,6 +252,7 @@ _decide_ask() {
       --urgent) urgent=true; shift ;;
       --workspace) ws="$2"; shift 2 ;;
       --supersedes) supersedes="$2"; shift 2 ;;
+      --topic) topic="${2:-}"; shift 2 ;;
       --pr)
         [[ "${2:-}" =~ ^[^#[:space:]]+#[0-9]+$ ]] || die "cel decide ask: --pr takes <repo>#<num>, got '${2:-}'"
         prs="$(jq -c --arg r "$2" '. + [{ref: $r}]' <<< "$prs")"; shift 2 ;;
@@ -146,6 +260,7 @@ _decide_ask() {
     esac
   done
   [ -n "$title" ] || die "cel decide ask: --title is required"
+  _decide_topic_role "$topic" >/dev/null || die "cel decide ask: --topic must be one of $_DECIDE_TOPICS (got '$topic')"
   # THE OWNER DECIDES FROM THE CARD, so a question without real prose is
   # refused: a URL may ride along, but it does not count toward the minimum.
   local prose
@@ -183,10 +298,12 @@ _decide_ask() {
       prs="$out"
     fi
   fi
-  local fields
+  # the route is fixed now, at ask time: a later change to people: does not
+  # move a question already asked
+  local fields route; route="$(_decide_route "$wsname" "$asker" "$topic")"
   fields="$(jq -nc --arg title "$title" --argjson options "$opts" --arg rec "$recommend" \
     --arg context "$context" --arg blocks "$blocks" --arg asker "$asker" --argjson urgent "$urgent" \
-    --arg sup "$supersedes" --argjson prs "$prs" \
+    --arg sup "$supersedes" --argjson prs "$prs" --arg topic "$topic" --arg route "$route" \
     '{title: $title, options: $options, recommended: (if $rec == "" then null else ($rec | tonumber) end),
       context: $context, blocks: $blocks, asker: $asker, message: $title}
      # urgent only when asked: a re-ask that omits it must not clear it
@@ -194,7 +311,8 @@ _decide_ask() {
      + (if $sup != "" then {supersedes: $sup} else {} end)
      # always present, even empty: a re-ask is the current word from the asker on
      # which PRs wait, so one that drops --pr must unlink them
-     + {prs: $prs}')"
+     + {prs: $prs}
+     + {topic: $topic} + (if $route != "" then {route: ($route | fromjson)} else {} end)')"
   _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields" "$supersedes"
 }
 
@@ -250,20 +368,42 @@ _decide_age() { # <secs>
 }
 
 _decide_list() {
-  local json=0 ws="" asker=""
+  local json=0 ws="" asker="" mine=0 for="" topic=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
       --workspace) ws="${2:-}"; shift 2 ;;
       --asker) asker="${2:-}"; shift 2 ;;
+      --mine) mine=1; shift ;;
+      --for) for="${2:-}"; [ -n "$for" ] || die "cel decide list: --for takes a person id"; shift 2 ;;
+      --topic) topic="${2:-}"; shift 2 ;;
       *) die "cel decide list: unknown argument '$1'" ;;
     esac
   done
+  [ -z "$topic" ] || _decide_topic_role "$topic" >/dev/null \
+    || die "cel decide list: --topic must be one of $_DECIDE_TOPICS (got '$topic')"
+  [ "$mine" -eq 0 ] || [ -z "$for" ] || die "cel decide list: --mine and --for are one filter - pick one"
+  if [ "$mine" -eq 1 ]; then
+    local w d named=0
+    for w in ${ws:-$(_decide_all_ws)}; do
+      d="$(registry_path "$w" 2>/dev/null || true)"
+      [ -z "$d" ] || [ -z "$(ws_me "$d")" ] || { named=1; break; }
+    done
+    [ "$named" -eq 1 ] || die "cel decide list --mine: this login names no person (no me: in its workspace.local.yaml) - use --for <id>"
+  fi
   local all; all="$(decide_all_json)"
   # Narrowed to one workspace and/or one asker: an agent's own questions.
   if [ -n "$all" ] && { [ -n "$ws" ] || [ -n "$asker" ]; }; then
     all="$(jq -c --arg w "$ws" --arg a "$asker" \
       'select(($w == "" or .workspace == $w) and ($a == "" or .asker == $a))' <<< "$all")"
+  fi
+  [ -z "$all" ] || all="$(_decide_annotate "$all")"
+  # Narrowed to a person (routed to them, or to nobody) and/or a topic.
+  if [ -n "$all" ] && { [ "$mine" -eq 1 ] || [ -n "$for" ] || [ -n "$topic" ]; }; then
+    all="$(jq -c --argjson mine "$mine" --arg f "$for" --arg t "$topic" '
+      select(($mine == 0 or .mine)
+        and ($f == "" or ((.route.people // []) | length == 0) or ((.route.people // []) | index($f)) != null)
+        and ($t == "" or .topic == $t))' <<< "$all")"
   fi
   if [ "$json" -eq 1 ]; then [ -n "$all" ] && printf '%s\n' "$all"; return 0; fi
   local where=" in any workspace"; [ -z "$ws" ] || where=" in $ws"
@@ -273,6 +413,8 @@ _decide_list() {
     age="$(_decide_age "$(jq -r '.age_secs' <<< "$line")")"
     jq -r --arg age "$age" '
       "[\(.id)] \(.workspace) \(.asker) \($age): \(if .urgent then "URGENT " else "" end)\(.title)",
+      (if ((.route.people // []) | length) > 0 then
+        "    routed to \(.route.role)\(if (.route.product // "") != "" then " for " + .route.product else "" end) (\(.route.people | join(", ")))" else empty end),
       ((.recommended // 0) as $r | .options | to_entries[]
         | "    \(.key + 1). \(.value.label)\(if .value.tradeoff != "" then " - " + .value.tradeoff else "" end)\(if .key + 1 == $r then "  (recommended)" else "" end)"),
       (if (.blocks // "") != "" then "    blocks: \(.blocks)" else empty end),
@@ -322,9 +464,10 @@ _decide_answer() {
       *) die "cel decide answer: unknown argument '$1'" ;;
     esac
   done
-  [ -n "$by" ] || by="$(_inbox_me)"
   local rec; rec="$(_decide_find "$id")"
   [ -n "$rec" ] || die "cel decide answer: no open owner decision with id $id"
+  # a refusal is die's line, captured here: printed as die prints it
+  by="$(_decide_by answer "$rec" "$by")" || { printf '%s\n' "$by"; exit 1; }
   # All digits is an option number only when that option exists; otherwise
   # it is the answer itself ("2026"). --text says so outright.
   local text="$ans" picked=""
@@ -354,9 +497,9 @@ _decide_drop() {
     esac
   done
   [ -n "$why" ] || die "cel decide drop: --why is required"
-  [ -n "$by" ] || by="$(_inbox_me)"
   local rec; rec="$(_decide_find "$id")"
   [ -n "$rec" ] || die "cel decide drop: no open owner decision with id $id"
+  by="$(_decide_by drop "$rec" "$by")" || { printf '%s\n' "$by"; exit 1; }
   local title; title="$(jq -r .title <<< "$rec")"
   _decide_close "$rec" "$by" dropped "$why" "DROPPED \"$title\": $why (decision $id, by $by)"
 }

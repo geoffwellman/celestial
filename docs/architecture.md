@@ -68,6 +68,23 @@ raising anything. `me` is self-asserted and drives only who starts what;
 workspace's `github.user` token, or the login's own Forgejo token) differs
 from the person's `login`. `cel people` prints the same data.
 
+Owner questions are routed by role (`lib/decide.sh`). `cel decide ask
+--topic` maps a topic to a people role (`_decide_topic_role`), and
+`_decide_route` fixes the route at ask time: the asker's product
+(`CEL_PRODUCT`, else the longest declared product prefixing its mailbox), its
+`ws_role_holders`, else the `owner`s; no `people:` or nobody holding either
+gives no route. The record gains `topic` and `route`; `to` stays `owner`.
+`_decide_annotate` is the one rule for what this login is to a decision
+(`me`, `mine`, `answerable`): `cel decide list --json` emits it, the dashboard
+reads it, and `_decide_by` enforces it for `answer|drop` - an agent is refused
+(`cel_agent_role`, `lib/identity.sh`: `CEL_ROLE`, or the nearest launch above
+carrying it; core passes on an unrouted question only), `--by` must equal
+`me`, and an owner override is recorded as `<id> (owner)`. The guard denies
+`cel decide answer|drop` to solo, orchestrator, root, lead and member.
+`_inbox_notify` skips a routed decision whose route lacks this login's `me`.
+The dashboard (`decideOne`, `tools/dash/server.mjs`) passes `--by <me>` (or
+`dashboard` with no `me`, unrouted only).
+
 Launch environment is scoped to the launched process: `_run_launch_env` is the
 single construction (used by every `cel run` launch) and renders role
 marks, gateway credentials, the per-agent `CEL_SESSION_ID` and the agent root as

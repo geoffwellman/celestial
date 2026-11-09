@@ -602,6 +602,35 @@ test_watch_notifications_can_be_switched_off() {
   rm -rf "$NB" "$CEL_INBOX_DIR"
 }
 
+# A ROUTED DECISION WAKES ITS OWN PEOPLE ONLY (spec B.4). A login whose me:
+# is on the route is notified; one whose me: is not stays quiet; an unrouted
+# decision, or a login that names no person, is notified as before.
+test_watch_notifies_a_routed_decision_only_to_its_people() {
+  _inbox_notify_fixture
+  local W; W="$(mktemp -d)"
+  export CEL_REGISTRY="$W/registry.yaml"
+  printf 'workspaces:\n  demo: {path: "%s/demo"}\n' "$W" > "$CEL_REGISTRY"
+  mkdir -p "$W/demo"; printf 'name: demo\n' > "$W/demo/workspace.yaml"
+  _watch_one() { # <decision-json>: the watch's own jq and line loop, without tail
+    printf '%s\n' "$1" | jq -nRr --unbuffered --arg who root --arg dir "$CEL_INBOX_DIR/" "$_INBOX_WATCH_JQ" \
+      | _inbox_watch_lines root demo "" >/dev/null
+  }
+  local routed='{"id":"1","to":"root","from":"atlas-orch","kind":"decision","message":"qa q","route":{"role":"qa","product":"atlas","people":["jo","kim"]}}'
+  local open='{"id":"2","to":"root","from":"atlas-orch","kind":"decision","message":"anyone"}'
+  printf 'me: ann\n' > "$W/demo/workspace.local.yaml"
+  _watch_one "$routed"
+  assert_eq "$(cat "$NB_LOG")" "" || { rm -rf "$NB" "$CEL_INBOX_DIR" "$W"; return 1; }
+  _watch_one "$open"
+  assert_contains "$(cat "$NB_LOG")" "notification show" || { rm -rf "$NB" "$CEL_INBOX_DIR" "$W"; return 1; }
+  : > "$NB_LOG"; printf 'me: kim\n' > "$W/demo/workspace.local.yaml"
+  _watch_one "$routed"
+  assert_contains "$(cat "$NB_LOG")" "notification show" || { rm -rf "$NB" "$CEL_INBOX_DIR" "$W"; return 1; }
+  : > "$NB_LOG"; rm -f "$W/demo/workspace.local.yaml"
+  _watch_one "$routed"
+  assert_contains "$(cat "$NB_LOG")" "notification show" || { rm -rf "$NB" "$CEL_INBOX_DIR" "$W"; return 1; }
+  rm -rf "$NB" "$CEL_INBOX_DIR" "$W"
+}
+
 # The console has no cwd to derive a workspace from, so every cel-linear
 # subcommand takes --workspace and resolves the key from THAT workspace's
 # env.local rather than from whatever the pane's shell happened to inherit.

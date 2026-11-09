@@ -87,7 +87,8 @@ function buildLast(){
     else if(NYSORT==='oldest')items.sort(function(a,b){return (b.age_secs||0)-(a.age_secs||0)});
     return {workspace:g.workspace,urgent:g.urgent,count:items.length,recommended:g.recommended,items:items}}).filter(function(g){return !ROOM||g.items.length});
   var all=[];groups.forEach(function(g){all=all.concat(g.items)});
-  LAST={needsYou:all,needsYouGroups:groups};
+  // me: this login's person (null: none), for the decisions panel's Mine chip
+  LAST={needsYou:all,needsYouGroups:groups,me:(S&&S.me)||null};
 }
 function refreshTabs(){var n=LAST?LAST.needsYou.length:0;$('nyc').textContent=n;var c=$('alerts-h');if(c)c.textContent=n}
 var NYHOST=null;       // the one #needsyou, moved between its card and the overlay

@@ -16,7 +16,9 @@ _dd_boot() {
   chmod +x "$T/bin/herdr" "$T/bin/gh"
   mkdir -p "$T/bundle"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  bundle: {path: "%s/bundle"}\n' "$T" "$T" > "$T/registry.yaml"
-  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  # a test may declare people (DD_PEOPLE) and say which one this login is (DD_ME)
+  printf 'name: alpha\n%s' "${DD_PEOPLE:-}" > "$T/alpha/workspace.yaml"
+  [ -z "${DD_ME:-}" ] || printf 'me: %s\n' "$DD_ME" > "$T/alpha/workspace.local.yaml"
   printf 'name: bundle\n' > "$T/bundle/workspace.yaml"
   export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
   ID="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha --context "$DD_CTX" \
@@ -226,4 +228,101 @@ test_cel115_card_links_the_prs_a_decision_blocks() {
   ' "$CEL_ROOT/tools/dash/decisions.js")"
   assert_contains "$out" '<a class="pr" href="https://github.com/someone/widget/pull/7" target="_blank" rel="noopener">widget#7</a>'
   assert_contains "$out" '<span class="pr">gadget#3</span>'
+}
+
+# --- routed questions (spec B.4) ---------------------------------------------
+DD_ROUTED_PEOPLE='repos:
+  - {name: atlas-web}
+products:
+  - {name: atlas, repos: [atlas-web]}
+people:
+  - {id: sam, roles: [owner]}
+  - {id: jo, products: {atlas: [qa]}}
+  - {id: ann, products: {atlas: [design]}}
+'
+_dd_routed() { # <topic> <title> -> id, asked by atlas's agent
+  CEL_INBOX_ME=atlas-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha --context "$DD_CTX" \
+    --title "$2" --topic "$1" --option "yes::go" 2>/dev/null
+}
+_dd_by() { # <ws> <id> -> who the resolution records
+  jq -r --arg id "$2" 'select(.kind == "resolution" and .ref == $id) | .by' "$T/inbox/$1.jsonl"
+}
+
+# THE BOX TODAY: no people:, no me: - the dashboard still answers every
+# decision, recorded as the dashboard, exactly as before.
+test_dash_without_people_answers_as_the_dashboard_unchanged() {
+  _dd_boot
+  local st; st="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")"
+  assert_eq "$(printf '%s' "$st" | jq -c '[.me, .needsYou[0].mine, .needsYou[0].answerable]')" '[null,true,true]' || { _dd_down; return 1; }
+  assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"option\":1}" -H "x-cel-csrf: $TOKEN")" "200" || { _dd_down; return 1; }
+  assert_eq "$(_dd_by alpha "$ID")" "dashboard" || { _dd_down; return 1; }
+  _dd_down
+}
+
+# With me: the dashboard answers as that person; a question routed to someone
+# else is refused (409) and stays open; the state says who this login is and,
+# per card, whether it is this person's and whether this login may answer it.
+test_dash_answers_as_me_and_only_what_me_may_answer() {
+  DD_PEOPLE="$DD_ROUTED_PEOPLE" DD_ME=jo _dd_boot
+  local mine theirs st
+  mine="$(_dd_routed qa "qa for jo")"; theirs="$(_dd_routed design "design for ann")"
+  st="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")"
+  assert_eq "$(printf '%s' "$st" | jq -r .me)" "jo" || { _dd_down; return 1; }
+  assert_eq "$(printf '%s' "$st" | jq -r --arg i "$mine" '.needsYou[] | select(.id == $i) | "\(.topic) \(.route.people | join(",")) \(.mine) \(.answerable)"')" "qa jo true true" || { _dd_down; return 1; }
+  assert_eq "$(printf '%s' "$st" | jq -r --arg i "$theirs" '.needsYou[] | select(.id == $i) | "\(.mine) \(.answerable)"')" "false false" || { _dd_down; return 1; }
+  assert_eq "$(_dd_post "{\"id\":\"$theirs\",\"action\":\"answer\",\"option\":1}" -H "x-cel-csrf: $TOKEN")" "409" || { _dd_down; return 1; }
+  # pick a style was asked by alpha-orch (no product, topic owner): routed to sam
+  assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"drop\",\"value\":\"moot\"}" -H "x-cel-csrf: $TOKEN")" "409" || { _dd_down; return 1; }
+  assert_eq "$(_dd_post "{\"id\":\"$mine\",\"action\":\"answer\",\"option\":1}" -H "x-cel-csrf: $TOKEN")" "200" || { _dd_down; return 1; }
+  assert_eq "$(_dd_by alpha "$mine")" "jo" || { _dd_down; return 1; }
+  assert_eq "$("$CEL_ROOT/bin/cel" decide list --json 2>/dev/null | jq -r .title | sort | tr '\n' ,)" "design for ann,pick a style," || { _dd_down; return 1; }
+  _dd_down
+}
+
+# No me: on a workspace with people: the dashboard answers only unrouted
+# decisions; a routed one is refused with the reason.
+test_dash_with_no_me_answers_only_unrouted() {
+  DD_PEOPLE="$DD_ROUTED_PEOPLE" _dd_boot
+  local r out; r="$(_dd_routed qa "qa q")"
+  out="$(curl -s -m 20 -X POST -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" \
+    -d "{\"id\":\"$r\",\"action\":\"answer\",\"option\":1}" "http://127.0.0.1:$DASH_PORT/api/decide")"
+  assert_contains "$out" "names no person" || { _dd_down; return 1; }
+  assert_eq "$("$CEL_ROOT/bin/cel" decide list --json 2>/dev/null | jq -r --arg i "$r" 'select(.id == $i) | .title')" "qa q" || { _dd_down; return 1; }
+  # bundle declares no people: its question is unrouted and still answered
+  local u; u="$(_dd_ask bundle --title "bundle q" --option "a::x")"
+  assert_eq "$(_dd_post "{\"id\":\"$u\",\"action\":\"answer\",\"option\":1}" -H "x-cel-csrf: $TOKEN")" "200" || { _dd_down; return 1; }
+  assert_eq "$(_dd_by bundle "$u")" "dashboard" || { _dd_down; return 1; }
+  _dd_down
+}
+
+# decisions.js: the Mine chip (on by default when this login is a person),
+# topic grouping, and a card this login may not answer says why and sends
+# nothing.
+_dd_vm() { # <js printing a value> - decisions.js in a bare context
+  node -e '
+    const fs=require("fs"),vm=require("vm");
+    const store={};const ls={getItem:k=>k in store?store[k]:null,setItem(k,v){store[k]=String(v)}};
+    const esc=s=>String(s==null?"":s).replace(/[&<>"\x27]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\x27":"&#39;"}[c]));
+    const ctx={localStorage:ls,esc,LAST:null};vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),ctx);
+    console.log(vm.runInContext(process.argv[2],ctx));
+  ' "$CEL_ROOT/tools/dash/decisions.js" "$1"
+}
+test_dash_decisions_mine_chip_and_topic_grouping() {
+  local items='[{id:"1",mine:true,topic:"qa"},{id:"2",mine:false,topic:"design"},{id:"3",mine:true}]'
+  # no me: no chip, nothing filtered
+  assert_eq "$(_dd_vm "LAST={me:null};JSON.stringify([nyMineOn(),nyMineItems($items).length])")" '[false,3]' || return 1
+  # me set: on by default, only mine shown; the owner's pick is remembered
+  assert_eq "$(_dd_vm "LAST={me:\"jo\"};JSON.stringify([nyMineOn(),nyMineItems($items).map(d=>d.id)])")" '[true,["1","3"]]' || return 1
+  assert_eq "$(_dd_vm "LAST={me:\"jo\"};localStorage.setItem(\"cel-ny-mine\",\"0\");NYMINE=nyMinePref();JSON.stringify([nyMineOn(),nyMineItems($items).length])")" '[false,3]' || return 1
+  # topic is a grouping beside the others; an unrouted question is topic owner
+  assert_eq "$(_dd_vm "JSON.stringify([NYBYS.topic.label,NYBYS.topic.of({topic:\"qa\"}),NYBYS.topic.of({})])")" '["topic","qa","owner"]' || return 1
+  local card; card="$(_dd_vm 'nyCard({id:"1",title:"t",asker:"atlas-orch",options:[{label:"a",tradeoff:""}],topic:"qa",
+    route:{role:"qa",product:"atlas",people:["jo"]},me:"ann",mine:false,answerable:false},true)')"
+  assert_contains "$card" "routed to qa for atlas (jo)" || return 1
+  assert_contains "$card" "this login (ann) cannot answer it" || return 1
+  assert_contains "$card" 'class="nycard readonly' || return 1
+  card="$(_dd_vm 'nyCard({id:"1",title:"t",asker:"atlas-orch",options:[],topic:"qa",route:{role:"qa",product:"atlas",people:["jo"]},me:"jo",mine:true,answerable:true},true)')"
+  assert_contains "$card" "routed to qa for atlas (jo)" || return 1
+  case "$card" in *readonly*|*"cannot answer"*) echo "an answerable card was read-only"; return 1;; esac
 }

@@ -258,13 +258,20 @@ _steward_mail_sweep() { # <agents-json>
   # shellcheck source=lib/decide.sh
   . "${BASH_SOURCE[0]%/*}/decide.sh"
   for ws in $(registry_names); do
-    local open3 n3 age3
+    local open3 n3 age3 who3
     open3="$(decide_open_json "$ws")"
     [ -n "$open3" ] || continue
     n3="$(printf '%s\n' "$open3" | grep -c . || true)"
     age3="$(printf '%s\n' "$open3" | jq -r '.age_secs' | sort -n | tail -1)"
+    # Routed questions (people:) are counted per person they wait on; with
+    # none routed the line reads as it always has.
+    who3="$(printf '%s\n' "$open3" | jq -rs '
+      [.[] | (.route.people // [])[]] as $p
+      | if ($p | length) == 0 then "" else
+          " - waiting on " + ($p | group_by(.) | map(.[0] + " " + (length | tostring)) | join(", "))
+          + "; " + ([.[] | select(((.route.people // []) | length) == 0)] | length | tostring) + " unrouted" end')"
     _STEWARD_WINDOW=86400 _steward_due "decide-summary-$ws" || continue
-    cmd_inbox send root "steward: $n3 open owner decision(s) in $ws, oldest $(( ${age3:-0} / 3600 ))h - 'cel decide list'" \
+    cmd_inbox send root "steward: $n3 open owner decision(s) in $ws, oldest $(( ${age3:-0} / 3600 ))h$who3 - 'cel decide list'" \
       --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
     c_warn "$ws: $n3 open owner decision(s) - see cel decide list"
   done

@@ -922,17 +922,17 @@ _INBOX_WATCH_JQ='
       else .m = (($l | fromjson?) // null) end;
       select(.m | type == "object") | .ws as $ws | .m
       | select(.kind != "resolution") | select(.to == $who or .to == "all")
-      | [("w:" + $ws), .kind, .from, ((.message // "") | tostring | gsub("\n"; " "))] | @tsv)'
-_inbox_watch_lines() { # <who> <single-ws|""> <only-ws|""> < ws\tkind\tfrom\tmsg
-  local who="$1" single="$2" only="$3" ws kind from msg prefix
-  while IFS=$'\t' read -r ws kind from msg; do
-      prefix=""; ws="${ws#w:}"  # never an empty first field: tab is IFS whitespace
+      | [("w:" + $ws), .kind, .from, ("r:" + ((.route.people // []) | join(","))), ((.message // "") | tostring | gsub("\n"; " "))] | @tsv)'
+_inbox_watch_lines() { # <who> <single-ws|""> <only-ws|""> < ws\tkind\tfrom\troute\tmsg
+  local who="$1" single="$2" only="$3" ws kind from route msg prefix
+  while IFS=$'\t' read -r ws kind from route msg; do
+      prefix=""; ws="${ws#w:}"; route="${route#r:}"  # never an empty field: tab is IFS whitespace
       if [ -n "$single" ]; then ws="$single"
       else [ -n "$ws" ] || ws="$only"; prefix="[$ws] "; fi
       printf '%sINBOX %s from %s: %s  (cel inbox read --for %s)\n' "$prefix" "$kind" "$from" "$msg" "$who"
       # The kinds that cannot wait for someone to read this pane also raise a
       # desktop notification.
-      case "$kind" in escalation|decision|blocked) _inbox_notify "$kind" "$from" "$ws" "$msg" ;; esac
+      case "$kind" in escalation|decision|blocked) _inbox_notify "$kind" "$from" "$ws" "$msg" "$route" ;; esac
     done
 }
 
@@ -941,10 +941,18 @@ _inbox_watch_lines() { # <who> <single-ws|""> <only-ws|""> < ws\tkind\tfrom\tmsg
 # desktop notification. Best-effort in every direction: no herdr, no
 # HERDR_ENV, or a failing call must never kill the watch that is the only
 # delivery path.
-_inbox_notify() { # <kind> <from> <ws> <message>
+_inbox_notify() { # <kind> <from> <ws> <message> [route people, comma-separated]
   [ "${CEL_INBOX_NOTIFY:-1}" = 0 ] && return 0
   [ "${HERDR_ENV:-}" = "1" ] || return 0
   have herdr || return 0
+  # A ROUTED DECISION WAKES ITS OWN PEOPLE (lib/decide.sh): a login whose me:
+  # is not on the route is not woken. Unrouted, or a login that names no
+  # person: as before.
+  if [ -n "${5:-}" ]; then
+    local d me; d="$(registry_path "$3" 2>/dev/null || true)"
+    me="$([ -z "$d" ] || ws_me "$d")"
+    [ -z "$me" ] || [[ ",$5," == *",$me,"* ]] || return 0
+  fi
   herdr notification show "$1 from $2 ($3)" --body "$(printf '%.120s' "$4")" >/dev/null 2>&1 || true
 }
 

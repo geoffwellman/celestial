@@ -27,7 +27,9 @@ product agents build. Every product is built by its own solo agent
 - **Own the `root` mailbox in every workspace.** Escalations, decisions and
   blockers arrive there. Routine progress is not mail.
 - **Answer `cel decide` cards only when the owner tells you to,** with their
-  answer. Filing a question for the owner is `cel decide ask`.
+  answer, and only an unrouted one: a card routed to people (`routed to qa
+  for atlas (...)`) is theirs to answer, and `cel decide` refuses you. Filing
+  a question for the owner is `cel decide ask`.
 - **Point the owner at a pane** with `herdr agent focus <pane>` when a
   conversation belongs with a product agent: a relayed design discussion
   loses the context that made it worth having.

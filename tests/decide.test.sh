@@ -321,3 +321,171 @@ test_reask_without_pr_unlinks_and_ssh_urls_resolve() {
   assert_eq "$(cmd_decide list --json 2>/dev/null | jq -c '.prs')" "[]"
   rm -rf "$T"
 }
+
+# --- routing a question to the people who hold its role (B.4, C4) -----------
+# alpha declares people; bundle declares none (every workspace on the box today).
+#   sam: owner everywhere; jo: qa for atlas; ann: design for atlas.
+_decide_people_fixture() {
+  _decide_fixture
+  cat > "$T/alpha/workspace.yaml" <<'YML'
+name: alpha
+repos:
+  - {name: atlas-web}
+products:
+  - name: atlas
+    repos: [atlas-web]
+people:
+  - id: sam
+    login: sam-example
+    roles: [owner]
+  - id: jo
+    login: jo-example
+    products: {atlas: [qa]}
+  - id: ann
+    login: ann-example
+    products: {atlas: [design]}
+YML
+}
+_decide_me() { # <id|""> - this login's person in alpha
+  if [ -n "$1" ]; then printf 'me: %s\n' "$1" > "$T/alpha/workspace.local.yaml"
+  else rm -f "$T/alpha/workspace.local.yaml"; fi
+}
+_decide_rec() { # <id> -> the decision record as filed in alpha
+  jq -c --arg id "$1" 'select(.id == $id and .kind == "decision")' "$CEL_INBOX_DIR/alpha.jsonl"
+}
+
+test_route_goes_to_the_role_holders_of_the_askers_product() {
+  _decide_people_fixture
+  local id r; id="$(_ask_as atlas-orch alpha --title "ship the qa build?" --topic qa)"
+  r="$(_decide_rec "$id")"
+  assert_eq "$(jq -r .topic <<< "$r")" "qa" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c .route <<< "$r")" '{"role":"qa","product":"atlas","people":["jo"]}' || { rm -rf "$T"; return 1; }
+  # `to` is unchanged, so every existing reader keeps working
+  assert_eq "$(jq -r .to <<< "$r")" "owner" || { rm -rf "$T"; return 1; }
+  # a lane's mailbox (<p>-<lane>) and a launch's CEL_PRODUCT name the product too
+  id="$(_ask_as atlas-ui alpha --title "which palette?" --topic design)"
+  assert_eq "$(_decide_rec "$id" | jq -c .route.people)" '["ann"]' || { rm -rf "$T"; return 1; }
+  id="$(CEL_PRODUCT=atlas _ask_as root alpha --title "pick qa env" --topic qa)"
+  assert_eq "$(_decide_rec "$id" | jq -r .route.product)" "atlas" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_route_falls_back_to_the_owners_and_defaults_to_topic_owner() {
+  _decide_people_fixture
+  local id; id="$(_ask_as atlas-orch alpha --title "cut a release?" --topic release)"
+  assert_eq "$(_decide_rec "$id" | jq -c .route)" '{"role":"release","product":"atlas","people":["sam"]}' || { rm -rf "$T"; return 1; }
+  id="$(_ask_as atlas-orch alpha --title "no topic given")"
+  assert_eq "$(_decide_rec "$id" | jq -r '.topic + " " + (.route.people | join(","))')" "owner sam" || { rm -rf "$T"; return 1; }
+  # merge maps to approver: nobody holds it, so the owners again
+  id="$(_ask_as atlas-orch alpha --title "merge it?" --topic merge)"
+  assert_eq "$(_decide_rec "$id" | jq -r '.route.role + " " + (.route.people | join(","))')" "approver sam" || { rm -rf "$T"; return 1; }
+  local out; out="$(CEL_INBOX_ME=atlas-orch cmd_decide ask --workspace alpha --context "$DECIDE_CTX" --title bad --topic legal 2>&1)" \
+    && { echo "an unknown topic was accepted"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "--topic must be one of product qa design release merge owner" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# THE BOX TODAY: no people: anywhere, and the owner answers everything from
+# the dashboard. Nothing about that changes: no route, --by is still free
+# text, anyone may answer or drop, and nothing new is refused.
+test_without_people_nothing_is_routed_and_answering_is_unchanged() {
+  _decide_fixture
+  local id r; id="$(_ask_as bundle-orch bundle --title "unrouted" --topic qa --option "a::x")"
+  r="$(jq -c --arg id "$id" 'select(.id == $id)' "$CEL_INBOX_DIR/bundle.jsonl")"
+  assert_eq "$(jq -r 'has("route")' <<< "$r")" "false" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -c '[.me, .mine, .answerable]')" '[null,true,true]' || { rm -rf "$T"; return 1; }
+  CEL_INBOX_ME=console cmd_decide answer "$id" 1 --by dashboard >/dev/null 2>&1 || { echo "the dashboard's answer was refused"; rm -rf "$T"; return 1; }
+  assert_contains "$(jq -c 'select(.kind == "resolution")' "$CEL_INBOX_DIR/bundle.jsonl")" '"by":"dashboard"' || { rm -rf "$T"; return 1; }
+  id="$(_ask_as bundle-orch bundle --title "drop me")"
+  CEL_INBOX_ME=ana cmd_decide drop "$id" --why moot --by dashboard >/dev/null 2>&1 || { echo "drop was refused"; rm -rf "$T"; return 1; }
+  assert_eq "$(cmd_decide list --json 2>/dev/null)" "" || { rm -rf "$T"; return 1; }
+  # the same with people: declared but nobody holding the role, nor an owner
+  printf 'name: bundle\npeople:\n  - {id: kim, roles: [design]}\n' > "$T/bundle/workspace.yaml"
+  id="$(_ask_as bundle-orch bundle --title "still unrouted" --topic qa)"
+  assert_eq "$(jq -c --arg id "$id" 'select(.id == $id) | has("route")' "$CEL_INBOX_DIR/bundle.jsonl")" "false" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_answer_by_must_be_this_logins_person() {
+  _decide_people_fixture
+  local id out; id="$(_ask_as atlas-orch alpha --title "qa q" --topic qa --option "a::x")"
+  _decide_me jo
+  out="$(cmd_decide answer "$id" 1 --by bob 2>&1)" && { echo "a foreign --by was accepted"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel decide answer: --by bob is not this login's person (me: jo) - an answer is recorded under who gave it" || { rm -rf "$T"; return 1; }
+  out="$(cmd_decide drop "$id" --why x --by bob 2>&1)" && { echo "a foreign --by dropped it"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel decide drop: --by bob is not this login's person (me: jo)" || { rm -rf "$T"; return 1; }
+  # a holder answers, as itself, with or without --by
+  cmd_decide answer "$id" 1 --by jo >/dev/null 2>&1 || { echo "the holder was refused"; rm -rf "$T"; return 1; }
+  assert_contains "$(jq -c 'select(.kind == "resolution")' "$CEL_INBOX_DIR/alpha.jsonl")" '"by":"jo"' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_a_non_holder_is_refused_and_an_owner_override_is_recorded() {
+  _decide_people_fixture
+  local id out; id="$(_ask_as atlas-orch alpha --title "qa q" --topic qa --option "a::x")"
+  _decide_me ann
+  out="$(cmd_decide answer "$id" 1 2>&1)" && { echo "a non-holder answered"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel decide answer: $id is routed to qa for atlas (jo); this login is ann - only they or an owner answer it" || { rm -rf "$T"; return 1; }
+  ( cmd_decide drop "$id" --why x >/dev/null 2>&1 ) && { echo "a non-holder dropped it"; rm -rf "$T"; return 1; }
+  # a login that names no person cannot answer a routed question
+  _decide_me ""
+  out="$(cmd_decide answer "$id" 1 --by dashboard 2>&1)" && { echo "a me-less login answered a routed question"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "this login names no person" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r .title)" "qa q" || { rm -rf "$T"; return 1; }
+  # an owner may answer anyone's question; the record says it was an override
+  _decide_me sam
+  cmd_decide answer "$id" 1 >/dev/null 2>&1 || { echo "the owner was refused"; rm -rf "$T"; return 1; }
+  assert_contains "$(jq -c 'select(.kind == "resolution")' "$CEL_INBOX_DIR/alpha.jsonl")" '"by":"sam (owner)"' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cmd_inbox read --for atlas-orch --workspace alpha --all 2>/dev/null)" 'from sam (owner)' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# An agent never answers or drops an owner question, whatever --by says and
+# whatever its shell exports. Core keeps relaying, only on an unrouted one.
+test_an_agent_is_refused_and_core_relays_only_unrouted() {
+  _decide_people_fixture
+  local id out; id="$(_ask_as atlas-orch alpha --title "qa q" --topic qa --option "a::x")"
+  _decide_me jo
+  out="$(CEL_ROLE=solo cmd_decide answer "$id" 1 2>&1)" && { echo "an agent answered"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cel decide answer: an agent does not answer an owner question - atlas-orch waits for a person" || { rm -rf "$T"; return 1; }
+  ( CEL_ROLE=solo cmd_decide drop "$id" --why x >/dev/null 2>&1 ) && { echo "an agent dropped"; rm -rf "$T"; return 1; }
+  ( CEL_ROLE=core cmd_decide answer "$id" 1 >/dev/null 2>&1 ) && { echo "core answered a routed question"; rm -rf "$T"; return 1; }
+  # the role its LAUNCH carries counts, not what its shell now says
+  local P="$T/proc"; mkdir -p "$P/$PPID" "$P/4242"
+  printf '%s\0' CEL_ROLE=solo CEL_PRODUCT=atlas > "$P/4242/environ"
+  printf '4242 (omp) S 1 1 1' > "$P/4242/stat"
+  printf '%s\0' HOME=/h > "$P/$PPID/environ"
+  printf '%s (bash) S 4242 1 1' "$PPID" > "$P/$PPID/stat"
+  ( CEL_PROC_DIR="$P" cmd_decide answer "$id" 1 >/dev/null 2>&1 ) && { echo "an agent that unset CEL_ROLE answered"; rm -rf "$T"; return 1; }
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r 'select(.workspace == "alpha") | .title')" "qa q" || { rm -rf "$T"; return 1; }
+  # core relays the owner's word on an unrouted question, as today
+  local u; u="$(_ask_as bundle-orch bundle --title "unrouted" --option "a::x")"
+  CEL_ROLE=core cmd_decide answer "$u" 1 >/dev/null 2>&1 || { echo "core could not relay an unrouted answer"; rm -rf "$T"; return 1; }
+  # the asking agent still withdraws its own routed question
+  CEL_ROLE=solo CEL_INBOX_ME=atlas-orch cmd_decide withdraw "$id" --why "settled" >/dev/null 2>&1 || { echo "the asker could not withdraw"; rm -rf "$T"; return 1; }
+  assert_eq "$(cmd_decide list --json 2>/dev/null)" "" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_list_narrows_to_mine_a_person_and_a_topic() {
+  _decide_people_fixture
+  _ask_as atlas-orch alpha --title "for jo" --topic qa >/dev/null
+  _ask_as atlas-orch alpha --title "for ann" --topic design >/dev/null
+  _ask_as bundle-orch bundle --title "for anyone" >/dev/null
+  _decide_me jo
+  # mine: routed to me, or to nobody (anyone may answer those)
+  assert_eq "$(cmd_decide list --json --mine 2>/dev/null | jq -r .title | sort | tr '\n' ,)" "for anyone,for jo," || { rm -rf "$T"; return 1; }
+  assert_eq "$(cmd_decide list --json --for ann 2>/dev/null | jq -r .title | sort | tr '\n' ,)" "for ann,for anyone," || { rm -rf "$T"; return 1; }
+  assert_eq "$(cmd_decide list --json --topic design 2>/dev/null | jq -r .title)" "for ann" || { rm -rf "$T"; return 1; }
+  # an unrouted question with no --topic is topic owner
+  assert_eq "$(cmd_decide list --json --topic owner 2>/dev/null | jq -r .title)" "for anyone" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cmd_decide list --mine 2>/dev/null)" "routed to qa for atlas (jo)" || { rm -rf "$T"; return 1; }
+  # what this login may answer, said per record for the dashboard
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r 'select(.workspace == "alpha") | "\(.title)=\(.me) \(.mine) \(.answerable)"' | sort | tr '\n' ,)" \
+    "for ann=jo false false,for jo=jo true true," || { rm -rf "$T"; return 1; }
+  _decide_me ""
+  local out; out="$(cmd_decide list --mine 2>&1)" && { echo "--mine with no me listed something"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "names no person" || { rm -rf "$T"; return 1; }
+  ( cmd_decide list --topic legal >/dev/null 2>&1 ) && { echo "list took an unknown topic"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}

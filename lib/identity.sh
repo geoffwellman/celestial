@@ -57,3 +57,30 @@ cel_launch_identity() { # <what, e.g. "cel team start"> -> dies unless this iden
   done
   die "$1: this process claims CEL_ROLE=${CEL_ROLE:-} ${CEL_TEAM_MEMBER:+CEL_TEAM_MEMBER=$CEL_TEAM_MEMBER }but no agent launch above it carries one (detached, or never launched) - nothing vouches for it; nothing changed"
 }
+
+# WHICH AGENT ROLE IS THIS, IF ANY: CEL_ROLE as this process says it, else as
+# the nearest launch above it carries it - an agent that unsets CEL_ROLE (or
+# runs `env -u CEL_ROLE cel ...`) is still the agent its launch made it.
+# Prints nothing for a person's own shell, or a service such as the
+# dashboard's unit, with no launch above it. Under this checkout's suite the
+# ancestry is the developer's shell, not the test's, so only a launch fixture
+# (CEL_PROC_DIR) is walked there. Caller: `cel decide answer|drop`, which
+# refuses an agent.
+cel_agent_role() { # -> the role, or nothing
+  [ -z "${CEL_ROLE:-}" ] || { printf '%s' "$CEL_ROLE"; return 0; }
+  local proc=/proc pid="$PPID" n=0 stat item
+  if cel_under_suite; then
+    [ -n "${CEL_PROC_DIR:-}" ] || return 0
+    proc="$CEL_PROC_DIR"
+  fi
+  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
+    { while IFS= read -r -d '' item; do
+        case "$item" in CEL_ROLE=?*) printf '%s' "${item#CEL_ROLE=}"; return 0 ;; esac
+      done < "$proc/$pid/environ"; } 2>/dev/null
+    stat=""
+    { read -r stat < "$proc/$pid/stat" || [ -n "$stat" ]; } 2>/dev/null || break
+    stat="${stat##*) }"; stat="${stat#* }"; pid="${stat%% *}"
+    n=$((n + 1))
+  done
+  return 0
+}

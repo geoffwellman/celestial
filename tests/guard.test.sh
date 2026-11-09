@@ -1230,3 +1230,30 @@ test_a_guard_timeout_fails_closed_in_every_adapter() {
   assert_contains "$(jq -r .reason <<<"$out")" "did not finish" || { rm -rf "$T" "$R"; return 1; }
   rm -rf "$T" "$R"
 }
+
+# AN OWNER QUESTION IS ANSWERED BY A PERSON (spec C4). The builders and
+# coordinators never answer or drop one; they still ask, list and withdraw
+# their own. Core keeps relaying (cel decide itself refuses it on a routed
+# question), and a person's own shell (`other`) is untouched.
+test_agents_do_not_answer_or_drop_owner_questions() {
+  _team_ws
+  local role c
+  for role in solo orchestrator root; do
+    for c in 'cel decide answer 1791100000000000001 1' 'cel decide drop 1791100000000000001 --why moot' \
+             'cel decide answer 1791100000000000001 --text yes --by sam' 'sleep 1; cel decide drop 1 --why x' \
+             $'true\ncel decide answer 1 1'; do
+      case "$(guard_classify "$role" "$c")" in "deny an agent does not answer or drop an owner question"*) ;;
+        *) echo "$role allowed: $c"; rm -rf "$T"; return 1;; esac
+    done
+    for c in 'cel decide ask --title t --context c --topic qa' 'cel decide list --mine' 'cel decide withdraw 1 --why done' 'cel decide confirm 1'; do
+      assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused: $c"; rm -rf "$T"; return 1; }
+    done
+  done
+  case "$(ROLE=product _ro guard_classify member 'cel decide answer 1 1')" in "deny an agent does not answer"*) ;;
+    *) echo "a member answered"; rm -rf "$T"; return 1;; esac
+  case "$(CEL_ROLE=lead guard_classify orchestrator 'cel decide drop 1 --why x')" in "deny an agent does not answer"*) ;;
+    *) echo "a lead dropped"; rm -rf "$T"; return 1;; esac
+  assert_eq "$(guard_classify core 'cel decide answer 1 1')" allow || { rm -rf "$T"; return 1; }
+  assert_eq "$(guard_classify other 'cel decide answer 1 1')" allow || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}

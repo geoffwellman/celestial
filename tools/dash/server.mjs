@@ -443,8 +443,21 @@ const groupDecisions = (list) => {
   })).sort((a, b) => b.urgent - a.urgent || a.workspace.localeCompare(b.workspace));
 };
 
+// This login's person in a workspace (`me:` in its own workspace.local.yaml,
+// as lib/workspace.sh ws_me reads it), or null. Shown as `me`; the per-card
+// `me`, `mine` and `answerable` come from `cel decide list --json` itself.
+const meOf = (w) => cached(`me:${w.name}`, 15000, async () => {
+  const f = join(w.wsdir || '', 'workspace.local.yaml');
+  if (!w.wsdir || !existsSync(f)) return null;
+  const out = await run('yq', ['-r', '.me | if type == "string" then . else "" end', f]);
+  return out === null ? undefined : (out.trim() || null);
+}, null);
+
 // One answer, one `cel decide` call: the single and the bulk endpoint share
 // it so "accept all" cannot take a path the guarded single answer does not.
+// It answers AS this login's person (`--by <me>`) where the decision's
+// workspace names one; with no me it answers as `dashboard`, as always, and
+// only an unrouted decision - a routed one waits for its people.
 const decideOne = async ({ id, action, value, option }) => {
   const v = String(value || '').trim();
   if (!/^\d{10,25}$/.test(String(id || ''))) return { code: 400, error: 'bad decision id' };
@@ -452,10 +465,17 @@ const decideOne = async ({ id, action, value, option }) => {
   const byIndex = action === 'answer' && option !== undefined && option !== null;
   if (byIndex && !(Number.isInteger(option) && option >= 1 && option <= 99)) return { code: 400, error: 'bad option' };
   if (!byIndex && (!v || v.length > 2000)) return { code: 400, error: action === 'drop' ? 'a reason is required' : 'an answer is required' };
+  let d = (await decisions()).find((x) => x.id === String(id));
+  if (!d) { delete cache.decisions; d = (await decisions()).find((x) => x.id === String(id)); }
+  if (!d) return { code: 409, error: 'not recorded: already answered, or no such decision' };
+  const routed = Array.isArray(d.route && d.route.people) && d.route.people.length > 0;
+  if (routed && !d.me) return { code: 409, error: `routed to ${d.route.role} (${d.route.people.join(', ')}); this dashboard's login names no person (me:) - it answers only unrouted decisions` };
+  if (d.answerable === false) return { code: 409, error: `routed to ${d.route.role} (${d.route.people.join(', ')}); ${d.me} is not one of them, nor an owner` };
+  const by = d.me || 'dashboard';
   const args = action === 'drop'
-    ? ['decide', 'drop', String(id), '--why', v, '--by', 'dashboard']
-    : byIndex ? ['decide', 'answer', String(id), '--option', String(option), '--by', 'dashboard']
-      : ['decide', 'answer', String(id), '--text', v, '--by', 'dashboard'];
+    ? ['decide', 'drop', String(id), '--why', v, '--by', by]
+    : byIndex ? ['decide', 'answer', String(id), '--option', String(option), '--by', by]
+      : ['decide', 'answer', String(id), '--text', v, '--by', by];
   const out = await run(join(CEL_ROOT, 'bin/cel'), args, 15000);
   delete cache.decisions;
   if (out === null) return { code: 409, error: 'not recorded: already answered, or no such option' };
@@ -465,7 +485,7 @@ const decideOne = async ({ id, action, value, option }) => {
 const state = async (req, w) => {
   const needsYou = orderDecisions(await decisions());
   const needsYouGroups = groupDecisions(needsYou);
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp] = await Promise.all([worktreeRows(w), prs(w), wsAgents(w), backlog(w), viewer(), inbox(w), linear(w), paneNames(), subscriptions(), services(w), gatewayPanel()]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp, person] = await Promise.all([worktreeRows(w), prs(w), wsAgents(w), backlog(w), viewer(), inbox(w), linear(w), paneNames(), subscriptions(), services(w), gatewayPanel(), meOf(w)]);
   // A partition, not a new query: `cel services --json` tags every row with
   // the workspace that owns it, and `box` is the tag for what belongs to
   // nobody. A workspace's panel lists its own rows only.
@@ -513,7 +533,7 @@ const state = async (req, w) => {
       title: stuck[0].message.slice(0, 90), url: null });
 
   return {
-    workspace: w.name, workspaces: WORKSPACES.map((x) => x.name), updated: new Date().toISOString(), viewer: me,
+    workspace: w.name, workspaces: WORKSPACES.map((x) => x.name), updated: new Date().toISOString(), viewer: me, me: person,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
     agents: ags, services: wsServices, boxServices, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], needsYou, needsYouGroups, linear: lin,
     // One list, two doors: a signed-in subscription and a gateway account are

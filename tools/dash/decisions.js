@@ -27,7 +27,8 @@ var NYGONE={};         // id -> decision closed elsewhere while being worked on
 var NYDONE={};         // id -> 1: closed from this page, never "elsewhere"
 var NYSEEN={};         // id -> the decision as last drawn
 function nyAge(s){s=s||0;return s<3600?Math.round(s/60)+'m':s<86400?Math.round(s/3600)+'h':Math.round(s/86400)+'d'}
-function nyRec(d){var n=d.recommended;return n&&d.options&&d.options[n-1]?{n:n,label:d.options[n-1].label}:null}
+// a question this login may not answer has nothing to accept, singly or in bulk
+function nyRec(d){var n=d.recommended;return d.answerable!==false&&n&&d.options&&d.options[n-1]?{n:n,label:d.options[n-1].label}:null}
 // THE BOARD: decisions sit in columns, grouped the way the owner picks - urgency by
 // default - and the pick is remembered per browser. A room keeps its plain
 // list: it holds one orchestrator's few questions. Each grouping is a column
@@ -42,7 +43,9 @@ var NYBYS={
   workspace:{label:'workspace',of:function(d){return d.workspace||'-'}},
   asker:{label:'asked by',of:function(d){return d.asker||'-'}},
   age:{label:'age',cols:[['today','Today',''],['week','This week',''],['older','Older','may be stale: answer or withdraw']],
-    of:function(d){var s=d.age_secs||0;return s<NYDAY?'today':s<7*NYDAY?'week':'older'}}};
+    of:function(d){var s=d.age_secs||0;return s<NYDAY?'today':s<7*NYDAY?'week':'older'}},
+  // the role a question is routed to (cel decide ask --topic); unrouted is owner
+  topic:{label:'topic',of:function(d){return d.topic||'owner'}}};
 var NYBY=localStorage.getItem('cel-ny-board')||'urgency';
 if(!NYBYS[NYBY])NYBY='urgency';
 function nyColumns(items){
@@ -53,6 +56,17 @@ function nyColumns(items){
     at[k].items.push(d)});
   return cols;
 }
+// MINE: when this login is a person (me: in its workspace.local.yaml), the
+// board shows by default only what is routed to it, plus what is routed to
+// nobody (`mine`, from cel decide list --json). The chip turns it off and the
+// pick is remembered; with no me there is no chip and nothing is hidden.
+function nyMinePref(){var v=localStorage.getItem('cel-ny-mine');return v===null?null:v==='1'}
+var NYMINE=nyMinePref();
+function nyMineOn(){return !!(LAST&&LAST.me)&&(NYMINE===null?true:NYMINE)}
+function nyMineItems(items){return nyMineOn()?items.filter(function(d){return d.mine!==false}):items}
+// "routed to qa for atlas (sam, jo)", or nothing for an unrouted question
+function nyRoute(d){var r=d.route;if(!r||!r.people||!r.people.length)return '';
+  return 'routed to '+r.role+(r.product?' for '+r.product:'')+' ('+r.people.join(', ')+')'}
 function nyCard(d,board){
   var gone=!!NYGONE[d.id];
   // the context is the card's body, not a link away - the owner decides
@@ -61,13 +75,19 @@ function nyCard(d,board){
     var t=u.replace(/[.,;:)]+$/,''),tail=u.slice(t.length);
     return '<a href="'+t+'" target="_blank" rel="noopener">'+t+'</a>'+tail}):'';
   var rec=nyRec(d);
-  return '<article class="nycard'+(d.urgent?' urgent':'')+(gone?' gone':'')+'" data-id="'+esc(d.id)+'" data-ws="'+esc(d.workspace||'')+'">'+
+  // a question this login may not answer (routed to other people, and this
+  // login is not an owner - or names no person) is shown, never sent
+  var ro=d.answerable===false,route=nyRoute(d);
+  return '<article class="nycard'+(d.urgent?' urgent':'')+(gone?' gone':'')+(ro?' readonly':'')+'" data-id="'+esc(d.id)+'" data-ws="'+esc(d.workspace||'')+'">'+
     (gone?'<div class="nygone">closed elsewhere \u2014 nothing here will be sent <button class="dismiss">dismiss</button></div>':'')+
     '<div class="nyhead">'+(d.urgent?'<span class="tag urgent">urgent</span>':'')+
       '<b class="nytitle">'+esc(d.title)+'</b></div>'+
     '<div class="nymeta">'+(board?'<span class="ws">'+esc(d.workspace||'')+'</span> ':'')+esc(d.asker||'')+' \u00b7 '+nyAge(d.age_secs)+
       (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+
-      (d.prs||[]).map(function(p){return ' \u00b7 '+(p.url?'<a class="pr" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.ref)+'</a>':'<span class="pr">'+esc(p.ref)+'</span>')}).join('')+'</div>'+
+      (d.prs||[]).map(function(p){return ' \u00b7 '+(p.url?'<a class="pr" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.ref)+'</a>':'<span class="pr">'+esc(p.ref)+'</span>')}).join('')+
+      (route?' \u00b7 <span class="route">'+esc(route)+'</span>':'')+'</div>'+
+    (ro?'<div class="nyro">'+(d.me?'this login ('+esc(d.me)+') cannot answer it':'this login names no person (me:), so it cannot answer it')+
+      ' \u2014 only they or an owner do</div>':'')+
     // on the board the long context folds behind "details" so a column stays
     // scannable; the options and "other…" stay visible
     (ctx?(board?'<details class="nyctxd"><summary>details</summary><div class="nyctx">'+ctx+'</div></details>':'<div class="nyctx">'+ctx+'</div>'):'')+
@@ -171,7 +191,7 @@ function renderNeedsYou(force){
   Object.keys(snap0).forEach(function(id){
     if(snap0[id].busy&&!live[id]&&!NYDONE[id]&&NYSEEN[id]&&!NYGONE[id])NYGONE[id]=NYSEEN[id]});
   Object.keys(NYGONE).forEach(function(id){if(live[id])delete NYGONE[id]});
-  var groups=(LAST.needsYouGroups||[]).map(function(g){return {workspace:g.workspace,urgent:g.urgent,items:g.items.slice()}});
+  var groups=(LAST.needsYouGroups||[]).map(function(g){return {workspace:g.workspace,urgent:g.urgent,items:nyMineItems(g.items)}});
   Object.keys(NYGONE).forEach(function(id){
     var d=NYGONE[id],g=groups.filter(function(x){return x.workspace===d.workspace})[0];
     if(!g){g={workspace:d.workspace,urgent:0,items:[]};groups.push(g)}
@@ -179,7 +199,7 @@ function renderNeedsYou(force){
   groups=groups.filter(function(g){return g.items.length});
   if(NYF&&!groups.some(function(g){return g.workspace===NYF}))NYF='';
   var board=!host.closest('#room');
-  var sig=JSON.stringify([board,NYBY,NYF,NYBULK,NYC,NYERR,Object.keys(NYGONE),groups.map(function(g){return g.items.map(function(d){return [d.id,d.updated||'',d.urgent]})})]);
+  var sig=JSON.stringify([board,NYBY,NYF,NYBULK,NYC,NYERR,nyMineOn(),Object.keys(NYGONE),groups.map(function(g){return g.items.map(function(d){return [d.id,d.updated||'',d.urgent]})})]);
   // a refresh every few seconds must not close an open "other…" or disarm a
   // button mid-confirm: repaint only when something actually changed, and
   // then put back what the owner had open (nyRestore below)
@@ -189,9 +209,13 @@ function renderNeedsYou(force){
   var total=groups.reduce(function(a,g){return a+g.items.filter(function(d){return !NYGONE[d.id]}).length},0);
   if(!total&&!Object.keys(NYGONE).length){host.innerHTML='';$('alerts-h').style.display='none';return}
   $('alerts-h').style.display='';
+  // the Mine chip sits with what the page always shows: the group-by row on
+  // the board (the v2 grid card hides the workspace chips), the chips in a list
+  var mine=LAST.me?'<button class="chipbtn mine'+(nyMineOn()?' on':'')+'" data-mine="1" title="only what is routed to '+esc(LAST.me)+', or to nobody">mine</button>':'';
   var chips='<div class="nychips"><button class="chipbtn'+(NYF?'':' on')+'" data-ws="">all <b>'+total+'</b></button>'+
     groups.map(function(g){return '<button class="chipbtn'+(NYF===g.workspace?' on':'')+'" data-ws="'+esc(g.workspace)+'">'+
-      esc(g.workspace)+' <b>'+g.items.filter(nyLive).length+'</b>'+(g.urgent?' <i class="u">!</i>':'')+'</button>'}).join('')+'</div>';
+      esc(g.workspace)+' <b>'+g.items.filter(nyLive).length+'</b>'+(g.urgent?' <i class="u">!</i>':'')+'</button>'}).join('')+
+    (board?'':mine)+'</div>';
   var shown=groups.filter(function(g){return !NYF||g.workspace===NYF});
   var head='<h2>decisions <span class="n">'+total+'</span></h2>'+chips;
   if(board){
@@ -200,7 +224,7 @@ function renderNeedsYou(force){
       return nrec?'<button class="bulk" data-ws="'+esc(g.workspace)+'">'+esc(g.workspace)+': accept all recommended ('+nrec+')</button>':''}).join('');
     var open=NYBULK&&shown.filter(function(g){return g.workspace===NYBULK})[0];
     host.innerHTML=head+
-      '<div class="nyby">group by '+Object.keys(NYBYS).map(function(k){
+      '<div class="nyby">'+mine+' group by '+Object.keys(NYBYS).map(function(k){
         return '<button class="chipbtn'+(k===NYBY?' on':'')+'" data-by="'+k+'">'+esc(NYBYS[k].label)+'</button>'}).join('')+
         (bulk?'<span class="nybulks">'+bulk+'</span>':'')+'</div>'+
       (open?nyBulkPanel(open):'')+
@@ -217,7 +241,9 @@ function renderNeedsYou(force){
       (NYBULK===g.workspace?nyBulkPanel(g):'')+
       g.items.map(function(d){return nyCard(d,false)}).join('')+'</details>';
   }).join('');
-  Array.prototype.forEach.call(host.querySelectorAll('.nychips .chipbtn'),function(b){
+  var mb=host.querySelector('.chipbtn[data-mine]');
+  if(mb)mb.onclick=function(){NYMINE=!nyMineOn();localStorage.setItem('cel-ny-mine',NYMINE?'1':'0');renderNeedsYou(true)};
+  Array.prototype.forEach.call(host.querySelectorAll('.nychips .chipbtn[data-ws]'),function(b){
     b.onclick=function(){NYF=b.dataset.ws;localStorage.setItem('cel-ny-filter',NYF);renderNeedsYou(true)}});
   Array.prototype.forEach.call(host.querySelectorAll('details.nygroup'),function(dt){
     // a group drawn open fires a toggle of its own; only the owner's toggles
@@ -245,10 +271,12 @@ function renderNeedsYou(force){
   };
   Array.prototype.forEach.call(host.querySelectorAll('.nycard'),function(card){
     var id=card.dataset.id;
-    if(NYGONE[id]){
-      // closed elsewhere: the text stays readable, nothing here can send
-      Array.prototype.forEach.call(card.querySelectorAll('.nyopts button,.nyact button'),function(b){b.disabled=true});
-      card.querySelector('button.dismiss').onclick=function(){delete NYGONE[id];NYDONE[id]=1;renderNeedsYou(true)};
+    if(NYGONE[id]||card.classList.contains('readonly')){
+      // closed elsewhere, or not this login's to answer: the text stays
+      // readable, nothing here can send
+      Array.prototype.forEach.call(card.querySelectorAll('.nyopts button,.nyact button,.nyact input'),function(b){b.disabled=true});
+      var dm=card.querySelector('button.dismiss');
+      if(dm)dm.onclick=function(){delete NYGONE[id];NYDONE[id]=1;renderNeedsYou(true)};
       return;
     }
     Array.prototype.forEach.call(card.querySelectorAll('button.close'),function(b){
