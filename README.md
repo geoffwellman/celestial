@@ -160,17 +160,21 @@ so there are reviewers at all.
 flowchart LR
   agent["atlas-orch"] -- "branch, gate, push, open PR" --> pr["PR on atlas-web"]
   agent -- "cel run reviewer" --> rev["reviewer for that PR"]
+  agent -- "cel run reviewer<br/>(UI paths: review.extra kind: qa)" --> qa["QA agent for that PR"]
   rev -- "reads the head" --> pr
+  qa -- "runs the head in cel preview,<br/>drives it in a browser" --> pr
   rev -- "cel solo review" --> agent
+  qa -- "cel solo review --qa + evidence" --> agent
   agent -- "cel solo land" --> main[("main")]
 ```
 
 Choose this for almost everything: one agent holds the whole product, uses its
 own worktrees and subagents, and lands each PR once its reviewer approved that
-exact head and the checks are green. Selected by `mode: solo` on the product,
-which is also the default when absent, and `policy: { merge: self }` (with
-`merge: humans-only` the agent opens the PR and stops). Details:
-[Solo mode](#solo-mode).
+exact head and the checks are green - and, for a PR touching the paths
+`review.extra` names, once each QA agent (or focus reviewer) has too. Selected
+by `mode: solo` on the product, which is also the default when absent, and
+`policy: { merge: self }` (with `merge: humans-only` the agent opens the PR
+and stops). Details: [Solo mode](#solo-mode).
 
 ### Solo lanes: several goals on one product
 
@@ -334,6 +338,9 @@ review:                        # one reviewer per PR, through the gateway
   extra:                       # specialist reviewers by the files a PR touches (policy)
     - focus: security          # a pack in core/roles/focus/reviewer/
       paths: ['lib/auth/**', '**/*token*']
+    - kind: qa                 # a QA agent: runs the head in a preview and uses it
+      focus: browser           # a pack in core/roles/focus/qa/
+      paths: ['web/**', '**/*.tsx', '**/*.css']
 
 thinking: medium               # reasoning level when a profile names none
 worker_profiles:               # a name for each CLI + model + effort you use
@@ -341,6 +348,7 @@ worker_profiles:               # a name for each CLI + model + effort you use
   sol:  { runtime: pi, model: gpt-6.1-sol, via: gateway, thinking: low }
 role_profiles:                 # which profile each role launches on
   solo: opus                   # the product agents and their lanes
+  qa: sol                      # QA agents (else the reviewer binding, else review.model)
   member: sol                  # any team member without its own line below
   team-builder: opus           # team-<role>: product, design, builder, qa,
   team-qa: sol                 #   platform, release or analyst
@@ -366,11 +374,16 @@ pass `--force`. A personal workspace leaves `people:` and `home:` out, and
 nothing changes.
 
 `review.extra` is review policy: every PR gets its plain reviewer, and a PR
-that touches a file one of the `paths` globs matches also needs that focus's
-reviewer (a repo's own list adds to the workspace-wide one, so an `atlas-api` PR answers to both). `cel run reviewer` starts them and
+that touches a file one of the `paths` globs matches also needs that entry's
+agent - a focus reviewer (`kind: review`, the default) or a QA agent
+(`kind: qa`), which builds the PR's head in a preview of its own and drives it
+in a browser. A repo's own list adds to the workspace-wide one, so an
+`atlas-api` PR answers to both. `cel run reviewer` starts them and
 `cel solo land` waits for each one's approval of the head; see
 [The review loop](#the-review-loop). It is read from `workspace.yaml` only -
-`workspace.local.yaml` cannot add or drop one.
+`workspace.local.yaml` cannot add or drop one. A QA agent's model is
+`role_profiles.qa`, else `role_profiles.reviewer`, else `review.model`; like
+every reviewer it runs on pi.
 
 How many helpers may run at once is a box setting, not a workspace one. It
 lives in `~/.local/share/cel/config.yaml` and covers every workspace on the
@@ -1075,8 +1088,8 @@ review:
       paths: ['migrations/**']
 ```
 
-An entry has `focus`, `paths` and an optional `kind`; `review`, the default,
-is the only kind. Globs match repo-relative paths, both sides of a rename,
+An entry has `focus`, `paths` and an optional `kind`: `review`, the default,
+or `qa` (a QA agent - [below](#qa-agents-the-change-run-not-read)). Globs match repo-relative paths, both sides of a rename,
 and the whole path: `*` and `?` stay inside one directory level, `**` as a
 whole segment spans any number of directories (`**/*token*` matches
 `token.sh` and `a/b/api_token.ts`; `lib/auth/**` everything under
@@ -1103,6 +1116,83 @@ that head is a finding whoever asked for it. The steward's "approved and
 green, land it" nudge and the dashboard's PR approval use the same rule;
 `cel solo approvals <repo>#<n> [--json]` shows each reviewer the PR needs and
 its word on the current head.
+
+### QA agents: the change run, not read
+
+For UI paths a workspace can require a QA agent beside the code reviewer: it
+does not read the diff, it USES the change at the PR's exact head.
+
+```yaml
+review:
+  extra:
+    - kind: qa
+      focus: browser          # core/roles/focus/qa/: browser, exploratory, mobile-device
+      paths: ['web/**', '**/*.tsx', '**/*.css']
+```
+
+`cel run reviewer --repo r --pr n` then starts it with the plain reviewer when
+the PR touches those paths (same box budget admission); start one by hand with
+`cel run reviewer --repo r --pr n --qa browser`. Its role is
+`core/roles/pr-qa.md` plus the qa focus pack - the same packs a feature
+team's `qa` member uses. It is named `<repo>-pr-<n>-qa-<focus>`
+(`atlas-web-pr-41-qa-browser`; the `qa-` slot never collides with a
+`review-` one), has its own pane, detached checkout, mailbox and registry row,
+and runs as a reviewer (`CEL_ROLE=reviewer`).
+
+It builds and runs the head with `cel preview <repo>#<n> --qa <focus> --head
+<sha>`: the repo's own `preview:` block, a preview of its own (its own server,
+ports from 4600 and checkout under `<workspace>/.cel/previews/`, never
+anyone's plain preview of the PR), refused for any head but the one it was
+started for. It drives that in a real browser (or a device or simulator for
+`mobile-device`), walks what the PR claims and its edges, and records
+
+```sh
+cel solo review atlas-web#41 approved|changes|blocked --head <sha> \
+  --by atlas-web-pr-41-qa-browser --qa browser --evidence login-<head12>.png --note "..."
+```
+
+under `<repo>#<n>/qa-<focus>` in `.cel/solo-reviews.json`. `approved` and
+`changes` stand on a run: that slot's own preview of that head must be on
+record when the verdict is, and at least one evidence file - a regular file,
+not a symlink, not empty, the image its name says, named with the first 12
+characters of the head it shows - is copied (bytes, sha256, size) to
+`.cel/qa-evidence/<repo>-pr-<n>/qa-<focus>/` beside the verdict. `blocked`
+means it could not run the change (no `preview:` block, a build that will not
+start, no browser or simulator) and says why in `--note`: land treats it as
+not approved and names the agent, why it was blocked and how to start it.
+Land, the steward's nudge, `cel solo approvals` and the dashboard read QA
+agents through the same rule as extra reviewers - one rule, no second one; a
+hand-started QA agent the policy does not require is advisory, and its
+`changes` at the head blocks the land.
+
+Retiring it takes its preview with it: `cel gc` closing it (its approval of
+the current head, quiet for the window, or its PR closed, Herdr or Rex) and
+`cel solo land` retiring it stop its `cel preview --qa` server and remove that
+preview's checkout and its own checkout (a checkout a retained Rex retirement
+packet still cites is kept, as for any reviewer). A server that will not stop
+keeps its record, the retirement says so, and the steward's preview sweep
+stops it once no live agent bears its owner's name; the sweep also stops any
+preview of a closed PR. The preview runs with a private, empty `HOME` under its
+own state directory, so the app cannot read `~/.config` tokens. Its model is
+`role_profiles.qa`, else `role_profiles.reviewer`, else `review.model`.
+
+### What a reviewer may run
+
+Every reviewer - plain, `--focus` and `--qa` - judges and changes nothing it
+judges, and the guard knows it by its launch role (`CEL_ROLE=reviewer`)
+wherever it stands. git, cel and gh are allowlists for it: git read verbs
+only (`diff`, `log`, `show`, `status`, `rev-parse`, `ls-files`, `cat-file`,
+`blame`, `grep`, `merge-base`, `describe`, `range-diff`, `for-each-ref`,
+`show-ref`, and `fetch` into remote-tracking refs - no refspec colon, `+` or
+`--force`), whatever global options lead (`-c`, which can run a command, is
+refused); cel `solo review|approvals`, `inbox`, `preview`, `serve
+list|start|stop`, forge reads, `fleet`, `status`, `profiles`, `budget`,
+`people`, `decide|learn list` and `help`; gh reads, `gh pr comment` and `gh pr
+review --comment`. Everything else - pushes, merges by any tool, `cel solo
+land`, `cel afk|release|update|learn add|mode|decide ask|ws|team|run|gc`,
+starting or stopping agents or panes - is refused, and no
+`CEL_GUARD_ALLOW_ONCE=1` override is honoured for a reviewer: nobody stands
+over its pane to approve one.
 
 ## Agents talk without hijacking your keyboard
 
@@ -1584,6 +1674,10 @@ preview is a `cel serve` server (8h TTL, `--ttl` to change): `cel preview
 --list` shows them, `--stop` ends one, the same head is reused rather than
 started twice, a new head replaces the old preview, and the steward stops a
 preview - and removes its checkout - once its PR closes or merges.
+`--head <sha>` refuses to run any head but that one, and `--qa <focus>` makes
+a QA agent's own preview (`preview-<repo>-pr<n>-qa-<focus>`) beside anyone's
+plain one, stopped and removed when that agent is retired
+([QA agents](#qa-agents-the-change-run-not-read)).
 
 ## Profiles: runtime, model and effort per role
 
@@ -1600,13 +1694,14 @@ role_profiles:
   solo: opus                  # the product agents and their lanes
   orchestrator: default       # fallback for solo when solo is unbound
   reviewer: default
+  qa: default                 # QA agents; unbound, they take the reviewer binding
 ```
 
 A product or repo entry may narrow a binding for itself
 (`products[].role_profiles`). `cel run solo|reviewer ... --profile <name>`
 overrides once; a lane remembers it. `cel profiles` prints every profile, the
 exact launch flags it resolves to, and the workspace-level bindings for root,
-orchestrator, solo, reviewer and direct (not `member` or `team-<role>`).
+orchestrator, solo, reviewer, qa and direct (not `member` or `team-<role>`).
 
 `agents.yaml` records each runtime's model flag and how it takes a reasoning
 level — claude `--effort`, omp/pi `--thinking`, codex
@@ -1894,7 +1989,7 @@ policy block into every agent.
 | `cel run solo --product <p> [--lane <name>]` | start a product's agent, or a further lane for a parallel goal |
 | `cel run [root·orchestrator·reviewer]` | start an agent, role injected; `orchestrator` starts the product's solo agent |
 | `cel mode [<p>] [solo]` | show a product's mode, or set it to solo |
-| `cel solo review · land <repo>#<n>` | record a reviewer's verdict bound to the head (`--focus f` for an extra reviewer) / merge a PR approved by every required reviewer, green |
+| `cel solo review · land <repo>#<n>` | record a reviewer's verdict bound to the head (`--focus f` for an extra reviewer; `--qa f --evidence file...` for a QA agent, which may also say `blocked`) / merge a PR approved by every required reviewer and QA agent, green |
 | `cel solo approvals <repo>#<n>... [--json]` | each reviewer a PR needs (plain, and every extra one `review.extra` requires) and its word on the current head, by land's rule |
 | `cel forge pr view · checks · reviews · list · create <repo>[#<n>]` | a PR in Celestial's words on GitHub or Forgejo alike (`--json` for the normalised value) |
 | `cel forge pr close <repo>#<n> [--comment-file f]` · `cel forge pr ready <repo>#<n>` | close a PR (the comment posted first, the branch kept) or take it out of draft (Forgejo: the `WIP:` title prefix removed; a no-op if it is not a draft) - only the product's own agent (`CEL_ROLE` solo or orchestrator, its product from `CEL_PRODUCT` or its `<product>-orch` mailbox), on its OWN product's repos and its own account's PRs (or a migrated Forgejo PR, author Ghost). A process with no agent identity is refused: the owner closes or readies PRs in the forge's web UI (Forgejo or GitHub) or with `gh` |

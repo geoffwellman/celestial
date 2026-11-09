@@ -1257,3 +1257,62 @@ test_agents_do_not_answer_or_drop_owner_questions() {
   assert_eq "$(guard_classify other 'cel decide answer 1 1')" allow || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+# A REVIEWER JUDGES; IT CHANGES NOTHING IT JUDGES. Every CEL_ROLE=reviewer -
+# the plain reviewer, an extra (--focus) one and a QA agent (--qa) alike -
+# reads, records its own verdict, mails, comments and runs the change in a
+# preview; it never writes a repository, merges, lands, changes a PR's state
+# or the box's, or starts an agent, and no one-off override lets it. git and
+# cel are ALLOWLISTS for it: read verbs only, whatever global options lead.
+# And it is the launch role that decides, wherever the reviewer stands.
+_RV_DENY=( 'git commit -m fix' 'git push origin HEAD:CEL-x' 'git -C /tmp/r push' 'git checkout -b x' 'git worktree add /tmp/x'
+  'git reset --hard origin/main' 'bash -c "git push"' '/usr/bin/git push --force'
+  'git --no-pager push origin HEAD:main' 'git -P push origin HEAD:main' 'git --bare push' 'git --git-dir /x push'
+  'git --work-tree=/x --no-replace-objects push' 'git pull origin main' 'git fetch origin x:main' 'git fetch origin +main'
+  'git fetch --force origin main' 'git fetch -f origin' 'git fetch --upload-pack=/tmp/x origin' 'git update-ref refs/heads/main HEAD'
+  'git branch newb' 'git config user.name x' 'git remote set-url origin x' 'git symbolic-ref HEAD refs/heads/x'
+  'git -c core.pager=x log' 'git --config-env=core.pager=X log' 'git stash' 'git tag v1' 'git merge x' 'git apply p' 'git am p'
+  'gh pr merge 3 --squash' 'gh -R o/r pr merge 3' 'gh pr close 3' 'gh pr ready 3' 'gh pr edit 3 --title x' 'gh pr checkout 3'
+  'gh pr create --title x' 'gh repo delete o/r' 'gh release create v1' 'gh workflow run x' 'gh run rerun 5'
+  'gh api -X PUT repos/o/r/pulls/3/merge' 'tea pr merge 3' 'curl -X PUT https://forgejo.internal/api/v1/repos/o/r/pulls/3/merge'
+  'cel solo land widget#3' 'cel --workspace w solo land widget#3' 'cel forge pr merge widget#3' 'cel forge pr close widget#3'
+  'cel forge pr ready widget#3' 'cel forge pr create widget' 'cel forge run rerun widget 5'
+  'cel run reviewer --repo widget --pr 3' 'cel run solo --product widget' 'cel team add login qa' 'cel team close login'
+  'cel afk on' 'cel release celestial 1.0.0' 'cel update' 'cel learn add x' 'cel mode widget solo' 'cel decide ask --title x'
+  'cel decide answer x y' 'cel decide drop x' 'cel ws up plane' 'cel ws sync plane' 'cel gc' 'cel gateway rotate' 'cel setup'
+  'cel core' 'cel sessions retire-reviewer widget#3' 'cel serve adopt 123' 'cel steward run' 'cel promote x'
+  'herdr agent start x' 'herdr agent prompt x hi' 'herdr pane close p1' 'herdr pane send-text p1 x' 'herdr worktree create x'
+  'CEL_GUARD_ALLOW_ONCE=1 git push origin HEAD:x' 'CEL_GUARD_ALLOW_ONCE=1 cel solo land widget#3' )
+_RV_ALLOW=( 'git fetch origin main' 'git fetch origin' 'git diff origin/main...HEAD' 'git log --oneline -5' 'git show HEAD:README.md'
+  'git status' 'git --no-pager log -3' 'git -C /x diff --stat' 'git -P show HEAD' 'git rev-parse HEAD' 'git ls-files'
+  'git cat-file -p HEAD' 'git blame lib/x.sh' 'git grep foo' 'git merge-base HEAD origin/main' 'git describe --tags'
+  'git range-diff a...b' 'git for-each-ref refs/heads' 'git show-ref' 'git --version' 'git'
+  'cel' 'cel help' 'cel version' 'cel status' 'cel fleet' 'cel profiles' 'cel budget'
+  'cel forge pr view widget#3 --json' 'cel forge pr checks widget#3' 'cel forge pr reviews widget#3' 'cel forge run logs widget 15'
+  'cel inbox read' 'cel inbox send widget-orch "PR #3 review: run git push after git commit --amend"'
+  'cel solo review widget#3 approved --head 0123456789abcdef0123456789abcdef01234567 --by widget-pr-3-qa-browser --qa browser'
+  'cel solo approvals widget#3' 'cel preview widget#3 --qa browser --head 0123456789abcdef0123456789abcdef01234567'
+  'cel preview widget#3 --qa browser --stop' 'cel preview --list' 'cel serve list' 'cel decide list' 'cel learn list'
+  'gh pr comment 3 --body x' 'gh pr review 3 --comment -b x' 'gh pr view 3' 'gh pr diff 3' 'gh pr checks 3' 'gh api repos/o/r/pulls/3'
+  'herdr agent list' 'npx playwright screenshot http://localhost:4600 /tmp/x.png' 'bun test' 'ls -la' )
+test_a_reviewer_judges_and_changes_nothing() {
+  local c role
+  for role in other root orchestrator solo core member; do
+    for c in "${_RV_DENY[@]}"; do
+      if CEL_ROLE=reviewer guard_override_honoured "$role" "$c"; then echo "a reviewer's one-off override honoured: $c"; return 1; fi
+      _deny "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" "reviewer standing as $role: $c" || return 1
+    done
+    for c in "${_RV_ALLOW[@]}"; do
+      assert_eq "$(CEL_ROLE=reviewer guard_classify "$role" "$c")" allow || { echo "reviewer standing as $role refused: $c"; return 1; }
+    done
+  done
+  # a reviewer under a workspace is still a reviewer, not that workspace's root
+  local T; T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"; mkdir -p "$T/repos/widget"
+  for c in 'git push origin HEAD:main' 'cel solo land widget#3'; do
+    _deny "$(CEL_ROLE=reviewer guard_classify "$(CEL_ROLE=reviewer guard_role_of "$T")" "$c")" "reviewer in a workspace: $c" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+  # the product's agent keeps its doors: a solo agent still pushes and lands
+  assert_eq "$(CEL_ROLE=solo guard_classify solo 'git push -u origin HEAD')" allow || return 1
+  assert_eq "$(CEL_ROLE=solo guard_classify solo 'cel solo land widget#3')" allow || return 1
+  CEL_ROLE= guard_override_honoured other 'CEL_GUARD_ALLOW_ONCE=1 git push' || { echo "a person's one-off override refused"; return 1; }
+}

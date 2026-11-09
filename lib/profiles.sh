@@ -522,7 +522,7 @@ EOS
   # Which roles are BOUND to a profile - the part that applies without anyone
   # typing a flag, and therefore the part worth showing unprompted.
   local role bound any=0
-  for role in root orchestrator solo reviewer direct; do
+  for role in root orchestrator solo reviewer qa direct; do
     bound="$(role_profile "$wsdir" "$role")"
     [ -n "$bound" ] || continue
     [ "$any" -eq 1 ] || { printf '\nbound by role (no --profile needed):\n'; any=1; }

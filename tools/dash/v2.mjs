@@ -383,27 +383,31 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   //    <ws>/.cel/solo/<product>/lane-<lane> and is named <product>-<lane>;
   //  - a reviewer (cel run reviewer) stands in its review checkout of
   //    <repo>#<n> and is named <repo>-pr-<n>-review (an extra one,
-  //    --focus, <repo>-pr-<n>-review-<focus>), for a repo the workspace
-  //    declares;
+  //    --focus, <repo>-pr-<n>-review-<focus>; a QA agent, --qa,
+  //    <repo>-pr-<n>-qa-<focus>), for a repo the workspace declares;
   //  - a main agent carries one of the workspace's `-orch` names (w.mains)
   //    and stands in that workspace.
   const under = (cwd, dir) => !!cwd && !!dir && (cwd === dir || cwd.startsWith(dir + '/'));
   const LANE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-  const REVIEWER = /-pr-(\d+)-review(?:-[a-z0-9_-]*)?$/;
+  const REVIEWER = /-pr-(\d+)-(?:review(?:-[a-z0-9_-]*)?|qa(?:-[a-z0-9_-]*)?)$/;
   // where `cel run reviewer` checks a PR out and stands its reviewer
   // (lib/run.sh _run_review_dir, reviewer_checkout_path): <dir>/<repo>-pr-<n>,
-  // or a later round's <dir>/<repo>-pr-<n>.round.<k>; an extra reviewer's
-  // (--focus) <dir>/<repo>-pr-<n>-review-<focus>[.round.<k>]. Answers the
-  // focus (null for the plain reviewer), or undefined when cwd is neither.
+  // or a later round's <dir>/<repo>-pr-<n>.round.<k>; an extra agent's
+  // <dir>/<repo>-pr-<n>-<kind>-<focus>[.round.<k>] (kind review for --focus,
+  // qa for --qa). Answers null for the plain reviewer, {kind, focus} for an
+  // extra one, or undefined when cwd is neither.
   const REVIEWS = () => process.env.CEL_REVIEW_DIR
     || join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'cel', 'reviews');
   const inReview = (cwd, repo, pr) => {
     const c = cwd.replace(/ \(deleted\)$/, '');
     const at = join(REVIEWS(), `${repo}-pr-${pr}`);
     if (under(c, at) || c.startsWith(`${at}.round.`)) return null;
-    if (!c.startsWith(`${at}-review-`)) return undefined;
-    const focus = c.slice(`${at}-review-`.length).split('/')[0].split('.round.')[0];
-    return LANE.test(focus) ? focus : undefined;
+    for (const kind of ['review', 'qa']) {
+      if (!c.startsWith(`${at}-${kind}-`)) continue;
+      const focus = c.slice(`${at}-${kind}-`.length).split('/')[0].split('.round.')[0];
+      return LANE.test(focus) ? { kind, focus } : undefined;
+    }
+    return undefined;
   };
   const laneBase = (w, product) => join(w.path, '.cel', 'solo', product, 'lane-');
   const soloProducts = (w) => w.products.filter((p) => p.mode === 'solo').map((p) => p.name);
@@ -427,8 +431,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const m = REVIEWER.exec(me.name);
       // a reviewer is its canonical name AND its own review checkout
       if (m) for (const w of wss) for (const r of w.repos) {
-        const focus = r && r.name ? inReview(cwd, r.name, m[1]) : undefined;
-        if (focus !== undefined) review.push({ w, repo: r.name, pr: Number(m[1]), focus, key: `${r.name}/pr-${m[1]}-review${focus ? `-${focus}` : ''}` });
+        const x = r && r.name ? inReview(cwd, r.name, m[1]) : undefined;
+        if (x !== undefined) review.push({ w, repo: r.name, pr: Number(m[1]), ...(x || {}), key: `${r.name}/pr-${m[1]}-${x ? `${x.kind}-${x.focus}` : 'review'}` });
       }
       for (const c of [...lane, ...review]) keys.push(c.key);
       rest.push({ me, lane, review });
@@ -438,7 +442,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const l = lane.find((c) => canon.get(c.key) === me.name);
       if (l) { lanes.push({ ...me, ws: l.w.name, mode: 'solo', product: l.product, lane: l.lane }); continue; }
       const rv = review.find((c) => canon.get(c.key) === me.name);
-      if (rv) { reviewers.push({ ...me, ws: rv.w.name, repo: rv.repo, pr: rv.pr, ...(rv.focus ? { focus: rv.focus } : {}) }); continue; }
+      if (rv) { reviewers.push({ ...me, ws: rv.w.name, repo: rv.repo, pr: rv.pr, ...(rv.focus ? { focus: rv.focus } : {}), ...(rv.kind === 'qa' ? { kind: 'qa' } : {}) }); continue; }
       const home = wss.find((w) => under(me.cwd, w.path) && w.mains.has(me.name));
       if (home) mains.push({ ...me, ws: home.name, ...home.mains.get(me.name) });
     }

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { reviewerRetirementPaths } from '../reviewers/retirement-protocol.mjs';
+import { reviewerRetirementPaths, reviewerRoleFile } from '../reviewers/retirement-protocol.mjs';
 
 const VERSION = 1;
 const MAX_JSON = 16384;
@@ -72,7 +72,7 @@ export function startReviewerRetirement({
       && typeof r.workspace === 'string' && path.isAbsolute(r.workspace)
       && typeof r.name === 'string' && path.basename(file) === `${r.name}.json`
       && /^\d+$/.test(String(r.pr))
-      && env.CEL_ROLE_FILE === path.join(r.workspace, '.cel', 'reviews', `pr-${r.pr}`, 'role-reviewer.md'), 'runtime_identity_mismatch');
+      && reviewerRoleFile(env.CEL_ROLE_FILE, r.workspace, r.pr), 'runtime_identity_mismatch');
     requireState(ctx?.mode === 'tui' && ctx.hasUI === true && ctx.cwd === r.cwd
       && typeof ctx.isIdle === 'function' && typeof ctx.hasPendingMessages === 'function'
       && typeof ctx.shutdown === 'function' && typeof ctx.sessionManager?.getLeafId === 'function'

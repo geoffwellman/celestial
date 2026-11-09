@@ -79,7 +79,8 @@ test_review_extra_entries_refuse_a_malformed_policy() {
   for bad in \
     "  extra:\n    - focus: speed\n      paths: [a]|no reviewer focus 'speed' - have: db-migration performance security" \
     "  extra:\n    - focus: security\n      path: [a]|unknown key(s) path" \
-    "  extra:\n    - focus: security\n      kind: qa\n      paths: [a]|kind \"qa\" is not a kind of reviewer there is" \
+    "  extra:\n    - focus: security\n      kind: qa\n      paths: [a]|no qa focus 'security' - have: browser exploratory mobile-device" \
+    "  extra:\n    - focus: browser\n      kind: ui\n      paths: [a]|kind \"ui\" is not a kind there is - the kinds are review and qa" \
     "  extra:\n    - focus: security\n      paths: []|focus security needs paths" \
     "  extra:\n    - focus: security\n      paths: [/etc/x, 'a//b', '../x']|not a repo-relative glob" \
     "  extra:\n    - paths: [a]|an entry needs a focus" \
@@ -180,4 +181,56 @@ test_review_aliases_are_distinct_or_refused() {
   local why; why="$(review_alias_free a-long-repository-name 12345 security)" && { echo "a cut alias was free"; return 1; }
   assert_contains "$why" "is the plain reviewer's (names are cut to 32 characters)"
   assert_eq "$(review_focus_names | paste -sd' ' -)" "db-migration performance security"
+}
+
+# QA AGENTS (kind: qa) are extra agents of their own kind: their packs are
+# core/roles/focus/qa/<focus>.md, their slot `qa-<focus>`, their alias
+# `<repo>-pr-<n>-qa-<focus>` - never a review extra's name - and they are
+# started with --qa.
+test_qa_extra_slot_alias_packs_and_start_command() {
+  assert_eq "$(review_slot browser qa)" qa-browser
+  assert_eq "$(review_slot security)" review-security
+  assert_eq "$(review_alias widget 7 browser qa)" widget-pr-7-qa-browser
+  assert_eq "$(review_alias celestial 277 mobile-device qa)" celestial-pr-277-qa-mobile-devic
+  assert_eq "$(review_focus_names qa | paste -sd' ' -)" "browser exploratory mobile-device"
+  review_focus_valid browser qa || { echo "browser is a qa focus"; return 1; }
+  ! review_focus_valid browser || { echo "browser read as a reviewer focus"; return 1; }
+  ! review_focus_valid security qa || { echo "security read as a qa focus"; return 1; }
+  ! review_focus_valid browser ui || { echo "a kind that is not one has packs"; return 1; }
+  assert_eq "$(review_focus_refusal speed qa)" "no qa focus 'speed' - have: browser exploratory mobile-device"
+  assert_eq "$(review_slot_kind qa-browser) $(review_slot_focus qa-browser)" "qa browser"
+  assert_eq "$(review_slot_kind review-db-migration) $(review_slot_focus review-db-migration)" "review db-migration"
+  review_alias_free widget 7 browser qa >/dev/null || return 1
+  local why; why="$(review_alias_free a-long-repository-name 12345 browser qa)" && { echo "a cut qa alias was free"; return 1; }
+  assert_contains "$why" "is the plain reviewer's (names are cut to 32 characters)"
+  assert_eq "$(review_start_cmd widget 7 browser qa)" "cel run reviewer --repo widget --pr 7 --qa browser"
+  assert_eq "$(review_start_cmd widget 7 security)" "cel run reviewer --repo widget --pr 7 --focus security"
+}
+# A qa entry is policy like a review one: joined workspace-wide and per repo
+# by its slot (never merged into a review entry), and matched by its paths.
+test_qa_entries_join_by_slot_and_match_ui_paths() {
+  T="$(mktemp -d)"
+  cat > "$T/workspace.yaml" <<'YAML'
+name: rp
+review:
+  extra:
+    - focus: security
+      paths: ['lib/**']
+    - kind: qa
+      focus: browser
+      paths: ['web/**', '**/*.tsx', '**/*.css']
+repos:
+  - name: widget
+    review:
+      extra:
+        - kind: qa
+          focus: browser
+          paths: ['app/**']
+YAML
+  local es; es="$(review_extra_entries "$T" widget)" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c 'map([.slot, .kind, .focus, .paths])' <<<"$es")" \
+    '[["qa-browser","qa","browser",["**/*.css","**/*.tsx","app/**","web/**"]],["review-security","review","security",["lib/**"]]]' || { rm -rf "$T"; return 1; }
+  assert_eq "$(review_extra_match "$es" '["src/Login.tsx","README.md"]' | jq -c 'map([.slot, .because.glob])')" \
+    '[["qa-browser","**/*.tsx"]]' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
 }

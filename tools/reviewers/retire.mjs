@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { reviewerRetirementPaths } from './retirement-protocol.mjs';
+import { reviewerRetirementPaths, reviewerRoleFile } from './retirement-protocol.mjs';
 
 // Only the shell entrypoint holds the launcher's per-record flock. This module
 // owns one supported Rex kill; it never signals a PID or releases a checkout.
@@ -645,7 +645,7 @@ export async function retire(options) {
     const tree = descendants(r.pid), root = tree[0];
     requireProof(root.start === r.pid_start && ['pi', 'pi-coding-agent'].includes(root.argv[0]) && ['node', 'pi', 'bun'].some(name => path.basename(root.exe).startsWith(name)), 'runtime_generation_mismatch');
     const env = root.env;
-    requireProof(env.CEL_AGENT_NAME === agent && env.CEL_ROLE === 'reviewer' && env.CEL_REX_RECORD === receipt && env.CEL_WORKSPACE === r.workspace && env.CEL_ROOT === process.env.CEL_ROOT && env.CEL_ROLE_FILE === path.join(r.workspace, '.cel', 'reviews', `pr-${number}`, 'role-reviewer.md') && path.isAbsolute(env.PI_CODING_AGENT_DIR || ''), 'runtime_launch_identity_mismatch');
+    requireProof(env.CEL_AGENT_NAME === agent && env.CEL_ROLE === 'reviewer' && env.CEL_REX_RECORD === receipt && env.CEL_WORKSPACE === r.workspace && env.CEL_ROOT === process.env.CEL_ROOT && reviewerRoleFile(env.CEL_ROLE_FILE, r.workspace, number) && path.isAbsolute(env.PI_CODING_AGENT_DIR || ''), 'runtime_launch_identity_mismatch');
     requireProof(root.cwd === r.cwd || root.cwd === `${r.cwd} (deleted)`, 'runtime_cwd_mismatch');
     const capability = nativeCapability(receipt, r);
     if (inspect) {

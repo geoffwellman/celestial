@@ -17,9 +17,14 @@
 #             paths: ['migrations/**']
 #
 # An entry is `kind`, `focus` and `paths`, nothing else. `kind` is what kind
-# of agent the entry starts and defaults to `review`: a PR reviewer with the
-# focus pack core/roles/focus/reviewer/<focus>.md appended to its role.
-# `review` is the only kind there is.
+# of agent the entry starts and defaults to `review`:
+#   review  a PR reviewer with the focus pack
+#           core/roles/focus/reviewer/<focus>.md appended to its role
+#   qa      a QA agent (core/roles/pr-qa.md) with the focus pack
+#           core/roles/focus/qa/<focus>.md: it does not read the code, it
+#           runs the PR's head in a preview and uses it (`kind: qa, focus:
+#           browser, paths: ['web/**', '**/*.tsx', '**/*.css']`)
+# Those are the kinds there are.
 #
 # THIS IS POLICY. It is read from workspace.yaml alone (_yqr, never the
 # workspace.local.yaml overlay of _yqr_ws), so a per-person file can neither
@@ -41,10 +46,12 @@
 # Everything else is literal, and a glob matches the WHOLE path: `lib/auth`
 # is that one file, `lib/auth/**` everything under it.
 #
-# Each extra reviewer has a SLOT, `<kind>-<focus>` (`review-security`): its
-# alias is `<repo>-pr-<n>-<slot>` (cut to 32 characters by cel_alias_norm),
-# its checkout `<reviews>/<repo>-pr-<n>-<slot>`, and its verdict is recorded
-# under `<repo>#<n>/<slot>` in .cel/solo-reviews.json (lib/solo.sh).
+# Each extra agent has a SLOT, `<kind>-<focus>` (`review-security`,
+# `qa-browser`): its alias is `<repo>-pr-<n>-<slot>` (cut to 32 characters by
+# cel_alias_norm), its checkout `<reviews>/<repo>-pr-<n>-<slot>`, and its
+# verdict is recorded under `<repo>#<n>/<slot>` in .cel/solo-reviews.json
+# (lib/solo.sh). Both kinds run as reviewers (CEL_ROLE=reviewer): one guard
+# class, one registry, one budget class, one retirement path.
 [ -n "${_CEL_REVIEW_POLICY:-}" ] && return 0
 _CEL_REVIEW_POLICY=1
 # shellcheck source=lib/workspace.sh
@@ -52,48 +59,77 @@ _CEL_REVIEW_POLICY=1
 # shellcheck source=lib/forge.sh
 . "${BASH_SOURCE[0]%/*}/forge.sh"   # forge_pr_files: what a PR touches
 
-review_focus_dir() { printf '%s/core/roles/focus/reviewer' "$CEL_ROOT"; }
+# The kinds of extra agent there are, and where each kind's focus packs live.
+REVIEW_KINDS="review qa"
+review_focus_dir() { # [kind]
+  case "${1:-review}" in
+    review) printf '%s/core/roles/focus/reviewer' "$CEL_ROOT" ;;
+    qa)     printf '%s/core/roles/focus/qa' "$CEL_ROOT" ;;
+    *)      return 1 ;;
+  esac
+}
 
-# The reviewer focus packs there are, one name per line, sorted.
-review_focus_names() {
-  local f
-  for f in "$(review_focus_dir)"/*.md; do
+# A kind's focus packs, one name per line, sorted.
+review_focus_names() { # [kind]
+  local f d
+  d="$(review_focus_dir "${1:-review}")" || return 0
+  for f in "$d"/*.md; do
     [ -f "$f" ] || continue
     f="${f##*/}"; printf '%s\n' "${f%.md}"
   done | LC_ALL=C sort
 }
 
-review_focus_valid() { # <focus>
-  [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ -f "$(review_focus_dir)/$1.md" ]
+review_focus_valid() { # <focus> [kind]
+  local d
+  d="$(review_focus_dir "${2:-review}")" || return 1
+  [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ -f "$d/$1.md" ]
 }
 
-review_focus_refusal() { # <focus> -> the sentence naming the packs there are
-  printf "no reviewer focus '%s' - have: %s" "$1" "$(review_focus_names | paste -sd' ' -)"
+# What a kind is called in a sentence.
+review_kind_word() { case "${1:-review}" in qa) printf qa ;; *) printf reviewer ;; esac; }
+
+review_focus_refusal() { # <focus> [kind] -> the sentence naming the packs there are
+  printf "no %s focus '%s' - have: %s" "$(review_kind_word "${2:-review}")" "$1" "$(review_focus_names "${2:-review}" | paste -sd' ' -)"
 }
 
-review_slot() { printf 'review-%s' "$1"; }   # <focus>
+review_slot() { printf '%s-%s' "${2:-review}" "$1"; }   # <focus> [kind]
+# A slot's kind and focus: the kind is everything before the first `-`.
+review_slot_kind()  { printf '%s' "${1%%-*}"; }   # <slot>
+review_slot_focus() { printf '%s' "${1#*-}"; }    # <slot>
 
 # The agent name (and mailbox) of a PR's reviewer: the plain one with no
-# focus, `<repo>-pr-<n>-review-<focus>` with one.
-review_alias() { # <repo> <pr> [focus]
-  if [ -n "${3:-}" ]; then cel_alias_norm "$1/pr-$2-$(review_slot "$3")"
+# focus, `<repo>-pr-<n>-review-<focus>` for an extra reviewer and
+# `<repo>-pr-<n>-qa-<focus>` for a QA agent.
+review_alias() { # <repo> <pr> [focus] [kind]
+  if [ -n "${3:-}" ]; then cel_alias_norm "$1/pr-$2-$(review_slot "$3" "${4:-review}")"
   else cel_alias_norm "$1/pr-$2-review"; fi
 }
 
-# A focus whose alias would be another reviewer's - the plain one's, or a
-# different focus's once both are cut to 32 characters - is refused: two
-# reviewers answering to one name share a mailbox and a verdict.
-review_alias_free() { # <repo> <pr> <focus> -> 0, or the reason on stdout
-  local mine other f
-  mine="$(review_alias "$1" "$2" "$3")"
+# The command that starts (or, when it is live, reuses) one extra agent.
+review_start_cmd() { # <repo> <pr> <focus> [kind]
+  case "${4:-review}" in
+    qa) printf 'cel run reviewer --repo %s --pr %s --qa %s' "$1" "$2" "$3" ;;
+    *)  printf 'cel run reviewer --repo %s --pr %s --focus %s' "$1" "$2" "$3" ;;
+  esac
+}
+
+# A focus whose alias would be another agent's - the plain reviewer's, or
+# any other extra one's of either kind once both are cut to 32 characters -
+# is refused: two agents answering to one name share a mailbox and a verdict.
+review_alias_free() { # <repo> <pr> <focus> [kind] -> 0, or the reason on stdout
+  local kind="${4:-review}" mine other f k
+  mine="$(review_alias "$1" "$2" "$3" "$kind")"
   [ "$mine" != "$(review_alias "$1" "$2")" ] \
-    || { printf "the %s reviewer's name '%s' is the plain reviewer's (names are cut to 32 characters)" "$3" "$mine"; return 1; }
-  while IFS= read -r f; do
-    [ -n "$f" ] && [ "$f" != "$3" ] || continue
-    other="$(review_alias "$1" "$2" "$f")"
-    [ "$other" != "$mine" ] \
-      || { printf "the %s and %s reviewers would both be named '%s' (names are cut to 32 characters)" "$3" "$f" "$mine"; return 1; }
-  done < <(review_focus_names)
+    || { printf "the %s %s's name '%s' is the plain reviewer's (names are cut to 32 characters)" "$3" "$(review_kind_word "$kind")" "$mine"; return 1; }
+  for k in $REVIEW_KINDS; do
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      [ "$k-$f" != "$kind-$3" ] || continue
+      other="$(review_alias "$1" "$2" "$f" "$k")"
+      [ "$other" != "$mine" ] \
+        || { printf "the %s %s and the %s %s would both be named '%s' (names are cut to 32 characters)" "$3" "$(review_kind_word "$kind")" "$f" "$(review_kind_word "$k")" "$mine"; return 1; }
+    done < <(review_focus_names "$k")
+  done
   return 0
 }
 
@@ -141,20 +177,21 @@ review_extra_entries() { # <wsdir> <repo> -> JSON array
     [.[] | .where as $w | .e
      | if type != "object" then "\($w): an entry must be a map of kind, focus and paths (got \(tojson))"
        elif (keys - ["kind", "focus", "paths"]) != [] then "\($w): unknown key(s) \(keys - ["kind", "focus", "paths"] | join(", ")) - an entry has kind, focus and paths"
-       elif (.kind // "review") != "review" then "\($w): kind \(.kind | tojson) is not a kind of reviewer there is - the only kind is review"
+       elif ((.kind // "review") | IN("review", "qa") | not) then "\($w): kind \(.kind | tojson) is not a kind there is - the kinds are review and qa"
        elif (.focus | type) != "string" or .focus == "" then "\($w): an entry needs a focus"
        elif (.paths | type) != "array" or (.paths | length) == 0 then "\($w): focus \(.focus) needs paths - a list of globs"
        elif any(.paths[]; glob_ok | not) then "\($w): focus \(.focus) has a path that is not a repo-relative glob (\([.paths[] | select(glob_ok | not)] | map(tojson) | join(", ")))"
        else empty end][0] // ""')"
   [ -z "$bad" ] || { printf 'workspace.yaml %s\n' "$bad" >&2; return 1; }
-  while IFS= read -r f; do
+  local k
+  while IFS=$'\t' read -r k f; do
     [ -n "$f" ] || continue
-    review_focus_valid "$f" || { printf 'workspace.yaml review.extra: %s\n' "$(review_focus_refusal "$f")" >&2; return 1; }
-  done < <(printf '%s' "$raw" | jq -r '.[].e.focus')
+    review_focus_valid "$f" "$k" || { printf 'workspace.yaml review.extra: %s\n' "$(review_focus_refusal "$f" "$k")" >&2; return 1; }
+  done < <(printf '%s' "$raw" | jq -r '.[].e | [(.kind // "review"), .focus] | @tsv')
   printf '%s' "$raw" | jq -c '
-    [.[].e | {kind: (.kind // "review"), focus, paths}]
-    | group_by(.focus) | map({kind: .[0].kind, focus: .[0].focus, slot: "\(.[0].kind)-\(.[0].focus)",
-                              paths: ([.[].paths[]] | unique)})'
+    [.[].e | {kind: (.kind // "review"), focus, paths} | .slot = "\(.kind)-\(.focus)"]
+    | group_by(.slot) | map({kind: .[0].kind, focus: .[0].focus, slot: .[0].slot,
+                             paths: ([.[].paths[]] | unique)})'
 }
 
 # EVERY REVIEW-POLICY ERROR IN A WORKSPACE, one line each (nothing when the

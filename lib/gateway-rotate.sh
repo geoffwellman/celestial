@@ -237,10 +237,14 @@ _gwr_plan_row() { # role name ws product team cwd comm
         printf '1\tcel run orchestrator --product %s%s --restart' "$p" "$wsopt"
       fi ;;
     reviewer)
-      # an extra reviewer is <repo>-pr-<n>-review-<focus> (cut to 32), and
-      # its focus is named only when the name still spells a whole one
+      # an extra reviewer is <repo>-pr-<n>-review-<focus>, a QA agent
+      # <repo>-pr-<n>-qa-<focus> (both cut to 32), and the focus is named
+      # only when the name still spells a whole one
       local core="$name" focus=""
-      if [[ "$name" =~ ^(.+-pr-[0-9]+-review)-(.+)$ ]]; then
+      if [[ "$name" =~ ^(.+-pr-[0-9]+)-qa-(.+)$ ]]; then
+        core="${BASH_REMATCH[1]}-review"
+        ! review_focus_valid "${BASH_REMATCH[2]}" qa || focus=" --qa ${BASH_REMATCH[2]}"
+      elif [[ "$name" =~ ^(.+-pr-[0-9]+-review)-(.+)$ ]]; then
         core="${BASH_REMATCH[1]}"
         ! review_focus_valid "${BASH_REMATCH[2]}" || focus=" --focus ${BASH_REMATCH[2]}"
       fi

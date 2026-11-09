@@ -26,7 +26,7 @@ function fixture(t, overrides = {}) {
     active: false, editor: '', unread: 0, debt: { owed: false, pending: false, waking: false }, events: [],
   };
   f.protocol = reviewerRetirementPaths(file);
-  const env = { CEL_ROLE: 'reviewer', CEL_SESSION_BACKEND: 'rex', CEL_AGENT_NAME: 'widget-pr-71-review', CEL_REX_RECORD: file, CEL_ROLE_FILE: path.join(workspace, '.cel', 'reviews', 'pr-71', 'role-reviewer.md'), ...overrides.env };
+  const env = { CEL_ROLE: 'reviewer', CEL_SESSION_BACKEND: 'rex', CEL_AGENT_NAME: 'widget-pr-71-review', CEL_REX_RECORD: file, CEL_ROLE_FILE: path.join(workspace, '.cel', 'reviews', overrides.reviewDir || 'pr-71', overrides.roleName || 'role-reviewer.md'), ...overrides.env };
   const ctx = {
     cwd, mode: 'tui', hasUI: true,
     sessionManager: { getSessionFile: () => f.native, getLeafId: () => f.leaf },
@@ -188,4 +188,25 @@ test('native protocol publication preserves the canonical Rex inventory across o
   const { response } = await inspect(f);
   assert.equal(response.status, 'ready');
   assert.deepEqual(inventory(), before);
+});
+
+// An extra reviewer's role file is <focus>.role-reviewer.md and a QA agent's
+// qa-<focus>.role-reviewer.md, beside the plain one in the PR's review dir
+// (lib/run.sh): each is a reviewer of that PR, retired by the same proof. A
+// role file under another PR, or of another shape, is not this reviewer's.
+test('extra reviewers and QA agents are retired by the same identity proof', async t => {
+  for (const roleName of ['security.role-reviewer.md', 'qa-browser.role-reviewer.md']) {
+    await t.test(roleName, async sub => {
+      const f = fixture(sub, { roleName });
+      assert.ok(f.controller, `${roleName} was not recognised as this PR's reviewer role`);
+      const { response } = await inspect(f);
+      assert.equal(response.status, 'ready');
+    });
+  }
+  for (const [reviewDir, roleName] of [['pr-72', 'qa-browser.role-reviewer.md'], ['pr-71', 'role-orchestrator.md'], ['pr-71', '../role-reviewer.md'], ['pr-71', 'qa-browser.role-reviewer.md.bak']]) {
+    await t.test(`${reviewDir}/${roleName}`, sub => {
+      const f = fixture(sub, { reviewDir, roleName });
+      assert.equal(f.controller, null);
+    });
+  }
 });

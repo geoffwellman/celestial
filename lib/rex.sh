@@ -1090,7 +1090,7 @@ cmd_sessions() {
       esac ;;
     --json) cel_agent_list ;;
     '') cel_agent_list | jq -r '.result.agents[] | [ .name, (.backend // "herdr"), .agent, (.agent_status // "unknown"), .pane_id ] | @tsv' ;;
-    *) die 'usage: cel sessions [--json] | retire-reviewer <repo>#<pr> [--workspace W] [--dry-run] | rex-upgrade [--check]' ;;
+    *) die 'usage: cel sessions [--json] | retire-reviewer <repo>#<pr> [--focus F | --qa F] [--workspace W] [--dry-run] | rex-upgrade [--check]' ;;
   esac
 }
 

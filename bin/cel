@@ -176,10 +176,12 @@ cel - the celestial plane
                                 `fleet` is refused). Setting it writes
                                 workspace.yaml and restarts the live agent on
                                 the same session once its turn ends
-  cel solo review <repo>#<pr> approved|changes --head <sha> --by <alias> [--focus f] [--note t]
+  cel solo review <repo>#<pr> approved|changes|blocked --head <sha> --by <alias> [--focus f | --qa f --evidence file...] [--note t]
                                 a reviewer's verdict on a solo product's PR,
                                 bound to the exact head it read (--focus: an
-                                extra reviewer's, from its own pane)
+                                extra reviewer's, --qa: a QA agent's, with
+                                evidence named with the head; blocked = it
+                                could not run the change, never an approval)
   cel solo land <repo>#<pr>     merge a solo product's PR: policy self, own
                                 PR, approved at its current head by every
                                 reviewer review.extra requires, no red
@@ -220,11 +222,16 @@ cel - the celestial plane
                                 product agent on its own product's repos)
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
-                                plus every extra reviewer workspace.yaml's
-                                review.extra requires for the files the PR
-                                touches; cel gc closes them when the PR closes
+                                plus every extra reviewer and QA agent
+                                workspace.yaml's review.extra requires for the
+                                files the PR touches; cel gc closes them when
+                                the PR closes
                                 --focus f: one extra reviewer with the focus
                                 pack core/roles/focus/reviewer/<f>.md
+                                --qa f: one QA agent (core/roles/pr-qa.md,
+                                pack core/roles/focus/qa/<f>.md) that runs the
+                                head in its own cel preview and uses it;
+                                model: role_profiles.qa, else .reviewer
                                 --profile p / --model m / --thinking l:
                                 launch on a different CLI, model or effort
                                 a NEW reviewer starts only inside the box
@@ -353,10 +360,12 @@ cel - the celestial plane
   cel serve stop <name>        stop a ledgered server
   cel serve adopt [<unit|pid> --owner ... --workspace ...]
                                 list unledgered servers; explicit adoption only
-  cel preview <repo>#<pr> [--port N] [--ttl 8h] [--no-wait]
+  cel preview <repo>#<pr> [--port N] [--ttl 8h] [--no-wait] [--qa f] [--head sha]
                                 run an open PR's head from the repo's preview:
                                 block with no provider keys; prints its urls
-  cel preview <repo>#<pr> --stop | --list [--json]
+                                (--qa f: a QA agent's own preview, stopped when
+                                it retires; --head: refuse any other head)
+  cel preview <repo>#<pr> [--qa f] --stop | --list [--json]
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
 
