@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { reviewerRetirementPaths, reviewerRoleFile } from './retirement-protocol.mjs';
+import { INBOX_WATCH_PROGRAMS } from './inbox-watch-programs.mjs';
 
 // Only the shell entrypoint holds the launcher's per-record flock. This module
 // owns one supported Rex kill; it never signals a PID or releases a checkout.
@@ -142,7 +143,9 @@ export function validatedProcessEvidence(tree, r, declared, rootPath) {
       const follow = ['-s', poll, `--pid=${root.pid}`];
       const files = a.slice(4, 7).every((v, i) => v === follow[i]) ? a.slice(7) : a.slice(4);
       const tail = basename === 'tail' && a.length >= 5 && a[1] === '-n' && a[2] === '0' && a[3] === '-F' && files.length > 0 && files.every(filename => path.isAbsolute(filename) && filename.endsWith('.jsonl'));
-      const jq = ['jq', 'jaq'].includes(basename) && a.length === 10 && a[1] === '-nRr' && a[2] === '--unbuffered' && a[3] === '--arg' && a[4] === 'who' && a[5] === r.name && a[6] === '--arg' && a[7] === 'dir' && path.isAbsolute(a[8]) && a[8].endsWith('/') && fs.readFileSync(path.join(rootPath, 'lib/inbox.sh'), 'utf8').includes(`_INBOX_WATCH_JQ='${a[9]}'`);
+      // The jq program is the launch checkout's current _INBOX_WATCH_JQ, or
+      // one an earlier release started its watcher with (by exact hash).
+      const jq = ['jq', 'jaq'].includes(basename) && a.length === 10 && a[1] === '-nRr' && a[2] === '--unbuffered' && a[3] === '--arg' && a[4] === 'who' && a[5] === r.name && a[6] === '--arg' && a[7] === 'dir' && path.isAbsolute(a[8]) && a[8].endsWith('/') && (INBOX_WATCH_PROGRAMS.has(sha(a[9])) || fs.readFileSync(path.join(rootPath, 'lib/inbox.sh'), 'utf8').includes(`_INBOX_WATCH_JQ='${a[9]}'`));
       const shell = isWatch && JSON.stringify(a) === JSON.stringify(watcher.argv);
       requireProof(sleep || tail || jq || shell, 'unknown_watcher_child', 'protected');
       if (sleep) pollSleeps.add(p.pid);

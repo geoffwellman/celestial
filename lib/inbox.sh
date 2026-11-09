@@ -915,6 +915,9 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
 # Fields first, formatting in the shell: the notification needs the kind and
 # the sender, and re-parsing a rendered line to get them back is how a
 # message containing a colon becomes a notification from nobody.
+# Changing this program? Add its sha256 to tools/reviewers/inbox-watch-programs.mjs
+# (and keep the old one): reviewer retirement recognises a watcher's jq child
+# by it, and watchers started on the old text keep running it.
 _INBOX_WATCH_JQ='
     foreach inputs as $l ({ws: "", m: null};
       if ($l | startswith("==> ")) then

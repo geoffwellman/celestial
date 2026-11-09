@@ -755,6 +755,14 @@ or stopped using a saved-file/idle guess. A reviewer that went by other means
 proof is in flight) loses only its registry row to `cel gc`, so the PR can be
 reviewed again; its receipt, checkout and native log stay.
 
+A reviewer's inbox watcher is owned infrastructure only while its every child
+is recognised. Its jq child counts if it runs the launch checkout's current
+`_INBOX_WATCH_JQ` (lib/inbox.sh) or a program an earlier release started
+watchers with, listed by sha256 in `tools/reviewers/inbox-watch-programs.mjs`;
+so a reviewer whose watcher predates a `cel update` can still be retired. Any
+other program keeps the reviewer `protected`. A change to `_INBOX_WATCH_JQ`
+adds its hash there, beside the old ones (retire.test.mjs fails until it does).
+
 The command returns JSON: `eligible` for a dry-run candidate, `retired` only
 after verified settlement, `protected` for known outstanding work/unsupported
 contexts, or `unknown` for missing proof or incomplete teardown. A partial
