@@ -115,6 +115,21 @@ test_orphans_list_never_matches_what_still_has_an_owner() {
   rm -rf "$T"
 }
 
+# AN ORPHANED AGENT BROWSER FOLLOWS THE ORDINARY RULES. `cel serve adopt` no
+# longer lists a headless Chrome whose only listener is its DevTools port, so
+# one whose agent is gone is this file's to judge, unchanged: reaped as a
+# fixture when its directory is gone, kept while it still exists.
+test_orphans_an_orphaned_headless_chrome_follows_the_existing_rules() {
+  _orphans_fixture
+  local chrome="$T/.omp/puppeteer/chrome/linux-1/chrome-linux64/chrome"
+  _proc_add "$P" 4050 1 chrome 300000 "$T/gone" "$chrome" --headless=new --remote-debugging-port=9222
+  _proc_add "$P" 4051 1 chrome 300000 "$T" "$chrome" --headless=new --remote-debugging-port=9223
+  local rows; rows="$(orphans_list)"
+  assert_eq "$(_class_of "$rows" 4050)" "fixture"
+  assert_eq "$(_class_of "$rows" 4051)" ""
+  rm -rf "$T"
+}
+
 # A pane list nobody could read is not an empty pane list. Unknown must keep
 # every shell: the alternative is a sweep that kills all 173 of them the first
 # time herdr is restarting.

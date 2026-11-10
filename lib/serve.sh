@@ -405,15 +405,58 @@ _serve_ignored() { # <command> -> 0 when box config serve.ignore matches it
   done
   return 1
 }
-_serve_not_a_preview() { # <pid> <command>
-  local pid="$1" cmd="$2" a0 a1 n cg unit exe proc="${CEL_SERVE_PROC_ROOT:-/proc}"
-  read -r a0 a1 _ <<<"$cmd"
+_serve_agent_argv() { # <command> -> 0 when it is an agent runtime (omp, pi, claude, ...)
+  local a0 a1 n
+  read -r a0 a1 _ <<<"$1"
   n="${a0##*/}"
   # argv[1] names the program only when argv[0] is a script host; for
   # anything else it is an argument (`http-server ~/claude` is a preview).
   case "$n" in node|nodejs|bun|deno|python|python3*) n="${a1##*/}" ;; esac
   case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*) return 0 ;; esac
+  return 1
+}
+# AN AGENT'S VERIFICATION BROWSER. A harness (omp's
+# `__omp_worker_daemon_broker`, pi, claude, opencode) drives a headless Chrome
+# that listens on a loopback DevTools port; it is a tool of that agent, not a
+# preview, and `cel serve adopt` is the wrong answer for it. Only a Chrome or
+# Chromium binary qualifies - a dev server an agent started is still a dev
+# server - and only when an ancestor is an agent runtime, or when the one port
+# it was seen on is its own --remote-debugging-port (or it debugs over a
+# pipe). An orphaned one, its agent gone, is left to lib/orphans.sh, whose
+# rules are unchanged: reaped when its directory is gone, kept otherwise.
+_serve_agent_browser() { # <pid> <command> <port>
+  local pid="$1" cmd="$2" port="$3" a0 n p depth=0 key val rest arg part proc="${CEL_SERVE_PROC_ROOT:-/proc}"
+  local -a argv
+  read -r -a argv <<<"$cmd"
+  a0="${argv[0]:-}"
+  n="${a0##*/}"
+  case "$n" in chrome|chromium|chromium-browser|google-chrome*|chrome-headless-shell|headless_shell) ;; *) return 1 ;; esac
+  for arg in "${argv[@]}"; do
+    case "$arg" in
+      --remote-debugging-pipe) return 0 ;;
+      --remote-debugging-port=*)
+        p="${arg#*=}"
+        { [ "$p" = 0 ] || [ "$p" = "$port" ]; } && return 0 ;;
+    esac
+  done
+  p="$pid"
+  while [ "$depth" -lt 32 ]; do
+    depth=$((depth + 1)); n=''
+    while IFS=$'\t' read -r key val rest; do
+      [ "$key" = PPid: ] && { n="$val"; break; }
+    done < "$proc/$p/status" 2>/dev/null
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" != 1 ] || return 1
+    p="$n"; arg=''
+    while IFS= read -r -d '' part || [ -n "$part" ]; do arg="$arg$part "; done < "$proc/$p/cmdline" 2>/dev/null
+    _serve_agent_argv "$arg" && return 0
+  done
+  return 1
+}
+_serve_not_a_preview() { # <pid> <command> [port]
+  local pid="$1" cmd="$2" cg unit exe proc="${CEL_SERVE_PROC_ROOT:-/proc}"
+  _serve_agent_argv "$cmd" && return 0
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    _serve_agent_browser "$pid" "$cmd" "${3:-0}" && return 0
     exe="$(readlink "$proc/$pid/exe" 2>/dev/null || true)"
     _cel_hermes_desktop_server "$exe" "$proc/$pid/cmdline" && return 0
     cg="$(awk -F: '$1 == "0" {print $3; exit}' "$proc/$pid/cgroup" 2>/dev/null || true)"
@@ -457,7 +500,7 @@ serve_adopt_json() {
     # a unit row is already judged by its name (and the ignore list); a loose
     # pid is judged here
     if [ -z "$(jq -r '.unit // ""' <<<"$row")" ]; then
-      _serve_not_a_preview "$pid" "$(jq -r '.command // ""' <<<"$row")" && continue
+      _serve_not_a_preview "$pid" "$(jq -r '.command // ""' <<<"$row")" "$(jq -r '.port // 0' <<<"$row")" && continue
     else
       _serve_ignored "$(jq -r '.command // ""' <<<"$row")" && continue
     fi
