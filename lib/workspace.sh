@@ -512,6 +512,41 @@ ws_product_of_repo() { # <wsdir> <repo> - its product, else the repo itself
     "$1/workspace.yaml"
 }
 
+# WHO OWNS A REPO'S PRS. The product's agent (`<product>-orch`), unless one
+# solo lane owns the repo outright and workspace.yaml says so:
+#   repos: [{name: slot-studio, lane: slot-builder}]
+# - the name `cel run solo --product <p> --lane <name>` takes, so the owner is
+# that lane's pane and mailbox, `<p>-<name>`. Every per-PR mail asks this one
+# function: the steward's nudges (lib/steward.sh _steward_pr_nudge, which hands
+# them back to the product agent while the lane is not running) and every
+# reviewer's "send findings to" (lib/run.sh _run_reviewer_solo_brief).
+#
+# IT IS THE TEAM'S CONTRACT: read from workspace.yaml alone, never the
+# workspace.local.yaml overlay (lib/yaml.sh merges only role_profiles inside a
+# repos[] entry, and cel doctor names anything else there). A value no lane
+# could have - not a string, not a name `cel run solo --lane` accepts, or one
+# whose mailbox would be cut at 32 characters - names no lane; cel doctor
+# (doctor_repo_lane_lines) warns about it, and about a lane never started.
+ws_repo_lane() { # <wsdir> <repo> -> the declared lane's name, or nothing
+  local l p
+  l="$(_yqr -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0].lane // ""
+    | if type == "string" then . else "" end' "$1/workspace.yaml")"
+  [ "$l" != orch ] && [[ "$l" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || return 0
+  p="$(ws_product_of_repo "$1" "$2")"
+  [ "$(cel_alias_norm "$p/$l")" = "$p-$l" ] || return 0
+  printf '%s' "$l"
+}
+# [default] stands in for the product agent (a reviewer's: the solo agent that
+# started it), never for a declared lane.
+ws_repo_pr_owner() { # <wsdir> <repo> [default] -> the mailbox that owns <repo>'s PRs
+  local lane product
+  product="$(ws_product_of_repo "$1" "$2")"
+  lane="$(ws_repo_lane "$1" "$2")"
+  if [ -n "$lane" ]; then printf '%s-%s' "$product" "$lane"
+  elif [ -n "${3:-}" ]; then printf '%s' "$3"
+  else printf '%s-orch' "$product"; fi
+}
+
 ws_product_declared() { # <wsdir> <product> - 0 declared, 1 implicit or unknown
   [ "$(_yqr -r --arg p "$2" '(.products // []) | map(select(.name == $p)) | length' \
     "$1/workspace.yaml")" != "0" ]
@@ -706,15 +741,20 @@ ws_policy_block() { # <wsdir> [product]
          | (if .kind == "qa" then "qa " else "" end) + .focus] | unique | join(", ")' "$d/workspace.yaml" 2>/dev/null)" || extra=""
     [ -z "$extra" ] || printf -- '- extra reviewers: review.extra in workspace.yaml requires a specialist reviewer or QA agent (%s) for a PR that touches its paths; `cel run reviewer` starts them with the plain one and says why, and `cel solo land` needs each one'"'"'s approval of the head (a QA agent'"'"'s `blocked` is not one)\n' "$extra"
   fi
-  local lt rpr
+  local lt rpr rlane
   for r in $(ws_repo_names "$d"); do
     lt="$(ws_repo_get "$d" "$r" linear_team)"
     rpr=""
     [ "$(ws_repo_pr "$d" "$r")" != none ] \
       || rpr='; pr: none - commit on a branch, then rebase onto origin/main and push to main (fast-forward only, never force); no PR'
-    printf -- '- repo %s: branch prefix %s, gate `%s`%s%s\n' \
+    # repos[].lane (ws_repo_pr_owner): said only for a repo a lane owns, so
+    # every other line is unchanged.
+    rlane=""
+    [ -z "$(ws_repo_lane "$d" "$r")" ] \
+      || rlane="; its PRs belong to lane \`$(ws_repo_pr_owner "$d" "$r")\` (repos[].lane) - it opens and lands them, and the steward's PR nudges and their reviewers' findings go to it"
+    printf -- '- repo %s: branch prefix %s, gate `%s`%s%s%s\n' \
       "$r" "$(ws_repo_get "$d" "$r" prefix)" "$(ws_repo_get "$d" "$r" gate)" \
-      "${lt:+, linear team $lt}" "$rpr"
+      "${lt:+, linear team $lt}" "$rpr" "$rlane"
   done
   # What this workspace has learned, budgeted (lib/learn.sh). Rendered by a
   # CHILD `cel learn render` rather than by sourcing learn.sh here: learn.sh

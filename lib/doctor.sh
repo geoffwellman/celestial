@@ -295,6 +295,41 @@ doctor_review_post_line() { # <wsdir> <workspace name> -> one warning line or no
   printf '%s: review.post: %s no longer posts verdicts - a reviewer records its verdict with cel solo review and reports it by inbox; on the forge an agent only comments. Remove review.post\n' "$2" "$p"
 }
 
+# A REPO A LANE OWNS (repos[].lane, lib/workspace.sh ws_repo_pr_owner) has to
+# name a lane that is real. One warning per repo whose declared lane is not:
+#   - a value no lane can have (not a string, not a name `cel run solo --lane`
+#     accepts, or one whose mailbox would be cut at 32 characters): ignored,
+#     so the repo's PRs stay with the product's agent;
+#   - a lane with no lane-state record on this box. `cel run solo --lane`
+#     makes .cel/solo/<product>/lane-<lane> (its role file, its remembered
+#     choices) at its first launch, so a name without one was never started
+#     here - a typo, or a lane still to start - and the steward hands the
+#     repo's PR nudges back to the product's agent, with a note.
+# Never a failure: the PRs still reach someone.
+doctor_repo_lane_lines() { # <wsdir> <workspace name> -> warning lines, or nothing
+  local wsdir="$1" n="$2" r raw lane p
+  for r in $(ws_repo_names "$wsdir"); do
+    raw="$(_yqr -r --arg n "$r" '.repos // [] | map(select(.name == $n))[0].lane // empty
+      | if type == "string" then . else tojson end' "$wsdir/workspace.yaml" 2>/dev/null)" || raw=""
+    [ -n "$raw" ] || continue
+    p="$(ws_product_of_repo "$wsdir" "$r")"
+    lane="$(ws_repo_lane "$wsdir" "$r")"
+    if [ -z "$lane" ]; then
+      if [ "$raw" != orch ] && [[ "$raw" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+        printf "%s/%s: repos[].lane '%s' makes the mailbox %s, not %s-%s (names are cut to 32 characters), so no lane can have it - ignored: %s's PRs stay with %s-orch. Use a shorter lane name\n" \
+          "$n" "$r" "$raw" "$(cel_alias_norm "$p/$raw")" "$p" "$raw" "$r" "$p"
+      else
+        printf "%s/%s: repos[].lane '%s' is not a lane name (lowercase letters and digits, single dashes between them; not orch) - ignored: %s's PRs stay with %s-orch\n" \
+          "$n" "$r" "$raw" "$r" "$p"
+      fi
+      continue
+    fi
+    [ ! -d "$(ws_solo_dir "$wsdir" "$p")/lane-$lane" ] || continue
+    printf "%s/%s: repos[].lane '%s' is not a lane of %s this box has ever started (no %s) - until it runs, the steward hands %s's PR nudges to %s-orch with a note. Fix the name, or start it: cel run solo --product %s --lane %s\n" \
+      "$n" "$r" "$lane" "$p" "$(ws_solo_dir "$wsdir" "$p")/lane-$lane" "$r" "$p" "$p" "$lane"
+  done
+}
+
 # workspace.local.yaml is allowed to override role_profiles, add
 # worker_profiles and override env: keys (see lib/yaml.sh:_ws_effective_json;
 # the allowed keys are _WS_LOCAL_KEYS there).
@@ -561,6 +596,9 @@ check_workspaces() {
     done < <(doctor_setup_lines "$path" "$n")
     setupline="$(doctor_review_post_line "$path" "$n")"
     [ -z "$setupline" ] || c_warn "$setupline"
+    while IFS= read -r setupline; do
+      [ -z "$setupline" ] || c_warn "$setupline"
+    done < <(doctor_repo_lane_lines "$path" "$n")
 
     doctor_ws_local_summary "$path" "$n"
     doctor_ws_local_lines "$path" "$n" || fail=1

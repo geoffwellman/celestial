@@ -195,8 +195,9 @@ flowchart LR
 
 Choose lanes when one product has two or three large goals that each want one
 agent holding the whole picture, in different parts of the code. Nothing in
-`workspace.yaml` selects a lane: start one with
-`cel run solo --product atlas --lane checkout`. Details:
+`workspace.yaml` starts a lane: start one with
+`cel run solo --product atlas --lane checkout`. A repo one lane owns outright
+can say so (`repos[].lane`), so its PR mail goes to that lane. Details:
 [Solo lanes](#solo-lanes-several-big-goals-one-agent-each).
 
 ### A feature team, led by the product's agent
@@ -609,6 +610,30 @@ by inbox; nothing stops two lanes editing the same file, so give them goals
 that touch different parts of the code. `cel fleet` lists a product's live
 lanes; `/cel-restart` in a lane restarts that lane only.
 
+**A repo one lane owns.** When a lane is the only agent that works in one of
+the product's repos, say so in the committed `workspace.yaml`, with the name
+`--lane` takes:
+
+```yaml
+repos:
+  - name: atlas-checkout-ui # one of atlas's repos
+    lane: checkout          # its PRs are atlas-checkout's, not atlas-orch's
+```
+
+Then everything about that repo's PRs goes to the lane's mailbox
+(`<product>-<lane>`), not the product's main agent: every steward nudge
+(approved and green - land it; a recorded `changes` verdict; changes requested
+on the forge; failing checks; no ticket in the branch name) and the findings
+of every reviewer of its PRs, whoever started that reviewer. One function
+answers "who owns this repo's PRs" for all of them (`ws_repo_pr_owner`), and
+the rendered policy names the lane on the repo's line. While the lane is not
+running (its name in its own `.cel/solo/<product>/lane-<lane>`), the steward
+sends its nudges to `<product>-orch` instead, and the first one for each PR
+head says so: which lane, that it is not running, and how to start it.
+`workspace.local.yaml` cannot set or move it - it is the team's contract.
+`cel doctor` warns about a value no lane can have, and about a lane this box
+has never started (no `.cel/solo/<product>/lane-<lane>`).
+
 A lane remembers explicitly named `--profile` and `--model` choices only after
 a successful launch; a bare `--restart` keeps those saved choices. An
 explicit new profile clears the old model override unless you also name a new
@@ -930,7 +955,8 @@ Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
   <sha> --by <alias>` (an approval must equal the PR's current head; verdicts
   live in `<ws>/.cel/solo-reviews.json`, an extra reviewer's under
   `<repo>#<n>/review-<focus>`) and sends findings to
-  `<product>-orch`. The solo agent itself can never record a verdict on its
+  `<product>-orch` (the lane that started it, or the lane the repo declares
+  with [`repos[].lane`](#solo-lanes-several-big-goals-one-agent-each)). The solo agent itself can never record a verdict on its
   own PR, and only it (or a person) lands one - not a reviewer;
 - `cel solo land <repo>#<n>` merges with the checks in `lib/land.sh`:
   `merge: self`, the workspace account's own open non-draft
@@ -1471,7 +1497,7 @@ Each tick, in order:
 | Step | What it does |
 |---|---|
 | **garbage collect** | retains dirty, unlanded, live or unverifiable work; retires only ownership-verified agents observed idle, never merely old processes |
-| **review sweep** | for each repo, `gh pr list --author @me`: approved PRs, changes-requested with nobody working, and red gates with nobody working each nudge the owning product agent |
+| **review sweep** | for each repo, `gh pr list --author @me`: approved PRs, changes-requested with nobody working, and red gates with nobody working each nudge the PR's owner - the product agent, or the lane the repo declares (`repos[].lane`; the product agent, with a note once per head, while that lane is not running) |
 | **untracked PRs** | a PR older than a day whose branch carries no ticket id — invisible on the board, so it is surfaced |
 | **blocked agents** | any agent waiting on input is named every tick, deliberately without dedup; that is your queue |
 | **stalled agents** | an agent whose provider stream died sends no mail and reads as `idle`; a fatal pane marker quiet for 15 minutes, or an agent gone from the roster, escalates to root naming the pane, stall age, and what is unpushed |
