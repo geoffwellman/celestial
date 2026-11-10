@@ -647,9 +647,30 @@ review, not a detail. Nothing here is a branch, so there is nothing to push.
 EOF
 }
 
+# IS A LANE RUNNING: its own name standing in its own directory
+# (.cel/solo/<product>/lane-<lane>, or below it - never a deleted one), as
+# `cel mode` reads it. 0 running, 1 not, 2 when the roster could not be read,
+# which proves nothing either way. The steward's PR nudges
+# (lib/steward.sh _steward_pr_nudge) and the reviewer brief below ask it.
+run_lane_running() { # <wsdir> <product> <lane> <agents-json>
+  printf '%s' "$4" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 2
+  printf '%s' "$4" | jq -e --arg n "$(_run_agent_name "$2/$3")" --arg d "$(ws_solo_dir "$1" "$2")/lane-$3" \
+    'any(.result.agents[]; .name == $n and ((.pane_id // "") != "")
+       and ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/"))))' >/dev/null 2>&1 || return 1
+}
+
 # WHOSE PR THIS IS AND HOW IT SHIPS: the product's solo agent wrote it, so
 # the reviewer's verdict and findings go to that agent, and the PR lands with
 # `cel solo land` on exactly the head that verdict approved.
+#
+# A LANE THAT IS DOWN AS THE REVIEW STARTS still gets the findings: they are
+# its work, and its mailbox keeps them until it runs. Resolving to the
+# product agent instead would move the whole review conversation away from
+# the PR's owner for good - the brief is written once, at launch, while a
+# lane comes back. So the reviewer also copies its verdict line to
+# `<product>-orch` saying the lane is down - the steward's lane-down note,
+# from the reviewer - and the PR is not stranded meanwhile. An unreadable
+# roster proves nothing: no copy.
 _run_reviewer_solo_brief() { # <wsdir> <repo> <pr> [focus] [kind]
   local product; product="$(ws_product_of_repo "$1" "$2")"
   # Findings go to whoever owns the repo's PRs (ws_repo_pr_owner): the lane a
@@ -659,6 +680,16 @@ _run_reviewer_solo_brief() { # <wsdir> <repo> <pr> [focus] [kind]
   local starter="" author me="<your alias>" fflag="" verdicts="approved|changes" ev=""
   [ "${CEL_ROLE:-}" = solo ] && [ -n "${CEL_INBOX_ME:-}" ] && starter="$CEL_INBOX_ME"
   author="$(ws_repo_pr_owner "$1" "$2" "$starter")"
+  local lane down="" rc=0
+  lane="$(ws_repo_lane "$1" "$2")"
+  if [ -n "$lane" ]; then
+    run_lane_running "$1" "$product" "$lane" "$(cel_agent_list 2>/dev/null)" || rc=$?
+    [ "$rc" != 1 ] || down="
+- \`$author\` is not running as this review starts (it owns $2's PRs,
+  repos[].lane); your mail waits in its mailbox until it does. So also
+  copy your verdict line to \`$product-orch\` by \`cel inbox send\`, with
+  one line saying \`$author\` is down."
+  fi
   if [ "${5:-review}" = qa ]; then
     me="$(review_alias "$2" "$3" "$4" qa)"; fflag=" --qa $4"; verdicts="approved|changes|blocked"
     ev=" --evidence <file> [--evidence <file>]..."
@@ -673,7 +704,7 @@ _run_reviewer_solo_brief() { # <wsdir> <repo> <pr> [focus] [kind]
   \`cel solo review $2#$3 <$verdicts> --head <reviewed-sha> --by $me$fflag$ev --note "<one line>"\`
   (the full 40-character SHA you read; an approval must equal
   the PR's current head);
-- send findings and your verdict to \`$author\` by \`cel inbox send\`.
+- send findings and your verdict to \`$author\` by \`cel inbox send\`.$down
 It merges with \`cel solo land $2#$3\`, which honours only your recorded
 approval of the exact head it merges.
 EOF

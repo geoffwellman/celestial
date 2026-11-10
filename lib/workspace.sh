@@ -726,8 +726,17 @@ ws_policy_block() { # <wsdir> [product]
   local rrt rmodel
   rrt="$(ws_review "$d" runtime)"; rmodel="$(ws_review "$d" model)"
   if [ -n "$rrt$rmodel" ]; then
-    printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (pi%s, one pane per PR); it sends findings to you (`%s-orch`). Fix them on the same branch, push, and tell it the new head to re-review\n' \
-      "${rmodel:+ model $rmodel}" "$p"
+    # A repo a lane owns (repos[].lane, ws_repo_pr_owner) sends its reviewers'
+    # findings to that lane, whoever started them - said here, where every
+    # agent reads where findings go. Nothing is added when no repo has one.
+    local owned="" rl
+    for r in $(ws_repo_names "$d"); do
+      [ -n "$(ws_repo_lane "$d" "$r")" ] || continue
+      rl="on $r, to lane \`$(ws_repo_pr_owner "$d" "$r")\`"
+      owned="${owned:+$owned; }$rl"
+    done
+    printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (pi%s, one pane per PR); it sends findings to you (`%s-orch`)%s. Fix them on the same branch, push, and tell it the new head to re-review\n' \
+      "${rmodel:+ model $rmodel}" "$p" "${owned:+ - except on a repo a lane owns, whoever started the reviewer: $owned}"
     # An agent's verdict is never posted to the forge (lib/guard.sh refuses it
     # in every role); `review.post` no longer does anything (cel doctor says so).
     printf -- '- review verdicts: recorded by the reviewer with `cel solo review <repo>#<n> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"` and reported by inbox; no agent posts a verdict to the forge (comments only)\n'

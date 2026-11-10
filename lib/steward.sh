@@ -387,15 +387,16 @@ _steward_remind() { # <ws> <who> <fp> <kind> <message>
 # message; the runtime controls when it can be delivered to an agent turn.
 _steward_nudge() { # <mailbox> <workspace> <key> <message>
   _steward_due "$3" || return 0
-  _steward_mail "$@"
+  _steward_mail "$@" || return 0
 }
-_steward_mail() { # <mailbox> <workspace> <key> <message> - sent now, no window
+_steward_mail() { # <mailbox> <workspace> <key> <message> - sent now, no window; 1 when the send failed
   local kind=status
   case "$3" in *-blocked) kind=blocked ;; esac
   if cmd_inbox send "$1" "$4" --from steward --workspace "$2" --kind "$kind" >/dev/null 2>&1; then
     c_ok "mailed $1: $4"
   else
     c_warn "wanted to mail $1 (inbox send failed): $4"
+    return 1
   fi
 }
 
@@ -408,29 +409,31 @@ _steward_mail() { # <mailbox> <workspace> <key> <message> - sent now, no window
 # sit unread, so the nudge goes to the product's agent instead - and the
 # first one for each head says why (the lane, that it is not running, how to
 # start it), so the re-route is never silent and never repeated for a head.
-# Running means the lane's own name standing in its own directory
-# (.cel/solo/<product>/lane-<lane>, not a deleted one), as `cel mode` reads
-# it. A roster that could not be read proves nothing: the lane's mailbox,
-# which keeps the mail until it starts.
+# The note counts as said only once a send carrying it succeeded: a failed
+# send leaves it owed to the next nudge for that head.
+# Running is run_lane_running (lib/run.sh). A roster that could not be read
+# proves nothing: the lane's mailbox, which keeps the mail until it starts.
 _steward_pr_nudge() { # <wsdir> <ws> <repo> <pr> <head> <agents-json> <key> <message>
   local wsdir="$1" ws="$2" repo="$3" pr="$4" head="$5" agents="$6" key="$7" msg="$8"
-  local owner lane product dir
+  local owner lane product note="" rc=0
   owner="$(ws_repo_pr_owner "$wsdir" "$repo")"
   lane="$(ws_repo_lane "$wsdir" "$repo")"
   _steward_due "$key" || return 0
-  if [ -n "$lane" ] && printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1; then
+  if [ -n "$lane" ]; then
     product="$(ws_product_of_repo "$wsdir" "$repo")"
-    dir="$(ws_solo_dir "$wsdir" "$product")/lane-$lane"
-    if ! printf '%s' "$agents" | jq -e --arg n "$owner" --arg d "$dir" \
-      'any(.result.agents[]; .name == $n and ((.pane_id // "") != "")
-         and ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/"))))' >/dev/null 2>&1; then
-      if _STEWARD_WINDOW=999999999 _steward_due "lane-down-$ws-$repo-$pr-${head:0:12}"; then
+    run_lane_running "$wsdir" "$product" "$lane" "$agents" || rc=$?
+    if [ "$rc" = 1 ]; then
+      note="lane-down-$ws-$repo-$pr-${head:0:12}"
+      if _steward_state_has "$note"; then
+        note=""
+      else
         msg="$msg [$repo#$pr is lane $owner's (repos[].lane), and $owner is not running, so its PR nudges come to you: start it (cel run solo --product $product --lane $lane) or act on it yourself. Said once per head.]"
       fi
       owner="$product-orch"
     fi
   fi
-  _steward_mail "$owner" "$ws" "$key" "$msg"
+  _steward_mail "$owner" "$ws" "$key" "$msg" || return 0
+  [ -z "$note" ] || _STEWARD_WINDOW=999999999 _steward_due "$note" || true
 }
 
 # The steward addresses orchestrators by the name cel run gave them: the same
