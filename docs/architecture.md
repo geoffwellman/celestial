@@ -798,6 +798,34 @@ that head; evidence is copied with sha256 and size) and `lib/preview.sh` (a
 failed stop keeps the record; `preview_sweep` stops a QA preview whose owner
 is no longer live).
 
+### Who owns a repo's PRs (`repos[].lane`)
+
+`ws_repo_pr_owner` (`lib/workspace.sh`) is the one answer to "who owns repo
+R's PRs": the lane `repos[].lane` declares (mailbox `<product>-<lane>`, the
+name `cel run solo --lane` takes), else the product's agent. It reads the
+committed `workspace.yaml` only (`ws_repo_lane`); the `workspace.local.yaml`
+merge keeps only `role_profiles` inside a `repos[]` entry, so no overlay can
+set or move it. A value no lane can have (not a string, not a valid lane name,
+or a mailbox the 32-character cut would change) names no lane. Its callers:
+
+- the steward's per-PR nudges, all through `_steward_pr_nudge`: the review
+  sweep's approved, changes-requested, failing-checks and unticketed nudges
+  and the solo sweep's ready-to-land and recorded-`changes` ones. A declared
+  lane that is not running - no roster agent with its name whose cwd is its
+  own `.cel/solo/<product>/lane-<lane>` - hands the nudge to `<product>-orch`;
+  the first such nudge per PR head (`lane-down-<ws>-<repo>-<pr>-<head>`)
+  carries a note naming the lane and its start command. An unreadable roster
+  proves nothing, so the lane's mailbox keeps the mail;
+- the reviewer brief (`_run_reviewer_solo_brief`, `lib/run.sh`): a reviewer
+  of a lane-owned repo's PR sends findings to that lane whoever started it;
+  elsewhere to the solo agent that started it, else `<product>-orch`;
+- the rendered policy, which names the lane on the repo's line.
+
+`cel solo land` addresses no agent (its refusals name reviewers and start
+commands), so it needs no owner. `doctor_repo_lane_lines` (`lib/doctor.sh`)
+warns about an invalid value and about a lane with no lane-state record
+(`.cel/solo/<product>/lane-<lane>`, made at its first launch).
+
 ## Credentials
 
 Workspace `env:` and gitignored `env.local` layer over the caller's environment.

@@ -387,6 +387,9 @@ _steward_remind() { # <ws> <who> <fp> <kind> <message>
 # message; the runtime controls when it can be delivered to an agent turn.
 _steward_nudge() { # <mailbox> <workspace> <key> <message>
   _steward_due "$3" || return 0
+  _steward_mail "$@"
+}
+_steward_mail() { # <mailbox> <workspace> <key> <message> - sent now, no window
   local kind=status
   case "$3" in *-blocked) kind=blocked ;; esac
   if cmd_inbox send "$1" "$4" --from steward --workspace "$2" --kind "$kind" >/dev/null 2>&1; then
@@ -394,6 +397,40 @@ _steward_nudge() { # <mailbox> <workspace> <key> <message>
   else
     c_warn "wanted to mail $1 (inbox send failed): $4"
   fi
+}
+
+# A PR'S NUDGE GOES TO WHOEVER OWNS THE REPO'S PRS (ws_repo_pr_owner,
+# lib/workspace.sh): the product's agent, or the lane a repo declares
+# (repos[].lane). Every per-PR nudge of the review and solo sweeps comes
+# through here.
+#
+# A LANE THAT IS NOT RUNNING HANDS IT BACK. Mail to a lane nobody runs would
+# sit unread, so the nudge goes to the product's agent instead - and the
+# first one for each head says why (the lane, that it is not running, how to
+# start it), so the re-route is never silent and never repeated for a head.
+# Running means the lane's own name standing in its own directory
+# (.cel/solo/<product>/lane-<lane>, not a deleted one), as `cel mode` reads
+# it. A roster that could not be read proves nothing: the lane's mailbox,
+# which keeps the mail until it starts.
+_steward_pr_nudge() { # <wsdir> <ws> <repo> <pr> <head> <agents-json> <key> <message>
+  local wsdir="$1" ws="$2" repo="$3" pr="$4" head="$5" agents="$6" key="$7" msg="$8"
+  local owner lane product dir
+  owner="$(ws_repo_pr_owner "$wsdir" "$repo")"
+  lane="$(ws_repo_lane "$wsdir" "$repo")"
+  _steward_due "$key" || return 0
+  if [ -n "$lane" ] && printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1; then
+    product="$(ws_product_of_repo "$wsdir" "$repo")"
+    dir="$(ws_solo_dir "$wsdir" "$product")/lane-$lane"
+    if ! printf '%s' "$agents" | jq -e --arg n "$owner" --arg d "$dir" \
+      'any(.result.agents[]; .name == $n and ((.pane_id // "") != "")
+         and ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/"))))' >/dev/null 2>&1; then
+      if _STEWARD_WINDOW=999999999 _steward_due "lane-down-$ws-$repo-$pr-${head:0:12}"; then
+        msg="$msg [$repo#$pr is lane $owner's (repos[].lane), and $owner is not running, so its PR nudges come to you: start it (cel run solo --product $product --lane $lane) or act on it yourself. Said once per head.]"
+      fi
+      owner="$product-orch"
+    fi
+  fi
+  _steward_mail "$owner" "$ws" "$key" "$msg"
 }
 
 # The steward addresses orchestrators by the name cel run gave them: the same
@@ -704,7 +741,7 @@ _steward_owner_prs() { # <ws>
 _STEWARD_JQ_LEFT_ALONE='def left_alone: any(.[]?; strings | ascii_downcase | . == "superseded" or . == "hold");'
 
 _steward_review_sweep() { # <agents-json>
-  local agents_json="$1" ws wsdir repo slug orch prsj ref
+  local agents_json="$1" ws wsdir repo slug prsj ref
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   # Owner cards (_steward_owner_prs) silence the red, changes-requested and
   # no-worker nudges for their PRs. Read once per workspace.
@@ -720,20 +757,9 @@ _steward_review_sweep() { # <agents-json>
       slug="$(ws_repo_get "$wsdir" "$repo" url \
               | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
       [ -n "$slug" ] || continue
-      # Address the orchestrator by the alias cel run gave it; when that name
-      # is not registered (started by hand), fall back to whichever agent
-      # pane lives in the repo checkout.
-      # THE PRODUCT'S orchestrator, not the repo's: a repo inside a declared
-      # product has no pane of its own.
-      local prod; prod="$(ws_product_of_repo "$wsdir" "$repo")"
-      orch="$(_run_agent_name "$prod-orch")"
-      local fallback
-      fallback="$(printf '%s' "$agents_json" | jq -r --arg d "$(_steward_orch_dir "$wsdir" "$prod-orch")" \
-        '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"
-      if ! printf '%s' "$agents_json" | jq -e --arg n "$orch" \
-        'any(.result.agents[]?; .name == $n and .backend == "rex")' >/dev/null 2>&1; then
-        herdr agent get "$orch" >/dev/null 2>&1 || { [ -n "$fallback" ] && orch="$fallback"; }
-      fi
+      # THE PR'S OWNER, not the repo's orchestrator: a repo inside a declared
+      # product has no pane of its own, so its PRs are the product agent's -
+      # or the lane's the repo declares (_steward_pr_nudge, ws_repo_pr_owner).
       # ONLY OUR OWN PRs. Every PR a solo agent opens is authored by the
       # token cel runs under, so `--author @me` is the ownership line; a
       # colleague's PR must never be nudged into "action it now".
@@ -762,8 +788,8 @@ _steward_review_sweep() { # <agents-json>
       tprefix="$(ws_repo_prefixes "$wsdir" "$repo" | paste -sd'|' -)"
       tcanon="$(ws_repo_get "$wsdir" "$repo" prefix)"
       if [ "$(ws_ticket "$wsdir" system)" = "linear" ] && [ -n "$tprefix" ]; then
-        local unum ubranch uage
-        while IFS=$'\t' read -r unum ubranch uage; do
+        local unum ubranch uage uhead
+        while IFS=$'\t' read -r unum ubranch uage uhead; do
           [ -n "$unum" ] || continue
           # An `if`, not `grep ... && continue`: under set -e the && form
           # returns non-zero exactly when the branch has NO ticket, which is
@@ -773,28 +799,28 @@ _steward_review_sweep() { # <agents-json>
           # count as ticketed.
           if printf '%s' "$ubranch" | grep -qiE "(${tprefix})-[0-9]+"; then continue; fi
           [ "$(( ( $(date +%s) - $(date -d "$uage" +%s 2>/dev/null || date +%s) ) / 86400 ))" -ge 1 ] || continue
-          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$unum-noticket" \
+          _steward_pr_nudge "$wsdir" "$(ws_name "$wsdir")" "$repo" "$unum" "$uhead" "$agents_json" "$slug#$unum-noticket" \
             "steward: PR #$unum on $repo ($ubranch) has no $tcanon ticket in its branch name, so Linear cannot link it and it is invisible on the board. Find or create the ticket (cel-linear search / create), comment the PR link on it, and set its state. Name future branches ${tcanon}-<n>-<slug>."
-        done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt] | @tsv')
+        done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt, (.headRefOid // "-")] | @tsv')
       fi
 
-      # THE PRODUCT'S OWN AGENT opened the PR and fixes it on the branch:
-      # the nudge goes to it, never to a worker it does not have.
-      local num branch review failing
-      while IFS=$'\t' read -r num branch review failing; do
+      # THE PR'S OWN AGENT opened it and fixes it on the branch: the nudge
+      # goes to it, never to a worker it does not have.
+      local num branch review failing head
+      while IFS=$'\t' read -r num branch review failing head; do
         [ -n "$num" ] || continue
         failing="${failing:-0}"
         if [ "$review" != "APPROVED" ] && [ -n "${owner_prs["$repo#$num"]:-}" ]; then continue; fi
         if [ "$review" = "APPROVED" ]; then
-          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-approved" \
+          _steward_pr_nudge "$wsdir" "$(ws_name "$wsdir")" "$repo" "$num" "$head" "$agents_json" "$slug#$num-approved" \
             "steward: PR #$num on $repo is APPROVED - action it now (merge per policy, or surface for the human)."
           continue
         fi
         if [ "$review" = "CHANGES_REQUESTED" ]; then
-          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-changes" \
+          _steward_pr_nudge "$wsdir" "$(ws_name "$wsdir")" "$repo" "$num" "$head" "$agents_json" "$slug#$num-changes" \
             "steward: PR #$num on $repo has changes requested at its current head - address them on $branch, push, and ask its reviewer to re-review (cel run reviewer --repo $repo --pr $num if none is running)."
         elif [ "$failing" -gt 0 ]; then
-          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-red" \
+          _steward_pr_nudge "$wsdir" "$(ws_name "$wsdir")" "$repo" "$num" "$head" "$agents_json" "$slug#$num-red" \
             "steward: PR #$num on $repo has FAILING checks on $branch - a red gate is a finding: fix it on the branch and push."
         fi
       done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) |
@@ -815,7 +841,8 @@ _steward_review_sweep() { # <agents-json>
                     and (.submittedAt // "") > ($cr.submittedAt // ""))] | length == 0)
                then "CHANGES_REQUESTED" else "NONE" end)
             else "NONE" end),
-         ([.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length)]
+         ([.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length),
+         (.headRefOid // "-")]
         | @tsv')
     done
   done
@@ -831,14 +858,18 @@ _steward_review_sweep() { # <agents-json>
 # solo review` in the workspace's .cel/solo-reviews.json, and that verdict
 # never reaches the forge - so a `changes` verdict is invisible to the review
 # sweep above, and an agent that missed the reviewer's mail leaves the PR
-# sitting. The product's agent is told once per head when the verdict on
+# sitting. The PR's own agent is told once per head when the verdict on
 # record is `changes` at the PR's CURRENT head: a push since means the verdict
 # no longer covers the head (nothing to say until the reviewer records the new
 # one), and a `changes` verdict at the new head is a new key, a new nudge.
 # It is silenced exactly as the review sweep is: an open owner card on the PR,
 # or a `hold`/`superseded` label.
-_steward_solo_sweep() {
-  local ws wsdir product repo pr head by note owner
+#
+# Both go to whoever owns the repo's PRs - the product's agent, or the lane
+# the repo declares, handed back while it is not running (_steward_pr_nudge);
+# with no readable roster the lane's mailbox keeps them.
+_steward_solo_sweep() { # [agents-json]
+  local agents_json="${1:-}" ws wsdir product repo pr head by note owner
   # shellcheck source=lib/solo.sh
   . "${BASH_SOURCE[0]%/*}/solo.sh"
   for ws in $(registry_names); do
@@ -851,7 +882,7 @@ _steward_solo_sweep() {
         [ -n "$pr" ] || continue
         # ONCE PER HEAD, NOT ONCE PER WINDOW: the default dedup window is four
         # hours, which would re-mail the same fact all day while the PR sits.
-        _STEWARD_WINDOW=999999999 _steward_nudge "$product-orch" "$ws" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
+        _STEWARD_WINDOW=999999999 _steward_pr_nudge "$wsdir" "$ws" "$repo" "$pr" "$head" "$agents_json" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
           "steward: $repo#$pr is approved at its current head and every check is green - land it: cel solo land $repo#$pr"
       done < <(solo_ready_prs "$wsdir" "$product")
       # the owner cards are read once per workspace, and only when there is
@@ -860,7 +891,7 @@ _steward_solo_sweep() {
       [ -n "$owner" ] || owner="$(_steward_owner_prs "$ws")"$'\n'
       while IFS=$'\t' read -r repo pr head by note; do
         [ -n "$pr" ] || continue
-        _STEWARD_WINDOW=999999999 _steward_nudge "$product-orch" "$ws" "$(_steward_solo_changes_key "$ws" "$repo" "$pr" "$head")" \
+        _STEWARD_WINDOW=999999999 _steward_pr_nudge "$wsdir" "$ws" "$repo" "$pr" "$head" "$agents_json" "$(_steward_solo_changes_key "$ws" "$repo" "$pr" "$head")" \
           "steward: $repo#$pr has a recorded \`changes\` verdict from $by at its current head ${head:0:12}${note:+ (\"$note\")} and nothing was pushed since - address it on the PR's branch, push, and ask $by to re-review the new head."
       done < <(_steward_solo_changes "$ws" "$wsdir" "$product" "$owner")
     done
@@ -2209,7 +2240,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_sample "$agents_json"
 
   _steward_review_sweep "$agents_json"
-  _steward_solo_sweep
+  _steward_solo_sweep "$agents_json"
   # feature teams: reservations nobody confirmed, verdicts a newer candidate
   # outdated - the lead is told; nothing is retired
   _steward_team_sweep

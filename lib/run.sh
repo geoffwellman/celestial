@@ -652,10 +652,13 @@ EOF
 # `cel solo land` on exactly the head that verdict approved.
 _run_reviewer_solo_brief() { # <wsdir> <repo> <pr> [focus] [kind]
   local product; product="$(ws_product_of_repo "$1" "$2")"
-  # Findings go to the solo agent that asked for this reviewer: the product's
-  # main agent, or the lane that opened the PR.
-  local author="$product-orch" me="<your alias>" fflag="" verdicts="approved|changes" ev=""
-  [ "${CEL_ROLE:-}" = solo ] && [ -n "${CEL_INBOX_ME:-}" ] && author="$CEL_INBOX_ME"
+  # Findings go to whoever owns the repo's PRs (ws_repo_pr_owner): the lane a
+  # repo declares (repos[].lane), whoever started this reviewer; else the solo
+  # agent that asked for it - the product's main agent, or the lane that
+  # opened the PR.
+  local starter="" author me="<your alias>" fflag="" verdicts="approved|changes" ev=""
+  [ "${CEL_ROLE:-}" = solo ] && [ -n "${CEL_INBOX_ME:-}" ] && starter="$CEL_INBOX_ME"
+  author="$(ws_repo_pr_owner "$1" "$2" "$starter")"
   if [ "${5:-review}" = qa ]; then
     me="$(review_alias "$2" "$3" "$4" qa)"; fflag=" --qa $4"; verdicts="approved|changes|blocked"
     ev=" --evidence <file> [--evidence <file>]..."
