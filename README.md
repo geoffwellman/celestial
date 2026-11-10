@@ -626,10 +626,13 @@ Then everything about that repo's PRs goes to the lane's mailbox
 on the forge; failing checks; no ticket in the branch name) and the findings
 of every reviewer of its PRs, whoever started that reviewer. One function
 answers "who owns this repo's PRs" for all of them (`ws_repo_pr_owner`), and
-the rendered policy names the lane on the repo's line. While the lane is not
-running (its name in its own `.cel/solo/<product>/lane-<lane>`), the steward
-sends its nudges to `<product>-orch` instead, and the first one for each PR
-head says so: which lane, that it is not running, and how to start it.
+the rendered policy names the lane on the repo's line and in its review line.
+While the lane is not running (its name in its own
+`.cel/solo/<product>/lane-<lane>`), the steward sends its nudges to
+`<product>-orch` instead, and the first one for each PR head says so: which
+lane, that it is not running, and how to start it. A reviewer started while
+the lane is down still sends its findings to the lane, whose mailbox keeps
+them, and copies its verdict line to `<product>-orch` saying the lane is down.
 `workspace.local.yaml` cannot set or move it - it is the team's contract.
 `cel doctor` warns about a value no lane can have, and about a lane this box
 has never started (no `.cel/solo/<product>/lane-<lane>`).

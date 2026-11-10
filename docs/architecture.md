@@ -811,15 +811,21 @@ or a mailbox the 32-character cut would change) names no lane. Its callers:
 - the steward's per-PR nudges, all through `_steward_pr_nudge`: the review
   sweep's approved, changes-requested, failing-checks and unticketed nudges
   and the solo sweep's ready-to-land and recorded-`changes` ones. A declared
-  lane that is not running - no roster agent with its name whose cwd is its
-  own `.cel/solo/<product>/lane-<lane>` - hands the nudge to `<product>-orch`;
-  the first such nudge per PR head (`lane-down-<ws>-<repo>-<pr>-<head>`)
-  carries a note naming the lane and its start command. An unreadable roster
-  proves nothing, so the lane's mailbox keeps the mail;
+  lane that is not running (`run_lane_running`, `lib/run.sh`: no roster agent
+  with its name whose cwd is its own `.cel/solo/<product>/lane-<lane>`) hands
+  the nudge to `<product>-orch`; the first such nudge per PR head carries a
+  note naming the lane and its start command, and the note is recorded as
+  said (`lane-down-<ws>-<repo>-<pr>-<head>`) only after that send succeeded.
+  An unreadable roster proves nothing, so the lane's mailbox keeps the mail;
 - the reviewer brief (`_run_reviewer_solo_brief`, `lib/run.sh`): a reviewer
   of a lane-owned repo's PR sends findings to that lane whoever started it;
-  elsewhere to the solo agent that started it, else `<product>-orch`;
-- the rendered policy, which names the lane on the repo's line.
+  elsewhere to the solo agent that started it, else `<product>-orch`. When
+  the lane is not running at reviewer start, the findings still go to the
+  lane (its work; its mailbox keeps them, and the brief is written once while
+  a lane comes back) and the brief also asks for the verdict line to be
+  copied to `<product>-orch` saying the lane is down;
+- the rendered policy, which names the lane on the repo's line and in the
+  `pr review` line.
 
 `cel solo land` addresses no agent (its refusals name reviewers and start
 commands), so it needs no owner. `doctor_repo_lane_lines` (`lib/doctor.sh`)

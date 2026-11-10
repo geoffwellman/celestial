@@ -192,10 +192,54 @@ test_solo_sweep_falls_back_to_the_product_agent_with_a_note_once_per_head() {
 test_reviewer_of_a_lane_owned_repo_sends_findings_to_the_lane() {
   _lo_ws
   source "$CEL_ROOT/lib/run.sh"
+  cel_agent_list() { printf '%s' "$LANE_UP"; }
   assert_contains "$(CEL_ROLE=solo CEL_INBOX_ME=bundle-orch _run_reviewer_solo_brief "$T" widget 7)" "send findings and your verdict to \`bundle-ui\`"
   assert_contains "$(CEL_ROLE='' CEL_INBOX_ME='' _run_reviewer_solo_brief "$T" widget 7)" "send findings and your verdict to \`bundle-ui\`"
   assert_contains "$(CEL_ROLE=solo CEL_INBOX_ME=bundle-api _run_reviewer_solo_brief "$T" gadget 4)" "send findings and your verdict to \`bundle-api\`"
   assert_contains "$(CEL_ROLE='' CEL_INBOX_ME='' _run_reviewer_solo_brief "$T" gadget 4)" "send findings and your verdict to \`bundle-orch\`"
+  rm -rf "$T"
+}
+
+# THE LANE IS DOWN AS THE REVIEW STARTS: the findings still go to the lane -
+# its mailbox keeps them until it runs, and they are its work - and the
+# reviewer also copies its verdict line to the product agent, saying the lane
+# is down, so the re-route is visible and the PR is not stranded. A roster
+# that cannot be read proves nothing: no copy.
+test_reviewer_of_a_down_lanes_repo_names_the_lane_and_copies_the_product_agent() {
+  _lo_ws
+  source "$CEL_ROOT/lib/run.sh"
+  local b
+  cel_agent_list() { printf '%s' "$LANE_DOWN"; }
+  b="$(CEL_ROLE='' CEL_INBOX_ME='' _run_reviewer_solo_brief "$T" widget 7)"
+  assert_contains "$b" "send findings and your verdict to \`bundle-ui\`" || { rm -rf "$T"; return 1; }
+  assert_contains "$b" "\`bundle-ui\` is not running" || { echo "$b"; rm -rf "$T"; return 1; }
+  assert_contains "$b" "copy your verdict line to \`bundle-orch\`" || { echo "$b"; rm -rf "$T"; return 1; }
+  # a repo no lane owns: no copy, whatever the roster says
+  case "$(_run_reviewer_solo_brief "$T" gadget 4)" in *"copy your verdict"*) echo "a copy asked for on a repo no lane owns"; rm -rf "$T"; return 1 ;; esac
+  # the lane is running: no copy
+  cel_agent_list() { printf '%s' "$LANE_UP"; }
+  case "$(_run_reviewer_solo_brief "$T" widget 7)" in *"copy your verdict"*) echo "a copy asked for while the lane runs"; rm -rf "$T"; return 1 ;; esac
+  # an unreadable roster: the lane, no copy
+  cel_agent_list() { return 1; }
+  b="$(_run_reviewer_solo_brief "$T" widget 7)"
+  assert_contains "$b" "send findings and your verdict to \`bundle-ui\`" || { rm -rf "$T"; return 1; }
+  case "$b" in *"copy your verdict"*) echo "an unreadable roster read as a down lane"; rm -rf "$T"; return 1 ;; esac
+  rm -rf "$T"
+}
+
+# A lane-down note is said once per head - but only once it has been SAID: a
+# send that fails leaves it owed, so the next nudge for that head carries it.
+test_a_failed_send_does_not_spend_the_lane_down_note() {
+  _lo_ws
+  _lo_gh "[$(_lo_pr 9 WG-3-c h9 "" 1)]" "[]"
+  cmd_inbox() { return 1; }
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LANE_DOWN" >/dev/null 2>&1
+  if grep -q '^lane-down-' "$T/state" 2>/dev/null; then echo "the note was marked sent by a failed send"; rm -rf "$T"; return 1; fi
+  cmd_inbox() { printf '%s\n' "$*" >> "$T/mail"; }
+  sed -i '/#9-red /d' "$T/state"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LANE_DOWN" >/dev/null
+  assert_contains "$(cat "$T/mail")" "not running" || { cat "$T/mail"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/state")" "lane-down-" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
@@ -204,6 +248,19 @@ test_policy_block_says_which_lane_owns_a_repos_prs() {
   _lo_ws
   assert_contains "$(ws_policy_block "$T" | grep '^- repo widget:')" "its PRs belong to lane \`bundle-ui\`"
   case "$(ws_policy_block "$T" | grep '^- repo gadget:')" in *lane*) echo "a lane named on a repo no lane owns"; rm -rf "$T"; return 1 ;; esac
+  rm -rf "$T"
+}
+
+# The policy's review line, read by every agent, says where findings go on a
+# repo a lane owns - never only "to you (<product>-orch)".
+test_policy_review_line_names_the_lane_for_its_repo() {
+  _lo_ws
+  yq -y '.review = {model: "sonnet"}' "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
+  local line; line="$(ws_policy_block "$T" | grep '^- pr review:')"
+  assert_contains "$line" "on widget, to lane \`bundle-ui\`" || { echo "$line"; rm -rf "$T"; return 1; }
+  yq -y 'del(.repos[] | select(.name == "widget") | .lane)' "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
+  line="$(ws_policy_block "$T" | grep '^- pr review:')"
+  case "$line" in *lane*) echo "a lane named with none declared: $line"; rm -rf "$T"; return 1 ;; esac
   rm -rf "$T"
 }
 
