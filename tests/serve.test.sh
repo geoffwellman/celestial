@@ -283,6 +283,50 @@ test_serve_an_agent_name_as_an_argument_is_still_a_preview() {
   _serve_not_a_preview 0 "/usr/bin/node /opt/omp/bin/omp --hook x" || { echo "missed omp under node"; return 1; }
 }
 
+# AN AGENT'S VERIFICATION BROWSER IS NOT A PREVIEW. A headless Chrome an agent
+# harness drives (omp's broker, pi, claude, opencode) listens on a loopback
+# DevTools port, so it used to be reported as an unledgered dev server every
+# tick. A Chrome under an agent runtime, or one whose only listener is its
+# own --remote-debugging-port, is excluded; a real dev server is reported
+# whatever cgroup scope or parent it runs in.
+test_serve_agent_harness_browsers_are_not_unledgered_servers() {
+  local t out; t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_PROC_ROOT="$t/proc" CEL_SERVE_SYSTEMCTL="$t/systemctl"
+  export CEL_CONFIG_FILE="$t/config.yaml" CEL_SERVE_ADOPT_DATA='[]' CEL_SERVE_PROC_DATA=''
+  mkdir -p "$CEL_SERVE_STATE" "$CEL_SERVE_PROC_ROOT"
+  printf '{}\n' > "$CEL_CONFIG_FILE"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
+  local chrome="/home/u/.omp/puppeteer/chrome/linux-1/chrome-linux64/chrome"
+  local scope="/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.chromium.Chromium-%s.scope"
+  _serve_fake_proc() { # <pid> <ppid> <port|-> <argv...>; port - means not listening
+    local pid="$1" ppid="$2" port="$3" d; shift 3; d="$CEL_SERVE_PROC_ROOT/$pid"
+    mkdir -p "$d"
+    printf 'Name:\tx\nPPid:\t%s\n' "$ppid" > "$d/status"
+    printf '%s\0' "$@" > "$d/cmdline"
+    # shellcheck disable=SC2059
+    printf "0::$scope\n" "$pid" > "$d/cgroup"
+    [ "$port" = - ] || CEL_SERVE_PROC_DATA+="$pid"$'\t'"$port"$'\t4096\t60\t/w/app\t'"$*"$'\n'
+  }
+  _serve_fake_proc 2000 1 - omp __omp_worker_daemon_broker
+  # the broker's headless Chrome on a loopback DevTools port
+  _serve_fake_proc 2001 2000 41235 "$chrome" --headless=new --remote-debugging-port=0 --user-data-dir=/tmp/p
+  # a Chrome two levels under claude (node script host), no DevTools flag
+  _serve_fake_proc 2010 1 - /usr/bin/node /opt/claude/bin/claude
+  _serve_fake_proc 2011 2010 - bash -c run
+  _serve_fake_proc 2012 2011 9999 /usr/lib/chromium/chromium --headless
+  # an orphaned Chrome, agent gone: only its DevTools port listens
+  _serve_fake_proc 2020 1 9222 "$chrome" --headless --remote-debugging-port=9222
+  # an orphaned Chrome serving something other than DevTools stays reported
+  _serve_fake_proc 2021 1 8080 /usr/bin/google-chrome --remote-debugging-port=9223
+  # a real dev server inside a Chromium scope, and one an agent started
+  _serve_fake_proc 2030 1 5173 node node_modules/.bin/vite --port 5173
+  _serve_fake_proc 2031 2000 5174 node node_modules/.bin/vite --port 5174
+  out="$(serve_adopt_json)"
+  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[2021,2030,2031]'
+  unset CEL_SERVE_STATE CEL_SERVE_PROC_ROOT CEL_SERVE_SYSTEMCTL CEL_CONFIG_FILE CEL_SERVE_ADOPT_DATA CEL_SERVE_PROC_DATA
+  rm -rf "$t"
+}
+
 test_serve_records_request_activity_for_idle_deadline() {
   local t
   t="$(mktemp -d)"
