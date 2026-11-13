@@ -558,9 +558,10 @@ ws_product_get() { # <wsdir> <product> <key>
     "$1/workspace.yaml"
 }
 
-# THE EFFECTIVE ORCHESTRATOR MODE FOR ONE PRODUCT, AND WHERE IT CAME FROM.
-# `up`, `status`, the dry run and the steward all ask this and nothing else,
-# so they cannot derive the mode by different routes and disagree.
+# THE EFFECTIVE ORCHESTRATOR MODE FOR EVERY PRODUCT, AND WHERE IT CAME FROM.
+# `up`, `status`, the dry run, the steward and `cel fleet` all ask this (or
+# ws_orchestrator_mode, its one-product form) and nothing else, so they cannot
+# derive the mode by different routes and disagree.
 #
 # Precedence: products[].orchestrator, then layout.orchestrators, then the
 # default. Any of auto|manual|none wins at each level - a product may opt IN,
@@ -572,22 +573,38 @@ ws_product_get() { # <wsdir> <product> <key>
 # agent off (source `workspace.local.yaml`). The merge (lib/yaml.sh) carries
 # only that value, so a local auto can never start what a teammate committed
 # as manual; cel doctor names one that tries.
-ws_orchestrator_mode() { # <wsdir> <product> -> "<mode>\t<product|layout|default|workspace.local.yaml>"
-  local own lay mode src
-  own="$(ws_product_get "$1" "$2" orchestrator)"
-  lay="$(ws_layout_declared "$1" orchestrators)"
-  case "$own" in
-    auto|manual|none) mode="$own"; src=product ;;
-    *) case "$lay" in
-         auto|manual|none) mode="$lay"; src=layout ;;
-         *) mode="$(ws_orchestrators_default)"; src=default ;;
-       esac ;;
-  esac
-  if [ "$mode" = auto ] && [ -f "$1/workspace.local.yaml" ] \
-    && [ "$(_yqr_ws -r --arg p "$2" '.products // [] | map(select(.name == $p))[0].orchestrator // "" | tostring' "$1")" = manual ]; then
-    mode=manual; src=workspace.local.yaml
-  fi
-  printf '%s\t%s' "$mode" "$src"
+#
+# ONE READ, ONE jq, HOWEVER MANY PRODUCTS: the committed JSON and the merged
+# view (both cached by lib/yaml.sh) go through a single jq, so a caller that
+# wants every product (`cel fleet`) pays the same as one that wants one.
+# With [product], only that name is answered - declared or not, so an
+# unknown name still falls through to the layout and the default.
+ws_orchestrator_modes() { # <wsdir> [product] -> "<product>\t<mode>\t<product|layout|default|workspace.local.yaml>" per line
+  local basej effj
+  basej="$(_yaml_json "$1/workspace.yaml")" || return 1
+  effj="$(_ws_effective_json "$1")" || return 1
+  jq -rn --slurpfile b "$basej" --slurpfile e "$effj" \
+    --arg one "${2:-}" --arg deflt "$(ws_orchestrators_default)" '
+    def modes: IN("auto", "manual", "none");
+    def own($y; $p): first(($y.products // [])[] | select(.name == $p) | .orchestrator) // "" | tostring;
+    $b[0] as $y
+    | ($y.layout | if type == "object" then (.orchestrators // "") else "" end | tostring) as $lay
+    | ($y.products // []) as $ps
+    | (if $one != "" then [$one]
+       else ($ps | map(.name)) + (($y.repos // [] | map(.name)) - ([$ps[].repos // []] | flatten)) end)[]
+    | . as $p
+    | own($y; $p) as $own
+    | (if ($own | modes) then [$own, "product"]
+       elif ($lay | modes) then [$lay, "layout"]
+       else [$deflt, "default"] end)
+    | if .[0] == "auto" and own($e[0]; $p) == "manual" then ["manual", "workspace.local.yaml"] else . end
+    | [$p] + . | @tsv'
+}
+
+ws_orchestrator_mode() { # <wsdir> <product> -> "<mode>\t<source>" (ws_orchestrator_modes for one product)
+  local line
+  line="$(ws_orchestrator_modes "$1" "$2")" || return 1
+  printf '%s' "${line#*$'\t'}"
 }
 
 # HOW A PRODUCT IS BUILT. `solo`: one agent that plans, builds and ships

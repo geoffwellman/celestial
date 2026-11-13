@@ -56,7 +56,9 @@ that file may set only `me:` and a product's one-way `orchestrator: manual`
 (product, layout or default) is not `none`; `ws_orchestrator_mode` applies it
 only over a committed `auto` and reports source `workspace.local.yaml`. It is
 the one resolver: `cel ws up`, the steward's "set to manual" clear, `cel fleet`
-(`run_orchestrator_candidates` calls it per product) and `cel doctor` all
+(`run_orchestrator_candidates` asks `ws_orchestrator_modes`, which answers
+every product with one read and one jq; `ws_orchestrator_mode` is its
+one-product form) and `cel doctor` all
 agree; a local `auto` over a committed `manual` is dropped and
 `doctor_ws_local_lines` warns. `ws_me` reads
 `me` from `workspace.local.yaml` alone, never from the merged view: a local

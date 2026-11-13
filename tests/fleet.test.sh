@@ -474,6 +474,37 @@ test_fleet_stays_under_its_spawn_budget() {
   return "$rc"
 }
 
+# THE ORCHESTRATOR MODES COST THE SAME FOR TEN PRODUCTS AS FOR ONE. Fleet's
+# candidates ask ws_orchestrator_modes once per workspace, not once per
+# product, so the processes they start do not grow with the product count.
+# Both runs start from a cold YAML cache, so neither borrows the other's work.
+_fleet_n_products() { # <n> -> workspace.yaml with n products, and a local manual
+  local i
+  _fleet_ws_yaml alpha widget >"$T/alpha/workspace.yaml"
+  printf 'layout: { orchestrators: auto }\nproducts:\n' >>"$T/alpha/workspace.yaml"
+  for i in $(seq 1 "$1"); do printf '  - { name: prod-%s, repos: [widget] }\n' "$i" >>"$T/alpha/workspace.yaml"; done
+  printf 'products:\n  - { name: prod-1, orchestrator: manual }\n' >"$T/alpha/workspace.local.yaml"
+}
+test_fleet_orchestrator_modes_cost_does_not_grow_per_product() {
+  _fleet_setup
+  local n one ten rc=0
+  _fleet_spawn_shim
+  for n in 1 10; do
+    _fleet_n_products "$n"
+    : >"$CEL_SPAWN_LOG"
+    CEL_YAML_CACHE="$T/yaml-cache-$n" PATH="$T/shim:$T/bin" \
+      run_orchestrator_candidates alpha "$T/alpha" '{"result":{"agents":[]}}' >"$T/cands-$n"
+    [ "$n" = 1 ] && one="$(_fleet_spawns)" || ten="$(_fleet_spawns)"
+  done
+  assert_eq "$(grep -c '^orchestrator	prod-' "$T/cands-10")" 10 || rc=1
+  assert_eq "$(awk -F'\t' '$2 == "prod-1" { print $5 }' "$T/cands-10")" manual || rc=1
+  assert_eq "$(awk -F'\t' '$2 == "prod-2" { print $5 }' "$T/cands-10")" auto || rc=1
+  assert_eq "$ten" "$one" || {
+    printf 'one product started %s processes, ten started %s\n' "$one" "$ten" >&2; rc=1; }
+  _fleet_teardown
+  return "$rc"
+}
+
 # THE DOCUMENT DOES NOT MOVE. The answer must match this capture of
 # `cel fleet --json` on this fixture, compact and in order, so a field that
 # silently reorders or loses its type fails here. The box, subscriptions and

@@ -438,3 +438,44 @@ test_the_merge_cache_key_is_v4() {
   assert_eq "$(find "$T/cache" -name 'merged-v3-*' | wc -l | tr -d ' ')" "0"
   rm -rf "$T"
 }
+
+# ONE RULE, TWO SHAPES. ws_orchestrator_modes answers every product in one
+# pass and ws_orchestrator_mode one product; across the product, layout and
+# default levels, auto/manual/none, and a local manual over auto and over
+# none, they must agree for every product - and agree with the rule itself.
+test_batch_and_per_product_orchestrator_modes_agree() {
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  local lay p batch want inherit got
+  for lay in '' auto manual none; do
+    yq -y --arg l "$lay" '
+      .products = [{name: "p-auto", orchestrator: "auto"}, {name: "p-manual", orchestrator: "manual"},
+                   {name: "p-none", orchestrator: "none"}, {name: "p-unset"},
+                   {name: "p-local-auto", orchestrator: "auto"}, {name: "p-local-none", orchestrator: "none"},
+                   {name: "p-local-inherit"}]
+      | if $l == "" then del(.layout) else .layout = {orchestrators: $l} end' \
+      "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" > "$T/alpha/workspace.yaml"
+    printf 'products:\n  - {name: p-local-auto, orchestrator: manual}\n  - {name: p-local-none, orchestrator: manual}\n  - {name: p-local-inherit, orchestrator: manual}\n' \
+      > "$T/alpha/workspace.local.yaml"
+    batch="$(ws_orchestrator_modes "$T/alpha")"
+    assert_eq "$(printf '%s\n' "$batch" | cut -f1 | tr '\n' ' ')" \
+      "p-auto p-manual p-none p-unset p-local-auto p-local-none p-local-inherit widget " || { rm -rf "$T"; return 1; }
+    if [ -n "$lay" ]; then inherit="$(printf '%s\tlayout' "$lay")"; else inherit="$(printf 'manual\tdefault')"; fi
+    for p in p-auto p-manual p-none p-unset p-local-auto p-local-none p-local-inherit widget; do
+      case "$p" in
+        p-auto) want="$(printf 'auto\tproduct')" ;;
+        p-manual) want="$(printf 'manual\tproduct')" ;;
+        p-none|p-local-none) want="$(printf 'none\tproduct')" ;;
+        p-local-auto) want="$(printf 'manual\tworkspace.local.yaml')" ;;
+        p-local-inherit) if [ "$lay" = auto ]; then want="$(printf 'manual\tworkspace.local.yaml')"; else want="$inherit"; fi ;;
+        *) want="$inherit" ;;
+      esac
+      got="$(printf '%s\n' "$batch" | awk -F'\t' -v p="$p" '$1 == p { print $2 "\t" $3 }')"
+      assert_eq "$got" "$want" || { echo "batch, layout '$lay', $p"; rm -rf "$T"; return 1; }
+      assert_eq "$(ws_orchestrator_mode "$T/alpha" "$p")" "$got" || { echo "per-product, layout '$lay', $p"; rm -rf "$T"; return 1; }
+    done
+  done
+  # an undeclared name still resolves, through the layout and the default
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" nosuch)" "$(printf 'none\tlayout')"
+  rm -rf "$T"
+}
