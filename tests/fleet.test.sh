@@ -619,6 +619,29 @@ test_fleet_json_carries_an_orchestrator_row_per_product() {
   orch_stub_teardown
 }
 
+# ONE RESOLVER. `cel fleet`'s orchestrator mode is ws_orchestrator_mode's,
+# never a second derivation: a local `manual` over a layout `none` stays
+# none, and over a layout `auto` reads manual - in both views alike.
+test_fleet_orchestrator_mode_is_ws_orchestrator_mode() {
+  source "$CEL_ROOT/tests/lib/orch-stub.sh"
+  orch_stub_setup omp
+  export CEL_YAML_CACHE="$T/yaml-cache"
+  printf 'products:\n  - name: bundle\n    repos: [widget]\nlayout: { orchestrators: none }\n' >> "$T/ws/workspace.yaml"
+  printf 'products:\n  - name: bundle\n    orchestrator: manual\n' > "$T/ws/workspace.local.yaml"
+  local lay mode
+  for lay in none auto; do
+    sed -i "s/^layout: { orchestrators: .* }\$/layout: { orchestrators: $lay }/" "$T/ws/workspace.yaml"
+    mode="$(run_orchestrator_candidates alpha "$T/ws" '{"result":{"agents":[]}}' \
+      | while IFS=$'\t' read -r r p _ _ m _; do [ "$r/$p" = orchestrator/bundle ] && printf '%s' "$m"; done)"
+    assert_eq "$mode" "$(ws_orchestrator_mode "$T/ws" bundle | cut -f1)" || { orch_stub_teardown; return 1; }
+  done
+  assert_eq "$mode" manual
+  sed -i 's/^layout: { orchestrators: .* }$/layout: { orchestrators: none }/' "$T/ws/workspace.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/ws" bundle)" "$(printf 'none\tlayout')"
+  unset CEL_YAML_CACHE
+  orch_stub_teardown
+}
+
 # An orchestrator's mailbox is the alias rule's name for "<product>-orch", not
 # the bare string. A 31-character product makes the 32-character cut end in a
 # dash (the shape `cel inbox migrate` repairs), and a longer one is cut

@@ -89,18 +89,22 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
   # keys (already content+path, see _yaml_json) rather than restated here, so
   # it can't drift from that scheme - and, like them, an input converted
   # without a content hash is merged afresh on every read. The merge program
-  # itself is part of the identity too (`v3`: products[].orchestrator), so a
-  # box updated to a new merge never serves a result the old one wrote for the
-  # same two files.
-  local dir key out fresh=""
+  # itself is part of the identity too (`v4`: products[].orchestrator, never
+  # over a committed none), so a box updated to a new merge never serves a
+  # result the old one wrote for the same two files.
+  local dir key out fresh="" deflt=""
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
-  key="merged-v3-$(basename "$basej" .json)-$(basename "$localj" .json)"
+  key="merged-v4-$(basename "$basej" .json)-$(basename "$localj" .json)"
+  # The built-in orchestrator default (lib/workspace.sh), when loaded: the
+  # guard below needs the committed answer from every level.
+  command -v ws_orchestrators_default >/dev/null 2>&1 && deflt="$(ws_orchestrators_default)"
   out="$dir/$key.json"
   [[ "$key" == *nohash-* ]] && fresh=1
   if [ ! -s "$out" ] || [ -n "$fresh" ]; then
     mkdir -p "$dir"
-    _yaml_cache_put "$out" "$fresh" jq -s '
+    _yaml_cache_put "$out" "$fresh" jq -s --arg deflt "$deflt" '
       .[0] as $b | .[1] as $l |
+      ($b.layout | if type == "object" then (.orchestrators // "") else "" end) as $lay |
       ($l.role_profiles // {}) as $lrp |
       ($l.products // []) as $lprod |
       ($l.repos // []) as $lrepo |
@@ -125,9 +129,14 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
           (if ($o | length) > 0 then $p + {role_profiles: (($p.role_profiles // {}) * $o)} else $p end)
           # ONE WAY ONLY: a local `orchestrator: manual` turns this box'"'"'s
           # agent off; nothing local can turn one ON (a local auto is dropped
-          # here and named by cel doctor), and `none` is already stronger.
+          # here and named by cel doctor), and a committed `none` - from the
+          # product, the layout or the default - is already stronger and is
+          # never relabelled (the resolver is ws_orchestrator_mode).
+          | (($p.orchestrator // "") as $own
+             | if ($own | IN("auto", "manual", "none")) then $own
+               elif ($lay | IN("auto", "manual", "none")) then $lay else $deflt end) as $committed
           | if (first($lprod[] | select(.name == $p.name) | .orchestrator) // null) == "manual"
-               and ($p.orchestrator // "") != "none"
+               and $committed != "none"
             then .orchestrator = "manual" else . end))
       | .repos = (($b.repos // []) | map(
           . as $r | local_role_profiles($r.name; $lrepo) as $o |

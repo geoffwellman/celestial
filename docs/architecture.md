@@ -52,11 +52,11 @@ login, roles workspace-wide and per product), and a login names the person
 it is with `me:` in its gitignored `workspace.local.yaml` - besides routing,
 that file may set only `me:` and a product's one-way `orchestrator: manual`
 (`_WS_LOCAL_KEYS`, `lib/yaml.sh`). The merge carries a local
-`products[].orchestrator` only when it is `manual` and the committed one is
-not `none`; `ws_orchestrator_mode` applies it only over a committed `auto`
-(product, layout or default) and reports source `workspace.local.yaml`, so
-`cel ws up`, the steward's "set to manual" clear, `cel fleet`
-(`run_orchestrator_candidates`, which reads the merged view) and `cel doctor`
+`products[].orchestrator` only when it is `manual` and the committed answer
+(product, layout or default) is not `none`; `ws_orchestrator_mode` applies it
+only over a committed `auto` and reports source `workspace.local.yaml`. It is
+the one resolver: `cel ws up`, the steward's "set to manual" clear, `cel fleet`
+(`run_orchestrator_candidates` calls it per product) and `cel doctor` all
 agree; a local `auto` over a committed `manual` is dropped and
 `doctor_ws_local_lines` warns. `ws_me` reads
 `me` from `workspace.local.yaml` alone, never from the merged view: a local
