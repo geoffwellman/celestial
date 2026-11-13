@@ -315,9 +315,8 @@ _profile_gateway_route_codex() { # <profile name> <pi|omp>
 # a substitute: no prefixed id for it is a veto by name. Claude only, because
 # only claude accounts are scoped.
 _profile_gateway_route_omp() { # <profile name>
-  local name="$1" id="$PROFILE_MODEL"
-  id="${id#"$GATEWAY_OMP_PROVIDER"/}"; id="${id#"$GATEWAY_OMP_PREFIX"/}"
-  id="${id#anthropic/}"; id="${id#claude/}"
+  local name="$1" id
+  id="$(gateway_omp_bare_id "$PROFILE_MODEL")"
   PROFILE_MODEL="$GATEWAY_OMP_PROVIDER/$GATEWAY_OMP_PREFIX/$id"
   local models
   case "$id" in

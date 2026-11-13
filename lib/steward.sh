@@ -1926,9 +1926,13 @@ _steward_update_check() {
   return 0
 }
 
-# OLDER LAUNCH LINES: report once per build, orchestrator and difference.
+# OLDER LAUNCH LINES: report once per orchestrator and difference - ONCE PER
+# CHANGE, not once per build. Every `cel update` is a new build, and a
+# difference it did not change (the same agent, pid and diff: the detail
+# names the pid it read) said again after each one is noise. One key per
+# agent: a new difference replaces its old key, and is news.
 # An open owner card suppresses only the agent it names; closing the card
-# makes an unresolved difference actionable again within the same build.
+# makes an unresolved difference actionable again.
 _steward_stale_orchestrators() {
   # shellcheck source=lib/version.sh
   . "${BASH_SOURCE[0]%/*}/version.sh"
@@ -1937,8 +1941,10 @@ _steward_stale_orchestrators() {
   build="$(cel_build_sha)"
   rows="$(run_stale_orchestrators)"
   [ -n "$rows" ] || return 0
-  # Keys from an older build are history: drop them so the file stays small.
-  seen="$(awk -F '\t' -v b="$build" '$1 == b' "$marker" 2>/dev/null || true)"
+  # Keys are agent<TAB>ws<TAB>difference. A marker from before this carried
+  # the build in front; its keys are kept without it, so the update that
+  # brings this in does not say an unchanged difference once more.
+  seen="$(awk -F '\t' 'NF == 4 { print $2 "\t" $3 "\t" $4; next } NF == 3' "$marker" 2>/dev/null || true)"
   actionable=""; covered=""
   while IFS=$'\t' read -r agent ws why restart; do
     [ -n "$agent" ] || continue
@@ -1946,8 +1952,8 @@ _steward_stale_orchestrators() {
     if [ -n "$card" ]; then
       covered+="$agent"$'\t'"$ws"$'\n'
       # Forget its report while covered: closing the card must make the
-      # still-stale launch actionable again, even within this same build.
-      seen="$(printf '%s\n' "$seen" | awk -F '\t' -v a="$agent" -v w="$ws" '$2 != a || $3 != w')"
+      # still-stale launch actionable again.
+      seen="$(printf '%s\n' "$seen" | awk -F '\t' -v a="$agent" -v w="$ws" '$1 != a || $2 != w')"
       c_warn "$agent waits on owner decision ${card%%$'\t'*} - no launch-line alert while that card is open"
       continue
     fi
@@ -1956,7 +1962,7 @@ _steward_stale_orchestrators() {
   fresh=""
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    printf '%s\n' "$seen" | grep -qxF -- "$build	$key" && continue
+    printf '%s\n' "$seen" | grep -qxF -- "$key" && continue
     fresh="$fresh$key"$'\n'
   done < <(printf '%s' "$actionable" | cut -f1-3)
   for ws in $(printf '%s\n' "$rows" | cut -f2 | sort -u); do
@@ -1980,8 +1986,12 @@ _steward_stale_orchestrators() {
     fi
   done
   mkdir -p "$dir" 2>/dev/null || return 0
-  { [ -z "$seen" ] || printf '%s\n' "$seen"
-    printf '%s' "$fresh" | sed "s/^/$build	/"; } > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
+  # A fresh key replaces every older key of its agent.
+  { [ -z "$seen" ] || printf '%s\n' "$seen" | FRESH="$fresh" awk -F '\t' '
+      BEGIN { n = split(ENVIRON["FRESH"], l, "\n")
+              for (i = 1; i <= n; i++) if (l[i] != "") { split(l[i], k, "\t"); gone[k[1] "\t" k[2]] = 1 } }
+      NF && !(($1 "\t" $2) in gone)'
+    printf '%s' "$fresh"; } > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
   return 0
 }
 

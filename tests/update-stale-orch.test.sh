@@ -76,7 +76,7 @@ test_steward_reports_stale_orchestrators_once_per_build() {
   unset CEL_UPDATE_DIR; orch_stub_teardown
 }
 
-# The once-per-build marker is written only when something was stale, so an
+# The report marker is written only when something was stale, so an
 # orchestrator that goes stale LATER in the same build is still reported.
 test_steward_reports_an_orchestrator_that_goes_stale_later_in_the_build() {
   source "$CEL_ROOT/lib/steward.sh"
@@ -362,4 +362,193 @@ test_a_stale_launch_names_the_pid_it_read() {
   assert_contains "$out" "inbox hook"
   assert_contains "$out" "; read from pid 100)"
   orch_stub_teardown
+}
+
+# AN EXPLICIT MODEL THE SESSION ALREADY RUNS is not a launch difference: root
+# restarts an orchestrator with --model (and --thinking) so it keeps the model
+# its saved session runs, where a plain restart would take the workspace
+# default. The running model is the later of the last model_change and the
+# last assistant message's own model; a helper model's usage is never it.
+_kept_session() { # <file> <thinking> [assistant provider] [assistant model]
+  cat > "$1" <<EOF
+{"type":"session","id":"s1","timestamp":"2026-11-01T00:00:00.000Z","cwd":"/w"}
+{"type":"model_change","model":"anthropic/claude-opus-5-5","timestamp":"2026-11-01T00:00:01.000Z"}
+{"type":"thinking_level_change","configured":null,"thinkingLevel":"$2","timestamp":"2026-11-01T00:00:01.000Z"}
+{"type":"message","timestamp":"2026-11-01T00:00:02.000Z","message":{"role":"assistant","provider":"${3:-celgw}","model":"${4:-omp/claude-opus-5-5}","content":[]}}
+{"type":"model_usage","timestamp":"2026-11-01T00:00:03.000Z","role":"typesafe","provider":"openrouter","model":"~typesafe/jev-latest"}
+EOF
+}
+# The current launch line with its thinking level set and an explicit model.
+_kept_argv() { # <model> <thinking> [extra args...]
+  local -a argv; mapfile -t argv < <(_current_argv)
+  local i model="$1" level="$2"; shift 2
+  for ((i = 0; i < ${#argv[@]} - 1; i++)); do
+    [ "${argv[$i]}" != --thinking ] || argv[i+1]="$level"
+  done
+  printf '%s\n' "${argv[@]}" --model "$model" "$@"
+}
+_kept_setup() { # <model> <thinking> [extra args...]; KEPT_PROVIDER/KEPT_MODEL: the session's
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  _kept_session "$T/s.jsonl" medium "${KEPT_PROVIDER:-celgw}" "${KEPT_MODEL:-omp/claude-opus-5-5}"
+  local -a argv; mapfile -t argv < <(_kept_argv "$@")
+  orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}"
+}
+
+test_a_kept_model_is_not_a_launch_difference() {
+  _kept_setup celgw/omp/claude-opus-5-5 medium
+  _current_argv | grep -qx -- --thinking || { echo "fixture launch line has no --thinking"; orch_stub_teardown; return 1; }
+  _current_argv | grep -qx -- --model && { echo "fixture launch line has a model"; orch_stub_teardown; return 1; }
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  local out; out="$(_update_stale_orchestrators 0)"
+  ! printf '%s' "$out" | grep -q "older launch line" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
+
+# The same route and id in another spelling is the same model.
+test_kept_model_gateway_spellings_compare_equal() {
+  local m
+  for m in omp/claude-opus-5-5 celgw/omp/claude-opus-5-5 ompgw/claude/claude-opus-5-5 ompgw-claude/claude-opus-5-5; do
+    _kept_setup "$m" medium
+    assert_contains "$(run_orchestrator_rows)" "	current	" || { orch_stub_teardown; return 1; }
+    orch_stub_teardown
+  done
+  KEPT_PROVIDER=ompgw-claude KEPT_MODEL=claude-opus-5-5 _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  orch_stub_teardown
+}
+
+test_model_route_classifies_every_spelling() {
+  local s
+  while IFS='|' read -r s want; do
+    assert_eq "$(gateway_model_route "$s" | tr '\t' '|')" "$want" || return 1
+  done <<'CASES'
+celgw/omp/claude-opus-5-5|gateway|claude-opus-5-5
+omp/claude-opus-5-5|gateway|claude-opus-5-5
+ompgw-claude/claude-opus-5-5|gateway|claude-opus-5-5
+ompgw/claude/claude-opus-5-5|gateway|claude-opus-5-5
+celgw-codex/gpt-6.1-sol|gateway|gpt-6.1-sol
+ompgw-codex/gpt-6.1-sol|gateway|gpt-6.1-sol
+anthropic/claude-opus-5-5|anthropic|claude-opus-5-5
+openai-codex/gpt-6.1-sol|openai-codex|gpt-6.1-sol
+openrouter/anthropic/claude-opus-5-5|openrouter|claude-opus-5-5
+claude/claude-opus-5-5|-|claude-opus-5-5
+claude-opus-5-5|-|claude-opus-5-5
+CASES
+}
+
+# THE SAME ID OVER ANOTHER ROUTE IS ANOTHER MODEL: a session on direct
+# Anthropic is not kept by a gateway --model, nor the reverse, and a flag that
+# names no provider proves no route.
+test_a_kept_model_needs_the_same_route() {
+  KEPT_PROVIDER=anthropic KEPT_MODEL=claude-opus-5-5 _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" ", --model celgw/omp/claude-opus-5-5;" || { orch_stub_teardown; return 1; }
+  orch_stub_teardown
+  _kept_setup anthropic/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" ", --model anthropic/claude-opus-5-5;" || { orch_stub_teardown; return 1; }
+  orch_stub_teardown
+  local m
+  for m in claude-opus-5-5 claude/claude-opus-5-5; do
+    _kept_setup "$m" medium
+    assert_contains "$(run_orchestrator_rows)" "	stale	" || { orch_stub_teardown; return 1; }
+    orch_stub_teardown
+  done
+}
+
+# A PROFILE MODEL REPLACED BY THE KEPT ONE: the current line names the
+# profile's --model, the agent runs an explicit one its session runs - not a
+# difference (missing and extra both go). Over another route it still is.
+test_a_kept_model_replacing_a_profile_model_is_not_a_difference() {
+  eval "_real_$(declare -f _run_expected_launch)"
+  _run_expected_launch() { _real__run_expected_launch "$@" || return; printf '%s\0' --model celgw-codex/gpt-6.1-sol >> "$1"; }
+  _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" "	current	" || { orch_stub_teardown; return 1; }
+  orch_stub_teardown
+  KEPT_PROVIDER=anthropic KEPT_MODEL=claude-opus-5-5 _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" "missing: --thinking high, --model celgw-codex/gpt-6.1-sol; extra: --thinking medium, --model celgw/omp/claude-opus-5-5;"
+  orch_stub_teardown
+}
+
+# A verdict cached before the agent's session was recorded (s:-) is not kept
+# once the session appears.
+test_a_cached_verdict_without_a_session_follows_its_arrival() {
+  _kept_setup celgw/omp/claude-opus-5-5 medium
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle ""
+  assert_contains "$(run_orchestrator_rows)" "	stale	"
+  assert_contains "$(cat "$CEL_CACHE/orch-verdicts.tsv")" "	s:-"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  orch_stub_teardown
+}
+
+# Not kept, so its thinking level is compared as any flag is, too.
+test_a_model_the_session_does_not_run_is_still_a_difference() {
+  _kept_setup celgw/omp/claude-sonnet-5-5 medium
+  local out; out="$(_update_stale_orchestrators 0)"
+  assert_contains "$out" "widget-orch (alpha) runs an older launch line (missing: --thinking high; extra: --thinking medium, --model celgw/omp/claude-sonnet-5-5;"
+  orch_stub_teardown
+}
+
+# A helper's model_usage entry, however late, is not the model the session runs.
+test_a_helper_model_is_not_the_running_model() {
+  _kept_setup '~typesafe/jev-latest' medium
+  assert_contains "$(_update_stale_orchestrators 0)" ", --model \\~typesafe/jev-latest;"
+  orch_stub_teardown
+}
+
+test_a_thinking_level_the_session_does_not_run_is_still_a_difference() {
+  _kept_setup celgw/omp/claude-opus-5-5 low
+  local out; out="$(_update_stale_orchestrators 0)"
+  assert_contains "$out" "--thinking low"
+  ! printf '%s' "$out" | grep -q -- "--model" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
+
+test_another_extra_flag_beside_a_kept_model_still_alerts() {
+  _kept_setup celgw/omp/claude-opus-5-5 medium --retired-flag
+  local out; out="$(_update_stale_orchestrators 0)"
+  assert_contains "$out" "runs an older launch line (extra: --retired-flag;"
+  ! printf '%s' "$out" | grep -q -- "--model\|--thinking" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
+
+# A cached verdict that read the session holds only while the session says the
+# same: a session that switches model away from its launch line is stale.
+test_a_cached_kept_verdict_follows_the_session() {
+  _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  printf '%s\n' '{"type":"model_change","role":"temporary","model":"celgw/omp/claude-sonnet-5-5","timestamp":"2026-11-01T00:00:04.000Z"}' >> "$T/s.jsonl"
+  local rows; rows="$(run_orchestrator_rows)"
+  assert_contains "$rows" "	stale	"
+  assert_contains "$rows" ", --model celgw/omp/claude-opus-5-5;"
+  orch_stub_teardown
+}
+
+# ONCE PER CHANGE, NOT PER BUILD: every `cel update` is a new build, and an
+# unchanged difference is not said again after it. A new difference is.
+test_steward_says_an_unchanged_difference_once_across_updates() {
+  source "$CEL_ROOT/lib/steward.sh"
+  orch_stub_setup omp
+  export CEL_UPDATE_DIR="$T/upd" CEL_INBOX_DIR="$T/inbox"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv; mapfile -t argv < <(_current_argv)
+  orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}" --retired-flag
+  _steward_raise() { printf '%s|%s\n' "$1" "$4" >> "$T/raised"; }
+  local b
+  for b in aaaaaaa bbbbbbb ccccccc; do
+    # shellcheck disable=SC2329 # read by lib/version.sh cel_build_sha
+    git() { if [ "${3:-}" = rev-parse ] && [ "${4:-}" = --short ]; then printf '%s\n' "$b"; else command git "$@"; fi; }
+    _steward_stale_orchestrators >/dev/null
+  done
+  unset -f git
+  assert_eq "$(wc -l < "$T/raised" | tr -d ' ')" "1"
+  assert_contains "$(cat "$T/raised")" "extra: --retired-flag"
+  # a different difference from the same agent is news, said once
+  orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}" --other-flag
+  _steward_stale_orchestrators >/dev/null
+  _steward_stale_orchestrators >/dev/null
+  assert_eq "$(wc -l < "$T/raised" | tr -d ' ')" "2"
+  assert_contains "$(sed -n 2p "$T/raised")" "extra: --other-flag"
+  assert_eq "$(wc -l < "$CEL_UPDATE_DIR/orch-stale-reported" | tr -d ' ')" "1"
+  unset CEL_UPDATE_DIR; orch_stub_teardown
 }
