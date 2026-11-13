@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { OMP_MODEL_CACHE_VERSIONS, cacheVersionLabel } from '../omp-model-cache.mjs';
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const providerKey = /^(anthropic|openai-codex)(?::[0-9]+(?:\.[0-9]+)*(?:[-+][A-Za-z0-9.-]+)?)?$/;
@@ -37,7 +38,7 @@ for key, version, updated, raw in rows:
     for m in models:
         if not isinstance(m,dict):
             continue
-        v={k:m[k] for k in ('id','api','name','contextWindow','maxTokens','input','output','tools','reasoning','thinking','type') if k in m}
+        v={k:m[k] for k in ('id','api','name','contextWindow','maxTokens','input','output','tools','reasoning','thinking','type','kind') if k in m}
         if isinstance(m.get('identity'),dict):
             v['identity']={'family':m['identity'].get('family')}
         clean.append(v)
@@ -47,7 +48,7 @@ c.rollback()
 c.close()
 `;
 
-export async function loadNativeMetadata(databasePath) {
+async function readSourceRecords(databasePath) {
   if (typeof databasePath !== 'string' || !databasePath) throw new Error('metadata_database_required');
   const raw = await new Promise((resolve, reject) => {
     const child = spawn('python3', ['-c', reader, databasePath], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -62,16 +63,26 @@ export async function loadNativeMetadata(databasePath) {
     child.once('close', code => code === 0 && !oversized
       ? resolve(Buffer.concat(chunks).toString('utf8')) : reject(new Error('metadata_read_failed')));
   });
-  return JSON.parse(raw).filter(validSource).map(sanitizeSource);
+  const records = JSON.parse(raw);
+  if (!Array.isArray(records)) throw new Error('metadata_read_failed');
+  return records;
 }
 
-// OMP 18.x rewrites model_cache as version 13 or 14 depending on which binary
-// refreshed it last; both carry the same per-model fields read here.
-export const CACHE_VERSIONS = Object.freeze([13, 14]);
+export async function loadNativeMetadata(databasePath) {
+  return (await readSourceRecords(databasePath)).filter(validSource).map(sanitizeSource);
+}
+
+// Authoritative rows refused only for their schema version, named for the
+// operator: "<provider> v<version>", never any of the cached model data.
+function unsupportedCacheVersions(records) {
+  return [...new Set(records.filter(source => record(source) && typeof source.providerKey === 'string'
+    && providerKey.test(source.providerKey) && !OMP_MODEL_CACHE_VERSIONS.includes(source.schemaVersion))
+    .map(source => `${source.providerKey.split(':')[0]} v${cacheVersionLabel(source.schemaVersion)}`))].sort();
+}
 
 function validSource(source) {
   return record(source) && source.authoritative === true && typeof source.providerKey === 'string'
-    && providerKey.test(source.providerKey) && CACHE_VERSIONS.includes(source.schemaVersion)
+    && providerKey.test(source.providerKey) && OMP_MODEL_CACHE_VERSIONS.includes(source.schemaVersion)
     && Number.isSafeInteger(source.updatedAt) && source.updatedAt >= 0
     && Array.isArray(source.models) && source.models.length <= 4096;
 }
@@ -90,14 +101,14 @@ function sanitizeThinking(value) {
 function sanitizeModel(model) {
   if (!record(model)) return null;
   const clean = {};
-  for (const key of ['id', 'api', 'name', 'type']) {
+  for (const key of ['id', 'api', 'name', 'type', 'kind']) {
     if (typeof model[key] === 'string' && model[key].length <= 200 && !/[\x00-\x1f\x7f]/.test(model[key])) clean[key] = model[key];
   }
   for (const key of ['contextWindow', 'maxTokens']) if (model[key] === null || Number.isSafeInteger(model[key])) clean[key] = model[key];
   for (const key of ['reasoning', 'tools']) if (typeof model[key] === 'boolean') clean[key] = model[key];
   for (const key of ['input', 'output']) if (Array.isArray(model[key]) && model[key].length <= 2
     && model[key].every(v => ['text', 'image'].includes(v))) clean[key] = [...model[key]];
-  for (const key of ['type', 'tools', 'output']) if (Object.hasOwn(model, key) && !Object.hasOwn(clean, key)) clean[key] = null;
+  for (const key of ['type', 'kind', 'tools', 'output']) if (Object.hasOwn(model, key) && !Object.hasOwn(clean, key)) clean[key] = null;
   if (record(model.identity) && model.identity.family === 'gpt-image') clean.identity = { family: 'gpt-image' };
   if (model.thinking !== undefined) clean.thinking = sanitizeThinking(model.thinking);
   return clean;
@@ -113,7 +124,9 @@ function provenance(source) {
 }
 
 function capability(model, source) {
-  if (Object.hasOwn(model, 'type') && model.type !== 'chat' || model.identity?.family === 'gpt-image') return { reason: 'non_chat_model' };
+  // Cache versions up to 14 mark a model's kind with `type`, 15 with `kind`.
+  if (Object.hasOwn(model, 'type') && model.type !== 'chat' || Object.hasOwn(model, 'kind') && model.kind !== 'chat'
+    || model.identity?.family === 'gpt-image') return { reason: 'non_chat_model' };
   const claude = source.providerKey.split(':')[0] === 'anthropic';
   if (claude ? model.api !== 'anthropic-messages' : !['openai-responses', 'openai-codex-responses'].includes(model.api)) return { reason: 'unsupported_transport' };
   if (!positive(model.contextWindow) || !positive(model.maxTokens)) return { reason: 'invalid_limits' };
@@ -176,10 +189,14 @@ async function main() {
     chunks.push(chunk);
   }
   const published = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  let metadata;
-  try { metadata = await loadNativeMetadata(args[1]); }
-  catch { process.stderr.write('Capability metadata unavailable; advertised chat models use native client defaults.\n'); metadata = []; }
-  const catalog = resolveCatalog(published, metadata);
+  let records;
+  try { records = await readSourceRecords(args[1]); }
+  catch { process.stderr.write('Capability metadata unavailable; advertised chat models use native client defaults.\n'); records = []; }
+  const unsupported = unsupportedCacheVersions(records);
+  if (unsupported.length) {
+    process.stderr.write(`OMP capability metadata refused: unsupported OMP model_cache schema ${unsupported.join(', ')} (this Celestial reads ${OMP_MODEL_CACHE_VERSIONS.join(', ')}); those providers' advertised chat models use native client defaults.\n`);
+  }
+  const catalog = resolveCatalog(published, records.filter(validSource).map(sanitizeSource));
   // A silent all-defaults catalog removed every effort variant once; say so.
   if (!catalog.sources.length) process.stderr.write('No usable OMP capability metadata (unsupported cache version?); all advertised chat models use native client defaults.\n');
   process.stdout.write(`${JSON.stringify(catalog)}\n`);

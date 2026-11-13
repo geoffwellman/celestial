@@ -198,10 +198,10 @@ test('latest versioned authoritative Codex source wins, ignoring unrelated and n
   assert.equal(success(f.run()).find((entry) => entry.id === 'gpt-5.6-sol').contextWindow, 600000);
 });
 
-test('unknown selected OMP cache schema refuses output rather than silently using stale native limits', (t) => {
+test('unknown selected OMP cache schema refuses output, naming the version and the supported ones', (t) => {
   const f = fixture(t);
-  f.rows[0].version = 15; f.saveCache();
-  failure(f.run(), /Unsupported authoritative OMP cache schema/);
+  f.rows[0].version = 99; f.saveCache();
+  failure(f.run(), /^Unsupported authoritative OMP cache schema 99 for openai-codex \(this Celestial reads 13, 14, 15\)$/);
 });
 
 test('cache version 13 supplies the same exact capabilities as version 14', (t) => {
@@ -209,6 +209,30 @@ test('cache version 13 supplies the same exact capabilities as version 14', (t) 
   for (const row of f.rows) row.version = 13;
   f.saveCache();
   assert.equal(success(f.run()).find((entry) => entry.id === 'gpt-5.6-sol').contextWindow, 1000000);
+});
+
+// The row shape OMP 18.16 writes (version 15): no `type`, extra per-model keys,
+// and `kind: "image"` on the non-chat Codex model.
+test('cache version 15 rows enrich a newly published model and keep image models out', (t) => {
+  const f = fixture(t);
+  const v15 = (entry) => {
+    const { type, ...rest } = entry;
+    return { ...rest, identity: { class: 'fixture', family: 'fixture', revision: '1.0.0' }, cost: { input: 1, output: 2 }, int: 3, promptCache: true, requiresGlyphTokenization: false, supportsComputerUse: false, supportsComputerUseConfig: null, tokenizer: 'fixture', webSearch: false, webSearchModel: null };
+  };
+  for (const row of f.rows) { row.version = 15; row.models = row.models.map(v15); }
+  f.rows[1].models.push(v15({ ...authoritativeModel('claude-fable-5-2', 'anthropic'), maxTokens: 128000,
+    thinking: { mode: 'anthropic-adaptive', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], supportsDisplay: true, prefixBinding: true } }));
+  f.rows[0].models.push(v15({ ...authoritativeModel('gpt-image-2'), kind: 'image', supportsTools: false, reasoning: false, thinking: undefined, contextWindow: 10000, maxTokens: 4096 }));
+  f.saveCache();
+  const result = f.run();
+  const models = success(result);
+  const fable = models.find((entry) => entry.id === 'claude-fable-5-2');
+  assert.deepEqual([fable.contextWindow, fable.maxTokens, fable.reasoning, fable.input], [1000000, 128000, true, ['text', 'image']]);
+  assert.deepEqual(fable.thinkingLevelMap, { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' });
+  assert.deepEqual(fable.compat, { forceAdaptiveThinking: true, supportsTemperature: false });
+  assert.equal(models.find((entry) => entry.id === 'gpt-6.1-sol').contextWindow, 500000);
+  assert.ok(!models.some((entry) => entry.id === 'gpt-image-2'));
+  assert.ok(omissions(result).some((entry) => entry.id === 'gpt-image-2' && entry.reason === 'non-chat-model'));
 });
 
 test('source and duplicate exact-ID conflicts refuse output without leaking arbitrary model data', (t) => {

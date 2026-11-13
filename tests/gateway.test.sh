@@ -564,12 +564,65 @@ EOF
 test_pi_models_catalog_failure_does_not_block_published_chat_availability() {
   _gw_setup
   mkdir -p "$T/state"; printf 'fixture-existing-key' >"$T/state/api-key"; chmod 600 "$T/state/api-key"
-  gateway_pi_catalog_json() { printf 'catalog source conflict\n' >&2; return 1; }
-  local out; out="$(cmd_gateway pi-models --refresh --json)" || { _gw_teardown; return 1; }
+  gateway_pi_catalog_json() { printf '{"error":"Unsupported authoritative OMP cache schema 99 for anthropic (this Celestial reads 13, 14, 15)"}\n' >&2; return 1; }
+  local out; out="$(cmd_gateway pi-models --refresh --json 2>"$T/err")" || { _gw_teardown; return 1; }
   assert_eq "$(jq -r '.models | length' <<<"$out")" 5
   assert_eq "$(jq -r '.defaults | length' <<<"$out")" 5
+  assert_eq "$(jq -r '.enrichment.available' <<<"$out")" false
+  assert_eq "$(jq -r '.enrichment.cause' <<<"$out")" 'Unsupported authoritative OMP cache schema 99 for anthropic (this Celestial reads 13, 14, 15)'
   assert_eq "$(jq -r '[.providers[].models[] | has("contextWindow") or has("reasoning")] | any' "$T/pi/models.json")" false
   assert_eq "$(cat "$T/state/api-key")" fixture-existing-key
+  # Loud, and naming the cause: a bare entry silently costs a live session its
+  # context window, output limit and thinking.
+  assert_contains "$(cat "$T/err")" 'WARNING: Pi capability enrichment unavailable (Unsupported authoritative OMP cache schema 99 for anthropic (this Celestial reads 13, 14, 15))'
+  assert_contains "$(cat "$T/err")" 'cel gateway pi-models --refresh'
+  # The launch-time write warns the same way and still succeeds.
+  gateway_pi_models_write "$T/pi/models.json" 2>"$T/err" || { echo 'launch write failed'; _gw_teardown; return 1; }
+  assert_contains "$(cat "$T/err")" 'WARNING: Pi capability enrichment unavailable (Unsupported authoritative OMP cache schema 99'
+  _gw_teardown
+}
+
+test_pi_models_catalog_success_reports_enrichment_available() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  local out; out="$(cmd_gateway pi-models --json 2>"$T/err")" || { _gw_teardown; return 1; }
+  assert_eq "$(jq -c '.enrichment' <<<"$out")" '{"available":true}'
+  ! grep -q WARNING "$T/err" || { echo 'warned with enrichment available'; _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+# A bare {id} entry written while enrichment was down must not stick: an
+# explicit refresh (cel gateway pi-models --refresh, or GATEWAY_PI_WRITE=refresh
+# from cel gateway refresh / cel update) replaces it with the enriched entry.
+test_pi_models_refresh_enriches_an_existing_bare_entry() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  local bare='{"providers":{"ompgw-claude":{"api":"anthropic-messages","models":[{"id":"claude-opus-5-5"},{"id":"claude-sonnet-4-6"}]},"ompgw-codex":{"api":"openai-responses","models":[{"id":"gpt-5.5"}]}}}'
+  local q='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-5-5") | [.contextWindow,.maxTokens,.reasoning,.thinkingLevelMap.medium,.compat.forceAdaptiveThinking]'
+  printf '%s' "$bare" >"$T/pi/models.json"
+  cmd_gateway pi-models --refresh >/dev/null 2>&1 || { _gw_teardown; return 1; }
+  assert_eq "$(jq -c "$q" "$T/pi/models.json")" '[1000000,128000,true,"medium",true]'
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[] | select(.id == "gpt-5.5") | .contextWindow' "$T/pi/models.json")" 272000
+  printf '%s' "$bare" >"$T/pi/models.json"
+  GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$T/pi/models.json" 2>/dev/null || { _gw_teardown; return 1; }
+  assert_eq "$(jq -c "$q" "$T/pi/models.json")" '[1000000,128000,true,"medium",true]'
+  _gw_teardown
+}
+
+test_gateway_doctor_reports_unavailable_pi_enrichment_and_bare_published_entries() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  # Published and bare: flagged. Enriched, or bare but no longer published: not.
+  printf '%s' '{"providers":{"ompgw-claude":{"models":[{"id":"claude-opus-5-5"},{"id":"claude-retired"},{"id":"claude-sonnet-4-6","contextWindow":1000000}]},"ompgw-codex":{"models":[{"id":"gpt-5.5"}]},"mine":{"models":[{"id":"claude-custom-unknown"}]}}}' >"$T/pi/models.json"
+  local out; out="$(gateway_doctor_line 2>/dev/null)"
+  assert_contains "$out" 'pi models.json: 2 published Claude/Codex chat model(s) without contextWindow (Pi defaults apply): claude-opus-5-5 gpt-5.5 - cel gateway pi-models --refresh'
+  case "$out" in *claude-retired*|*claude-custom-unknown*|*'enrichment unavailable'*) echo "unexpected doctor line: $out"; _gw_teardown; return 1 ;; esac
+  printf '%s' '{"providers":{"ompgw-claude":{"models":[{"id":"claude-opus-5-5","contextWindow":1000000}]}}}' >"$T/pi/models.json"
+  out="$(gateway_doctor_line 2>/dev/null)"
+  case "$out" in *'pi models.json'*|*'enrichment unavailable'*) echo "unexpected doctor line: $out"; _gw_teardown; return 1 ;; esac
+  gateway_pi_catalog_json() { printf '{"error":"Unsupported authoritative OMP cache schema 99 for anthropic (this Celestial reads 13, 14, 15)"}\n' >&2; return 1; }
+  out="$(gateway_doctor_line 2>/dev/null)"
+  assert_contains "$out" 'Pi capability enrichment unavailable (Unsupported authoritative OMP cache schema 99 for anthropic (this Celestial reads 13, 14, 15))'
   _gw_teardown
 }
 

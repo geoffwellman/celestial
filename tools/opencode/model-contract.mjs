@@ -1,6 +1,7 @@
 // Exact metadata enters through the read-only gateway/native catalog join.
 // This module owns the native 2.2.5 representation, not model-name inference.
 import { isDeepStrictEqual } from 'node:util';
+import { OMP_MODEL_CACHE_VERSIONS } from '../omp-model-cache.mjs';
 
 export const DEFAULT_SELECTION = Object.freeze({ providerID: 'ompgw-codex', id: 'gpt-6.1-sol', variant: 'medium' });
 export const PINNED_CATALOG = Object.freeze({ schemaVersion: 1, models: [{
@@ -18,7 +19,7 @@ const provenance = source => object(source)
   && keys(source, ['providerKey', 'schemaVersion', 'updatedAt', 'hashVerification'])
   && typeof source.providerKey === 'string'
   && /^(anthropic|openai-codex)(?::[0-9]+(?:\.[0-9]+)*(?:[-+][A-Za-z0-9.-]+)?)?$/.test(source.providerKey)
-  && source.providerKey.length <= 128 && [13, 14].includes(source.schemaVersion)
+  && source.providerKey.length <= 128 && OMP_MODEL_CACHE_VERSIONS.includes(source.schemaVersion)
   && Number.isSafeInteger(source.updatedAt) && source.updatedAt >= 0;
 
 export function catalogModels(catalog = PINNED_CATALOG) {
