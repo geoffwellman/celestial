@@ -3619,12 +3619,15 @@ _run_orch_verdict() { # ws role product name pane cwd runtime [session-file|-]
 # it is unknown, or why it is missing. `-` stands for empty. The command is for
 # humans to read; callers that run it rebuild the argv from role/ws/product.
 run_orchestrator_candidates() { # <ws> <wsdir> <roster-json>
-  local yj
-  # The merged view, so a workspace.local.yaml `orchestrator: manual` (the
-  # only orchestrator value the merge carries) reads here exactly as
-  # ws_orchestrator_mode reads it.
-  yj="$(_ws_effective_json "$2")" || return 0
-  jq -r --arg ws "$1" --arg wsdir "$2" --arg deflt "$(ws_orchestrators_default)" --argjson roster "${3:-null}" '
+  local yj modes p
+  yj="$(_yaml_json "$2/workspace.yaml")" || return 0
+  # ONE RESOLVER: each product's mode is ws_orchestrator_mode's, the answer
+  # `cel ws up` and the steward act on (workspace.local.yaml included) - never
+  # derived a second time here.
+  modes="$(for p in $(ws_product_names "$2"); do
+      printf '%s\t%s\n' "$p" "$(ws_orchestrator_mode "$2" "$p" | cut -f1)"
+    done | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}')" || return 0
+  jq -r --arg ws "$1" --arg wsdir "$2" --argjson modes "$modes" --argjson roster "${3:-null}" '
     def agent_name: ascii_downcase | gsub("[^a-z0-9_-]+"; "-") | sub("^[^a-z]+"; "") | sub("-$"; "") | .[0:32];
     def dash: if . == null or . == "" then "-" else . end;
     . as $y
@@ -3632,7 +3635,6 @@ run_orchestrator_candidates() { # <ws> <wsdir> <roster-json>
     | ($y.products // []) as $ps
     | ([$ps[].repos // []] | flatten) as $used
     | (($ps | map(.name)) + (($y.repos // [] | map(.name)) - $used)) as $names
-    | ($y.layout | if type == "object" then (.orchestrators // "") else "" end) as $lay
     | ([{role: "root", product: "-", name: ("\($ws)/root" | agent_name), cwd: $wsdir,
          rt: ($y.runtime.root // "claude"), mode: "root"}]
        + [$names[] as $p
@@ -3640,9 +3642,7 @@ run_orchestrator_candidates() { # <ws> <wsdir> <roster-json>
           | {role: "orchestrator", product: $p, name: ("\($p)/orch" | agent_name),
              cwd: (if $decl then "\($wsdir)/products/\($p)" else "\($wsdir)/repos/\($p)" end),
              rt: ($y.runtime.orchestrator // "claude"),
-             mode: ((($decl // {}).orchestrator // "") as $own
-                    | if ($own | IN("auto", "manual", "none")) then $own
-                      elif ($lay | IN("auto", "manual", "none")) then $lay else $deflt end)}])[]
+             mode: ($modes[$p] // "")}])[]
     | . as $c
     | ([$a[] | select(.name == $c.name)]) as $byname
     | ([$a[] | select((.cwd // "") == $c.cwd)]) as $bycwd

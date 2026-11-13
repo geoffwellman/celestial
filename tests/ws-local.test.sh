@@ -417,11 +417,24 @@ test_no_local_orchestrator_leaves_the_mode_unchanged() {
   rm -rf "$T"
 }
 
+# A committed `none`, from ANY level, is never relabelled: the merge does not
+# carry a local `manual` over it, so the merged view and the resolver agree.
+test_local_manual_never_rewrites_a_committed_none() {
+  _wl_orch '' manual
+  yq -y '.layout = {orchestrators: "none"}' "$T/alpha/workspace.yaml" > "$T/w" && mv "$T/w" "$T/alpha/workspace.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'none\tlayout')"
+  assert_eq "$(_yqr_ws -r '.products[0].orchestrator // "absent"' "$T/alpha")" absent
+  yq -y '.products[0].orchestrator = "none" | del(.layout)' "$T/alpha/workspace.yaml" > "$T/w" && mv "$T/w" "$T/alpha/workspace.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'none\tproduct')"
+  assert_eq "$(_yqr_ws -r '.products[0].orchestrator' "$T/alpha")" none
+  rm -rf "$T"
+}
+
 # The merge's shape changed, so an older cached merge must not be served.
-test_the_merge_cache_key_is_v3() {
+test_the_merge_cache_key_is_v4() {
   _wl_orch auto manual
   _yqr_ws -r .name "$T/alpha" >/dev/null
-  assert_eq "$(find "$T/cache" -name 'merged-v3-*' | wc -l | tr -d ' ')" "1"
-  assert_eq "$(find "$T/cache" -name 'merged-v2-*' | wc -l | tr -d ' ')" "0"
+  assert_eq "$(find "$T/cache" -name 'merged-v4-*' | wc -l | tr -d ' ')" "1"
+  assert_eq "$(find "$T/cache" -name 'merged-v3-*' | wc -l | tr -d ' ')" "0"
   rm -rf "$T"
 }
