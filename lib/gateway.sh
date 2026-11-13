@@ -481,13 +481,30 @@ gateway_omp_bare_id() { # <model id> -> the bare id
   id="${id#anthropic/}"; id="${id#claude/}"
   printf '%s' "$id"
 }
-# EVERY SPELLING OF ONE MODEL, reduced to the id the provider serves: the Codex
-# prefixes (gateway_codex_bare_id), pi's ompgw-claude/ and the omp route's.
-# celgw/omp/claude-opus-5-5, anthropic/claude-opus-5-5 and claude-opus-5-5
-# are one model; a provider is never inferred from it.
+# EVERY SPELLING OF ONE MODEL ID, reduced to the id the provider serves: the
+# Codex prefixes (gateway_codex_bare_id), pi's ompgw-claude/ and the omp
+# route's. It erases the route: pair it with gateway_model_route to compare.
 gateway_model_bare_id() { # <model id> -> the bare id
   local id; id="$(gateway_codex_bare_id "$1")"
   gateway_omp_bare_id "${id#ompgw-claude/}"
+}
+# THE ROUTE AND ID A MODEL SPELLING NAMES, for "is this the same model": the
+# same id over another route is another model. Every spelling the gateway
+# owns is `gateway` - omp's celgw/ and celgw-codex/, pi's ompgw/,
+# ompgw-claude/ and ompgw-codex/, and the gateway's own omp/-prefixed ids. A
+# direct provider is itself: anthropic/, openai-codex/, openrouter/... A
+# spelling that names no provider - a bare id, or claude/<id>, a model
+# family - is route `-`, which proves no route.
+gateway_model_route() { # <model spelling> -> route<TAB>bare id
+  local s="$1" route
+  case "$s" in
+    "$GATEWAY_OMP_PROVIDER"/*|"$GATEWAY_OMP_PROVIDER"-codex/*|ompgw/*|ompgw-claude/*|ompgw-codex/*|"$GATEWAY_OMP_PREFIX"/*)
+      route=gateway ;;
+    claude/*) route=- ;;
+    */*) route="${s%%/*}"; s="${s#*/}" ;;
+    *) route=- ;;
+  esac
+  printf '%s\t%s' "$route" "$(gateway_model_bare_id "$s")"
 }
 gateway_pi_provider_for_model() { # <model id>
   case "${1#ompgw/}" in claude/*|claude-*) printf 'ompgw-claude'; return 0 ;; esac

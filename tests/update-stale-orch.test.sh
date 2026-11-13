@@ -369,12 +369,12 @@ test_a_stale_launch_names_the_pid_it_read() {
 # its saved session runs, where a plain restart would take the workspace
 # default. The running model is the later of the last model_change and the
 # last assistant message's own model; a helper model's usage is never it.
-_kept_session() { # <file> <thinking>
+_kept_session() { # <file> <thinking> [assistant provider] [assistant model]
   cat > "$1" <<EOF
 {"type":"session","id":"s1","timestamp":"2026-11-01T00:00:00.000Z","cwd":"/w"}
 {"type":"model_change","model":"anthropic/claude-opus-5-5","timestamp":"2026-11-01T00:00:01.000Z"}
 {"type":"thinking_level_change","configured":null,"thinkingLevel":"$2","timestamp":"2026-11-01T00:00:01.000Z"}
-{"type":"message","timestamp":"2026-11-01T00:00:02.000Z","message":{"role":"assistant","provider":"celgw","model":"omp/claude-opus-5-5","content":[]}}
+{"type":"message","timestamp":"2026-11-01T00:00:02.000Z","message":{"role":"assistant","provider":"${3:-celgw}","model":"${4:-omp/claude-opus-5-5}","content":[]}}
 {"type":"model_usage","timestamp":"2026-11-01T00:00:03.000Z","role":"typesafe","provider":"openrouter","model":"~typesafe/jev-latest"}
 EOF
 }
@@ -387,10 +387,10 @@ _kept_argv() { # <model> <thinking> [extra args...]
   done
   printf '%s\n' "${argv[@]}" --model "$model" "$@"
 }
-_kept_setup() { # <model> <thinking> [extra args...]
+_kept_setup() { # <model> <thinking> [extra args...]; KEPT_PROVIDER/KEPT_MODEL: the session's
   orch_stub_setup omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
-  _kept_session "$T/s.jsonl" medium
+  _kept_session "$T/s.jsonl" medium "${KEPT_PROVIDER:-celgw}" "${KEPT_MODEL:-omp/claude-opus-5-5}"
   local -a argv; mapfile -t argv < <(_kept_argv "$@")
   orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}"
 }
@@ -405,13 +405,80 @@ test_a_kept_model_is_not_a_launch_difference() {
   orch_stub_teardown
 }
 
-test_kept_model_spellings_compare_equal() {
+# The same route and id in another spelling is the same model.
+test_kept_model_gateway_spellings_compare_equal() {
   local m
-  for m in claude-opus-5-5 anthropic/claude-opus-5-5 omp/claude-opus-5-5; do
+  for m in omp/claude-opus-5-5 celgw/omp/claude-opus-5-5 ompgw/claude/claude-opus-5-5 ompgw-claude/claude-opus-5-5; do
     _kept_setup "$m" medium
     assert_contains "$(run_orchestrator_rows)" "	current	" || { orch_stub_teardown; return 1; }
     orch_stub_teardown
   done
+  KEPT_PROVIDER=ompgw-claude KEPT_MODEL=claude-opus-5-5 _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  orch_stub_teardown
+}
+
+test_model_route_classifies_every_spelling() {
+  local s
+  while IFS='|' read -r s want; do
+    assert_eq "$(gateway_model_route "$s" | tr '\t' '|')" "$want" || return 1
+  done <<'CASES'
+celgw/omp/claude-opus-5-5|gateway|claude-opus-5-5
+omp/claude-opus-5-5|gateway|claude-opus-5-5
+ompgw-claude/claude-opus-5-5|gateway|claude-opus-5-5
+ompgw/claude/claude-opus-5-5|gateway|claude-opus-5-5
+celgw-codex/gpt-6.1-sol|gateway|gpt-6.1-sol
+ompgw-codex/gpt-6.1-sol|gateway|gpt-6.1-sol
+anthropic/claude-opus-5-5|anthropic|claude-opus-5-5
+openai-codex/gpt-6.1-sol|openai-codex|gpt-6.1-sol
+openrouter/anthropic/claude-opus-5-5|openrouter|claude-opus-5-5
+claude/claude-opus-5-5|-|claude-opus-5-5
+claude-opus-5-5|-|claude-opus-5-5
+CASES
+}
+
+# THE SAME ID OVER ANOTHER ROUTE IS ANOTHER MODEL: a session on direct
+# Anthropic is not kept by a gateway --model, nor the reverse, and a flag that
+# names no provider proves no route.
+test_a_kept_model_needs_the_same_route() {
+  KEPT_PROVIDER=anthropic KEPT_MODEL=claude-opus-5-5 _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" ", --model celgw/omp/claude-opus-5-5;" || { orch_stub_teardown; return 1; }
+  orch_stub_teardown
+  _kept_setup anthropic/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" ", --model anthropic/claude-opus-5-5;" || { orch_stub_teardown; return 1; }
+  orch_stub_teardown
+  local m
+  for m in claude-opus-5-5 claude/claude-opus-5-5; do
+    _kept_setup "$m" medium
+    assert_contains "$(run_orchestrator_rows)" "	stale	" || { orch_stub_teardown; return 1; }
+    orch_stub_teardown
+  done
+}
+
+# A PROFILE MODEL REPLACED BY THE KEPT ONE: the current line names the
+# profile's --model, the agent runs an explicit one its session runs - not a
+# difference (missing and extra both go). Over another route it still is.
+test_a_kept_model_replacing_a_profile_model_is_not_a_difference() {
+  eval "_real_$(declare -f _run_expected_launch)"
+  _run_expected_launch() { _real__run_expected_launch "$@" || return; printf '%s\0' --model celgw-codex/gpt-6.1-sol >> "$1"; }
+  _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" "	current	" || { orch_stub_teardown; return 1; }
+  orch_stub_teardown
+  KEPT_PROVIDER=anthropic KEPT_MODEL=claude-opus-5-5 _kept_setup celgw/omp/claude-opus-5-5 medium
+  assert_contains "$(run_orchestrator_rows)" "missing: --thinking high, --model celgw-codex/gpt-6.1-sol; extra: --thinking medium, --model celgw/omp/claude-opus-5-5;"
+  orch_stub_teardown
+}
+
+# A verdict cached before the agent's session was recorded (s:-) is not kept
+# once the session appears.
+test_a_cached_verdict_without_a_session_follows_its_arrival() {
+  _kept_setup celgw/omp/claude-opus-5-5 medium
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle ""
+  assert_contains "$(run_orchestrator_rows)" "	stale	"
+  assert_contains "$(cat "$CEL_CACHE/orch-verdicts.tsv")" "	s:-"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  orch_stub_teardown
 }
 
 # Not kept, so its thinking level is compared as any flag is, too.

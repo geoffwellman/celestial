@@ -2016,9 +2016,11 @@ run_session_model() { # <session-file>
     | if .m == null then empty else .m, (.t // ""), (.c // "") end' "$1" 2>/dev/null || true
 }
 
-# What a session says it runs, as one cache-safe word: s:model|level|configured.
-_run_session_token() { # <session-file>
+# What a session says it runs, as one cache-safe word: s:model|level|configured,
+# or s:- when the agent has no session recorded yet.
+_run_session_token() { # <session-file|->
   local m="" t="" c=""
+  if [ -z "$1" ] || [ "$1" = - ]; then printf 's:-'; return 0; fi
   { IFS= read -r m; IFS= read -r t; IFS= read -r c; } < <(run_session_model "$1") || true
   printf 's:%s|%s|%s' "$m" "$t" "$c"
 }
@@ -2027,18 +2029,22 @@ _run_session_token() { # <session-file>
 # orchestrator restarted with --model (and --thinking) naming what its saved
 # session runs keeps that model, where a plain restart would take the
 # workspace default - "fixing" it would change its model. So when the actual
-# argv's model IS the session's current model (run_session_model; any
-# spelling, gateway_model_bare_id), both argvs lose their model item, and
-# their thinking item too when the actual level is the session's. A model the
-# session is not running is still a difference, and so is every other flag.
-# The session is read only when the two lines' model or thinking differ.
-# Sets _RUN_SESSION_READ: `-` when it was not read, else _run_session_token's
-# answer, so a cached verdict that depended on it is checked against it again.
+# argv's model IS the session's current model (run_session_model) - the same
+# ROUTE and the same id (gateway_model_route: any gateway spelling is the
+# gateway, a direct provider is itself, and no named provider proves no
+# route) - both argvs lose their model item, whatever the expected one names,
+# and their thinking item too when the actual level is the session's. A model
+# the session is not running, or runs over another route, is still a
+# difference, and so is every other flag. The session is read only when the
+# two lines' model or thinking differ.
+# Sets _RUN_SESSION_READ: `-` when the lines' model and thinking agree (the
+# session cannot change the verdict), else _run_session_token's answer - s:-
+# for no session yet - so a cached verdict is checked against it again.
 _run_kept_model() { # <runtime> <session-file|-> <expected-argv-file> <actual-argv-file>
-  local rt="$1" sess="$2" exp="$3" act="$4" mflag tflag="" model level r m t c
+  local rt="$1" sess="$2" exp="$3" act="$4" mflag tflag="" model level r m t c route
   _RUN_SESSION_READ=-
   mflag="$(agent_model_flag "$rt")"
-  [ -n "$mflag" ] && [ -n "$sess" ] && [ "$sess" != - ] || return 0
+  [ -n "$mflag" ] || return 0
   model="$(_run_argv_flag "$act" "$mflag")" && [ -n "$model" ] || return 0
   [ "$(agent_thinking "$rt" strategy)" != flag ] || tflag="$(agent_thinking "$rt" flag)"
   if [ "$model" = "$(_run_argv_flag "$exp" "$mflag")" ] && { [ -z "$tflag" ] \
@@ -2046,8 +2052,11 @@ _run_kept_model() { # <runtime> <session-file|-> <expected-argv-file> <actual-ar
     return 0
   fi
   _RUN_SESSION_READ="$(_run_session_token "$sess")"
+  [ "$_RUN_SESSION_READ" != s:- ] || return 0
   r="${_RUN_SESSION_READ#s:}"; m="${r%%|*}"; r="${r#*|}"; t="${r%%|*}"; c="${r#*|}"
-  [ -n "$m" ] && [ "$(gateway_model_bare_id "$model")" = "$(gateway_model_bare_id "$m")" ] || return 0
+  [ -n "$m" ] || return 0
+  route="$(gateway_model_route "$model")"
+  [ "${route%%$'\t'*}" != - ] && [ "$route" = "$(gateway_model_route "$m")" ] || return 0
   _run_argv_drop "$exp" "$mflag"; _run_argv_drop "$act" "$mflag"
   [ -n "$tflag" ] || return 0
   level="$(_run_argv_flag "$act" "$tflag")" && [ -n "$level" ] || return 0
