@@ -1105,22 +1105,41 @@ _steward_team_read() { # <dir> <feature> <now>
 # INBOX rather than typing into its pane. Rate-limited per ticket, and only
 # when no branch already carries the ticket id - a started ticket is not a
 # request to start it again.
+# A TICKET MAPS TO A REPO BY ITS PREFIX (repos[].prefix, every form
+# ws_repo_prefixes knows): that is the only ticket-to-repo link there is.
 # Resolve ticket ownership independently of liveness: an absent orchestrator
 # still owns its tickets, and its covering owner card must hold their nudges.
 # Unknown or ambiguous prefix ownership stays actionable through root.
-_steward_ready_ticket_product() { # <wsdir> <ticket-id> -> unique product or empty
-  local wsdir="$1" id="$2" repo pfx prods
+_steward_ready_ticket_repos() { # <wsdir> <ticket-id> -> every repo whose prefix matches, one per line
+  local wsdir="$1" id="$2" repo pfx
   pfx="${id%-*}"
   [ -n "$pfx" ] && [ "$pfx" != "$id" ] || return 0
-  prods=""
   for repo in $(ws_repo_names "$wsdir"); do
     if ws_repo_prefixes "$wsdir" "$repo" | grep -qix -- "$pfx"; then
-      prods="$prods$(ws_product_of_repo "$wsdir" "$repo")"$'\n'
+      printf '%s\n' "$repo"
     fi
+  done
+}
+
+_steward_ready_ticket_product() { # <wsdir> <ticket-id> -> unique product or empty
+  local wsdir="$1" repo prods=""
+  for repo in $(_steward_ready_ticket_repos "$wsdir" "$2"); do
+    prods="$prods$(ws_product_of_repo "$wsdir" "$repo")"$'\n'
   done
   prods="$(printf '%s' "$prods" | sed '/^$/d' | sort -u)"
   case "$prods" in ""|*$'\n'*) return 0 ;; esac
   printf '%s' "$prods"
+}
+
+# THE LANE A TICKET'S REPO DECLARES (repos[].lane), when exactly one repo
+# carries the ticket's prefix: that lane owns the repo's work, so its Todo
+# nudge is the lane's - whatever the product's orchestrator mode.
+_steward_ready_ticket_lane_owner() { # <wsdir> <ticket-id> -> lane mailbox or empty
+  local repos
+  repos="$(_steward_ready_ticket_repos "$1" "$2")"
+  case "$repos" in ""|*$'\n'*) return 0 ;; esac
+  [ -n "$(ws_repo_lane "$1" "$repos")" ] || return 0
+  ws_repo_pr_owner "$1" "$repos"
 }
 
 _steward_ready_ticket_dest() { # <resolved-product> <agents-json>
@@ -1134,7 +1153,7 @@ _steward_ready_ticket_dest() { # <resolved-product> <agents-json>
 
 _steward_ready_tickets() { # [agents-json]
   local agents_json="${1:-}"
-  local ws wsdir trigger teams key ids id title repo found product owner card dest
+  local ws wsdir trigger teams key ids id title repo found product owner card dest lane_dest mode
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ "$(ws_ticket "$wsdir" system)" = "linear" ] || continue
@@ -1193,7 +1212,19 @@ _steward_ready_tickets() { # [agents-json]
         done
         [ "$found" = 1 ] && continue
         product="$(_steward_ready_ticket_product "$wsdir" "$id")"
-        if [ -n "$product" ]; then
+        # WHO OWNS IT. (1) A lane its repo declares; (2) an auto product's
+        # agent, routed as before; (3) a manual/none product with no owning
+        # lane belongs to no agent here, so it is not nudged - and a nudge
+        # still open from before is taken down, once, saying why.
+        lane_dest="$(_steward_ready_ticket_lane_owner "$wsdir" "$id")"
+        if [ -z "$lane_dest" ] && [ -n "$product" ]; then
+          IFS=$'\t' read -r mode _ <<< "$(ws_orchestrator_mode "$wsdir" "$product")"
+          if [ "$mode" != auto ]; then
+            _steward_clear "$ws" "ready-$id" "$id: $product is set to $mode here; no agent owns its Todo tickets"
+            continue
+          fi
+        fi
+        if [ -z "$lane_dest" ] && [ -n "$product" ]; then
           # Match the owner before a missing agent falls back to root. Cache
           # once per product for this workspace sweep, never across ticks.
           if [ -z "${owner_cards[$product]+present}" ]; then
@@ -1213,10 +1244,12 @@ _steward_ready_tickets() { # [agents-json]
         # that they want this built; an agent reversing it erases the request
         # with nobody informed. If it genuinely cannot be started, say so ON the
         # ticket and leave the state for the human to change.
-        dest="$(_steward_ready_ticket_dest "$product" "$agents_json")"
+        # The fp makes the nudge an OPEN item: a repeat rolls up into it, and
+        # it can be taken down once nobody here owns the ticket any more.
+        dest="${lane_dest:-$(_steward_ready_ticket_dest "$product" "$agents_json")}"
         cmd_inbox send "$dest" \
           "steward: $id is in '$trigger' with no branch anywhere - $title. The owner moved it there to say BUILD THIS: plan it and delegate to the owning repo orchestrator. DO NOT change its state out of '$trigger' yourself - if it cannot be started, comment on the ticket saying exactly what is missing and leave the state alone for the owner to decide." \
-          --from steward --workspace "$ws" --kind status >/dev/null 2>&1 \
+          --from steward --workspace "$ws" --kind status --fp "ready-$id" >/dev/null 2>&1 \
           && c_ok "ready ticket $id handed to $dest's inbox"
       done <<< "$ids"
     done

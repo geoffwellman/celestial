@@ -1,0 +1,2 @@
+### Fixed
+- The steward's ready/Todo ticket nudge now goes to the right owner. A ticket whose repo declares a lane (`repos[].lane`) goes to that lane. A ticket whose product is `auto` is routed as before. A ticket whose product is `manual` or `none` on this box (including through `workspace.local.yaml`) and has no owning lane is no longer mailed to root. Any of its nudges still open is taken down once, with a line explaining why (`<product> is set to manual here; no agent owns its Todo tickets`).
