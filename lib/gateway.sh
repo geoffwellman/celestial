@@ -473,6 +473,22 @@ gateway_codex_model_p() { # <model id> - 0 when it names a Codex-family model
   case "$(gateway_codex_bare_id "$1")" in gpt-*|codex-*|o[0-9]*) return 0 ;; esac
   return 1
 }
+# The omp route's spellings of one Claude id: celgw/omp/<id>, omp/<id>,
+# anthropic/<id> and claude/<id> are all <id> (_profile_gateway_route_omp).
+gateway_omp_bare_id() { # <model id> -> the bare id
+  local id="$1"
+  id="${id#"$GATEWAY_OMP_PROVIDER"/}"; id="${id#"$GATEWAY_OMP_PREFIX"/}"
+  id="${id#anthropic/}"; id="${id#claude/}"
+  printf '%s' "$id"
+}
+# EVERY SPELLING OF ONE MODEL, reduced to the id the provider serves: the Codex
+# prefixes (gateway_codex_bare_id), pi's ompgw-claude/ and the omp route's.
+# celgw/omp/claude-opus-5-5, anthropic/claude-opus-5-5 and claude-opus-5-5
+# are one model; a provider is never inferred from it.
+gateway_model_bare_id() { # <model id> -> the bare id
+  local id; id="$(gateway_codex_bare_id "$1")"
+  gateway_omp_bare_id "${id#ompgw-claude/}"
+}
 gateway_pi_provider_for_model() { # <model id>
   case "${1#ompgw/}" in claude/*|claude-*) printf 'ompgw-claude'; return 0 ;; esac
   if gateway_codex_model_p "$1"; then printf 'ompgw-codex'; else printf 'ompgw'; fi

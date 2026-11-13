@@ -1959,6 +1959,102 @@ run_launch_diff() { # <expected-argv-file> <actual-argv-file> -> "missing: ...; 
   printf '%s' "$out"
 }
 
+# The value an argv gives a flag (`--flag value` or `--flag=value`; the last
+# wins). Fails when the flag is absent.
+_run_argv_flag() { # <NUL-delimited-argv-file> <flag>
+  local a prev="" val="" rc=1
+  while IFS= read -r -d '' a; do
+    if [ "$prev" = "$2" ]; then val="$a"; rc=0; fi
+    case "$a" in "$2"=*) val="${a#*=}"; rc=0 ;; esac
+    prev="$a"
+  done < "$1"
+  printf '%s' "$val"
+  return "$rc"
+}
+
+# The argv file without the flag: `--flag value` and `--flag=value` both go.
+_run_argv_drop() { # <NUL-delimited-argv-file> <flag>
+  local -a v out=()
+  local i=0 n
+  mapfile -d '' -t v < "$1"; n="${#v[@]}"
+  while [ "$i" -lt "$n" ]; do
+    case "${v[$i]}" in
+      "$2") i=$((i+2)); continue ;;
+      "$2"=*) i=$((i+1)); continue ;;
+    esac
+    out+=("${v[$i]}"); i=$((i+1))
+  done
+  printf '%s\0' "${out[@]}" > "$1"
+}
+
+# THE MODEL A SAVED SESSION RUNS NOW (omp and pi native JSONL): the later in
+# the file of its last model_change and its last assistant message's own
+# provider/model - a session can switch model without a model_change. Only
+# those two count: a model_usage entry is a helper model's call (omp's find
+# and title helpers), never the session's own model. The thinking level is
+# the last thinking_level_change: its effective level, and what was
+# configured when that is set (`auto`). Three lines - model, level,
+# configured - or nothing when no model is recorded or the file is unreadable.
+# A torn last line (a session mid-write) is skipped, not fatal.
+run_session_model() { # <session-file>
+  [ -n "$1" ] && [ -r "$1" ] || return 0
+  jq -Rrn '
+    reduce (inputs | fromjson? | select(type == "object")) as $e ({};
+      if $e.type == "model_change" then
+        (if ($e.model | type) == "string" then $e.model
+         elif ($e.modelId | type) == "string" then ([($e.provider | strings), $e.modelId] | join("/"))
+         else null end) as $m
+        | if $m == null then . else .m = $m end
+      elif $e.type == "message" then
+        if ($e.message | type) == "object" and $e.message.role == "assistant"
+           and ($e.message.model | type) == "string"
+        then .m = ([($e.message.provider | strings), $e.message.model] | join("/"))
+        else . end
+      elif $e.type == "thinking_level_change" then
+        .t = (($e.thinkingLevel | strings) // "") | .c = (($e.configured | strings) // "")
+      else . end)
+    | if .m == null then empty else .m, (.t // ""), (.c // "") end' "$1" 2>/dev/null || true
+}
+
+# What a session says it runs, as one cache-safe word: s:model|level|configured.
+_run_session_token() { # <session-file>
+  local m="" t="" c=""
+  { IFS= read -r m; IFS= read -r t; IFS= read -r c; } < <(run_session_model "$1") || true
+  printf 's:%s|%s|%s' "$m" "$t" "$c"
+}
+
+# AN EXPLICIT MODEL THE AGENT ALREADY RUNS IS NOT A LAUNCH DIFFERENCE. An
+# orchestrator restarted with --model (and --thinking) naming what its saved
+# session runs keeps that model, where a plain restart would take the
+# workspace default - "fixing" it would change its model. So when the actual
+# argv's model IS the session's current model (run_session_model; any
+# spelling, gateway_model_bare_id), both argvs lose their model item, and
+# their thinking item too when the actual level is the session's. A model the
+# session is not running is still a difference, and so is every other flag.
+# The session is read only when the two lines' model or thinking differ.
+# Sets _RUN_SESSION_READ: `-` when it was not read, else _run_session_token's
+# answer, so a cached verdict that depended on it is checked against it again.
+_run_kept_model() { # <runtime> <session-file|-> <expected-argv-file> <actual-argv-file>
+  local rt="$1" sess="$2" exp="$3" act="$4" mflag tflag="" model level r m t c
+  _RUN_SESSION_READ=-
+  mflag="$(agent_model_flag "$rt")"
+  [ -n "$mflag" ] && [ -n "$sess" ] && [ "$sess" != - ] || return 0
+  model="$(_run_argv_flag "$act" "$mflag")" && [ -n "$model" ] || return 0
+  [ "$(agent_thinking "$rt" strategy)" != flag ] || tflag="$(agent_thinking "$rt" flag)"
+  if [ "$model" = "$(_run_argv_flag "$exp" "$mflag")" ] && { [ -z "$tflag" ] \
+       || [ "$(_run_argv_flag "$act" "$tflag")" = "$(_run_argv_flag "$exp" "$tflag")" ]; }; then
+    return 0
+  fi
+  _RUN_SESSION_READ="$(_run_session_token "$sess")"
+  r="${_RUN_SESSION_READ#s:}"; m="${r%%|*}"; r="${r#*|}"; t="${r%%|*}"; c="${r#*|}"
+  [ -n "$m" ] && [ "$(gateway_model_bare_id "$model")" = "$(gateway_model_bare_id "$m")" ] || return 0
+  _run_argv_drop "$exp" "$mflag"; _run_argv_drop "$act" "$mflag"
+  [ -n "$tflag" ] || return 0
+  level="$(_run_argv_flag "$act" "$tflag")" && [ -n "$level" ] || return 0
+  [ "$level" = "$t" ] || [ "$level" = "$c" ] || return 0
+  _run_argv_drop "$exp" "$tflag"; _run_argv_drop "$act" "$tflag"
+}
+
 _run_restart_wait() { # <pane>: until no agent is live in it
   local i=0
   while [ "$i" -lt "${CEL_RESTART_WAIT:-20}" ]; do
@@ -2402,7 +2498,7 @@ _run_lane_model_valid() { # runtime model; offline syntax, never a provider prob
 }
 
 _run_lane_remember_current_model() { # cwd name runtime model pid dry
-  local cwd="$1" name="$2" runtime="$3" model="$4" pid="$5" dry="$6" f flag a previous="" actual=""
+  local cwd="$1" name="$2" runtime="$3" model="$4" pid="$5" dry="$6" f actual=""
   [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || die 'cel run: expected a live runtime PID'
   f="$(_rex_file "$name")"
   [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f" \
@@ -2410,12 +2506,7 @@ _run_lane_remember_current_model() { # cwd name runtime model pid dry
   jq -e --arg cwd "$cwd" --arg name "$name" --arg rt "$runtime" --argjson pid "$pid" \
     '.cwd == $cwd and .name == $name and .agent == $rt and .pid == $pid and .role == "solo" and .backend == "rex"' "$f" >/dev/null \
     || die 'cel run: current lane PID/runtime/identity does not match'
-  flag="$(agent_model_flag "$runtime")"
-  while IFS= read -r -d '' a; do
-    if [ "$previous" = "$flag" ]; then actual="$a"; fi
-    case "$a" in "$flag"=*) actual="${a#*=}" ;; esac
-    previous="$a"
-  done < "$(_run_proc_root)/$pid/cmdline"
+  actual="$(_run_argv_flag "$(_run_proc_root)/$pid/cmdline" "$(agent_model_flag "$runtime")")" || true
   [ "$actual" = "$model" ] && _rex_live "$f" \
     || die 'cel run: requested model is not the current runtime launch model'
   _run_lane_choices_commit "$cwd" '' "$model" "$runtime" "$dry" || die 'cel run: could not remember lane model'
@@ -3439,11 +3530,13 @@ _run_verdict_signature() { # wsdir pid runtime backend
 }
 
 # Current describes an observable launch matching the effective product plan,
-# not a fresh test of its hooks. Rewritten argv stays explicitly unknown.
-_run_orch_verdict() { # ws role product name pane cwd runtime
-  local ws="$1" role="$2" p="$3" name="$4" pane="$5" cwd="$6" rt="$7"
+# not a fresh test of its hooks. Rewritten argv stays explicitly unknown. A
+# model the saved session already runs is not a difference (_run_kept_model);
+# a cached verdict that read the session holds only while it says the same.
+_run_orch_verdict() { # ws role product name pane cwd runtime [session-file|-]
+  local ws="$1" role="$2" p="$3" name="$4" pane="$5" cwd="$6" rt="$7" session="${8:--}"
   local -a argv
-  local vfile k1 k2 k3 k4 l d saved_signature keep="" signature wsdir backend launch_role
+  local vfile k1 k2 k3 k4 l d saved_signature kept keep="" signature wsdir backend launch_role
   local i exp act missing expected_rt
   _RUN_LAUNCH=unknown; _RUN_DETAIL=""; _RUN_MODEL="-"
   if ! _run_pane_pid "$pane" "$cwd" "$rt"; then _RUN_DETAIL="$_RUN_WHY"; return 0; fi
@@ -3467,15 +3560,16 @@ _run_orch_verdict() { # ws role product name pane cwd runtime
   _run_build
   vfile="${CEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel}/orch-verdicts.tsv"
   if [ -f "$vfile" ]; then
-    while IFS=$'\t' read -r k1 k2 k3 k4 l d saved_signature; do
+    while IFS=$'\t' read -r k1 k2 k3 k4 l d saved_signature kept; do
       [ -n "$k1" ] || continue
       if [ "$k2" = "$ws" ] && [ "$k3" = "$name" ]; then
-        if [ "$k1" = "$_RUN_BUILD" ] && [ "$k4" = "$_RUN_PID" ] && [ "$saved_signature" = "$signature" ]; then
+        if [ "$k1" = "$_RUN_BUILD" ] && [ "$k4" = "$_RUN_PID" ] && [ "$saved_signature" = "$signature" ] \
+           && { [ "${kept:--}" = - ] || [ "$kept" = "$(_run_session_token "$session")" ]; }; then
           _RUN_LAUNCH="$l"; _RUN_DETAIL="${d#-}"; return 0
         fi
         continue
       fi
-      keep="$keep$k1	$k2	$k3	$k4	$l	$d	$saved_signature
+      keep="$keep$k1	$k2	$k3	$k4	$l	$d	$saved_signature	${kept:--}
 "
     done < "$vfile"
   fi
@@ -3485,9 +3579,11 @@ _run_orch_verdict() { # ws role product name pane cwd runtime
   fi
   IFS= read -r -d '' expected_rt < "$exp"
   printf '%s\0' "${argv[@]}" > "$act"
+  _RUN_SESSION_READ=-
   if [ "$expected_rt" != "$rt" ]; then
     missing="runtime $rt differs from configured $expected_rt ($launch_role/$backend)"
   else
+    _run_kept_model "$rt" "$session" "$exp" "$act"
     missing="$(run_launch_diff "$exp" "$act")"
   fi
   rm -f -- "$exp" "$act"
@@ -3496,7 +3592,7 @@ _run_orch_verdict() { # ws role product name pane cwd runtime
   fi
   if [ -n "$missing" ]; then _RUN_LAUNCH=stale; _RUN_DETAIL="$missing; read from pid $_RUN_PID"; else _RUN_LAUNCH=current; fi
   [ -d "${vfile%/*}" ] || mkdir -p "${vfile%/*}" 2>/dev/null || return 0
-  printf '%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$keep" "$_RUN_BUILD" "$ws" "$name" "$_RUN_PID" "$_RUN_LAUNCH" "${_RUN_DETAIL:--}" "$signature" > "$vfile" 2>/dev/null || true
+  printf '%s%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$keep" "$_RUN_BUILD" "$ws" "$name" "$_RUN_PID" "$_RUN_LAUNCH" "${_RUN_DETAIL:--}" "$signature" "$_RUN_SESSION_READ" > "$vfile" 2>/dev/null || true
 }
 
 # EVERY ROOT/ORCHESTRATOR AND ITS LAUNCH LINE. A running orchestrator keeps the
@@ -3575,7 +3671,7 @@ run_orchestrator_rows() { # [only-ws] [roster-json] [record-sessions 1|0] [wsdir
       [ "$lname" != "-" ] || lname="$name"
       [ "$lcwd" != "-" ] || lcwd="$cwd"
       _run_status_since "$lname" "$ws" "$lstatus"
-      _run_orch_verdict "$ws" "$role" "$p" "$lname" "$lpane" "$lcwd" "$rt"
+      _run_orch_verdict "$ws" "$role" "$p" "$lname" "$lpane" "$lcwd" "$rt" "$lsession"
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$lpane" "$lstatus" \
         "$_RUN_SINCE" "$_RUN_MODEL" "$_RUN_LAUNCH" "${_RUN_DETAIL:--}" "$cmd" "$role" "$p"
     done < <(if [ -n "${5:-}" ]; then printf '%s\n' "$5"; else run_orchestrator_candidates "$ws" "$wsdir" "$roster"; fi)
