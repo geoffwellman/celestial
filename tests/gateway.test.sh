@@ -88,6 +88,7 @@ for a in "\$@"; do case "\$a" in http://*|https://*) url="\$a" ;; esac; done
 case "\$url" in
   */healthz)   exit "\${GW_DOWN:-0}" ;;
   */v1/models)
+    [ -z "\${GW_MODELS_DOWN:-}" ] || exit 22
     if [ -n "\${GW_MODELS:-}" ]; then printf '%s\n' "\$GW_MODELS"; else
     printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-5-5","context_length":1000000,"max_output_tokens":128000},{"id":"claude-opus-4-8","context_length":1000000,"max_output_tokens":128000},{"id":"claude-custom-unknown","context_length":200000,"max_output_tokens":64000}]}'; fi ;;
   */v0/management/auth-files/fields)
@@ -623,6 +624,25 @@ test_gateway_doctor_reports_unavailable_pi_enrichment_and_bare_published_entries
   gateway_pi_catalog_json() { printf '{"error":"Unsupported authoritative OMP cache schema 99 for anthropic (this Celestial reads 13, 14, 15)"}\n' >&2; return 1; }
   out="$(gateway_doctor_line 2>/dev/null)"
   assert_contains "$out" 'Pi capability enrichment unavailable (Unsupported authoritative OMP cache schema 99 for anthropic (this Celestial reads 13, 14, 15))'
+  _gw_teardown
+}
+
+# The audit itself can fail (no readable published catalog, no private key):
+# that is one doctor warning naming the cause and the next step, not silence.
+# A box without the gateway installed stays quiet about Pi.
+test_gateway_doctor_reports_a_failed_pi_model_audit_once() {
+  _gw_setup
+  local out
+  out="$(gateway_doctor_line 2>/dev/null)"
+  case "$out" in *Pi*|*pi\ models*) echo "Pi line without an installed gateway: $out"; _gw_teardown; return 1 ;; esac
+  cmd_gateway install --no-start >/dev/null
+  out="$(GW_MODELS_DOWN=1 gateway_doctor_line 2>/dev/null)"
+  assert_eq "$(grep -c 'Pi model audit failed' <<<"$out")" 1
+  assert_contains "$out" "gateway: Pi model audit failed (cel gateway pi-models: could not read the published model catalog from $(gateway_url)/v1/models) - cel gateway status, then cel gateway pi-models --list"
+  rm -f "$(gateway_state_dir)/api-key"
+  out="$(gateway_doctor_line 2>/dev/null)"
+  assert_eq "$(grep -c 'Pi model audit failed' <<<"$out")" 1
+  assert_contains "$out" 'gateway: Pi model audit failed (cel gateway pi-models: existing private gateway api-key required; authentication was not changed) - cel gateway status, then cel gateway pi-models --list'
   _gw_teardown
 }
 

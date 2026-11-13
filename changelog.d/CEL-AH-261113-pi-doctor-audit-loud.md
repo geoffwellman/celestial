@@ -1,0 +1,2 @@
+### Fixed
+- If the gateway is installed and ready but the Pi model audit cannot run, `cel doctor` now reports it instead of saying nothing. This happens when the published gateway model catalog cannot be read or the private gateway api-key is missing. The doctor prints one line naming the cause, followed by `cel gateway status, then cel gateway pi-models --list`. A box without the gateway installed still prints nothing about Pi. When the gateway's `/v1/models` request fails, `cel gateway pi-models` and the launch-time Pi model write now name the URL they could not read.
