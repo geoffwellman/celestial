@@ -3619,18 +3619,18 @@ _run_orch_verdict() { # ws role product name pane cwd runtime [session-file|-]
 # it is unknown, or why it is missing. `-` stands for empty. The command is for
 # humans to read; callers that run it rebuild the argv from role/ws/product.
 run_orchestrator_candidates() { # <ws> <wsdir> <roster-json>
-  local yj modes p
+  local yj modes
   yj="$(_yaml_json "$2/workspace.yaml")" || return 0
-  # ONE RESOLVER: each product's mode is ws_orchestrator_mode's, the answer
+  # ONE RESOLVER: each product's mode is ws_orchestrator_modes', the answer
   # `cel ws up` and the steward act on (workspace.local.yaml included) - never
-  # derived a second time here.
-  modes="$(for p in $(ws_product_names "$2"); do
-      printf '%s\t%s\n' "$p" "$(ws_orchestrator_mode "$2" "$p" | cut -f1)"
-    done | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}')" || return 0
-  jq -r --arg ws "$1" --arg wsdir "$2" --argjson modes "$modes" --argjson roster "${3:-null}" '
+  # derived a second time here. One call answers every product, so the cost
+  # does not grow with the product count.
+  modes="$(ws_orchestrator_modes "$2")" || return 0
+  jq -r --arg ws "$1" --arg wsdir "$2" --arg modetsv "$modes" --argjson roster "${3:-null}" '
     def agent_name: ascii_downcase | gsub("[^a-z0-9_-]+"; "-") | sub("^[^a-z]+"; "") | sub("-$"; "") | .[0:32];
     def dash: if . == null or . == "" then "-" else . end;
-    . as $y
+    ($modetsv | split("\n") | map(select(. != "") | split("\t") | {(.[0]): .[1]}) | add // {}) as $modes
+    | . as $y
     | ([$roster.result.agents[]? | select((.pane_id // "") != "")]) as $a
     | ($y.products // []) as $ps
     | ([$ps[].repos // []] | flatten) as $used
