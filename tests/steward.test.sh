@@ -626,6 +626,7 @@ test_ready_owner_card_holds_and_rearms_without_waiting_for_window() {
 test_ready_owner_card_does_not_hide_other_products_or_workspaces() {
   _ready_owner_fixture
   READY_OWNER_NODES='[{"identifier":"WG-1","title":"widget"},{"identifier":"OT-2","title":"other product"}]'
+  sed -i 's/{name: lone, repos: \[gadget\], orchestrator: manual}/{name: lone, repos: [gadget], orchestrator: auto}/' "$T/alpha/workspace.yaml"
   _owner_card alpha 1700000000000000001 "Restore Bundle solo agent" "bundle-orch taking turns"
   _owner_card beta 1700000000000000002 "Restore lone-orch" "lone-orch taking turns"
   _steward_ready_tickets "$ROSTER" >/dev/null
@@ -646,6 +647,78 @@ test_ready_owner_card_keeps_ambiguous_and_unknown_ownership_actionable() {
   local mail; mail="$(_root_mail)"
   assert_contains "$mail" 'WG-1'
   assert_contains "$mail" 'ABCD-9'
+  rm -rf "$T"
+}
+
+# --- who owns a Todo ticket ------------------------------------------------
+# (1) a lane its repo declares; (2) an auto product's agent, as before;
+# (3) a manual/none product with no owning lane: no nudge, and one left open
+# from before is taken down once, saying why.
+test_ready_ticket_of_a_manual_product_is_not_nudged_and_an_old_nudge_clears_once() {
+  _ready_owner_fixture
+  READY_OWNER_NODES='[{"identifier":"OT-1","title":"gadget work"}]'
+  sed -i 's/{name: lone, repos: \[gadget\], orchestrator: manual}/{name: lone, repos: [gadget], orchestrator: auto}/' "$T/alpha/workspace.yaml"
+  # nudged while lone was auto (its agent not running, so root got it)...
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id
+  id="$(_inbox_open_fp alpha ready-OT-1 steward root)"
+  [ -n "$id" ] || { echo 'no open nudge to start from'; return 1; }
+  # ...then this box sets it manual: no nudge, and the old one goes, once
+  printf 'products:\n  - {name: lone, orchestrator: manual}\n' > "$T/alpha/workspace.local.yaml"
+  local j; for j in 1 2 3; do _steward_forget ready-OT-1; _steward_ready_tickets "$ROSTER" >/dev/null; done
+  assert_eq "$(jq -s '[.[] | select((.message // "") | startswith("steward: OT-1"))] | length' "$f")" 1
+  assert_eq "$(_inbox_open_fp alpha ready-OT-1 steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "resolution" and .ref == $i)] | length' "$f")" 1
+  assert_eq "$(jq -rs '[.[] | select((.message // "") | startswith("cleared:")) | .message] | join("|")' "$f")" \
+    "cleared: OT-1: lone is set to manual here; no agent owns its Todo tickets"
+  rm -rf "$T"
+}
+
+test_ready_ticket_of_a_manual_product_follows_workspace_local_manual() {
+  _ready_route_fixture
+  STUB_TICKET=WG-1
+  printf 'products:\n  - {name: bundle, orchestrator: manual}\n' > "$T/alpha/workspace.local.yaml"
+  _steward_ready_tickets "$LIVE_ROSTER" >/dev/null
+  assert_eq "$(cat "$T/sent")" ""
+  rm -rf "$T"
+}
+
+test_ready_ticket_of_a_lane_owned_repo_goes_to_the_lane() {
+  STUB_TICKET=OT-1 _ready_route_fixture
+  sed -i 's/prefix: OT,/prefix: OT, lane: ui,/' "$T/alpha/workspace.yaml"
+  local lane; lane="$(ws_repo_pr_owner "$T/alpha" gadget)"
+  assert_eq "$lane" "lone-ui"
+  # the lane is not running: its mailbox keeps the nudge, and root (lone is
+  # manual) is told once per ticket, naming the lane and how to start it
+  local real; real="$(declare -f cmd_inbox)"
+  cmd_inbox() { printf '%s\n' "$2" >> "$T/sent"; printf '%s\n' "$3" >> "$T/msgs"; }
+  STUB_TICKET=OT-1 _steward_ready_tickets "$ROSTER" >/dev/null
+  _steward_forget ready-OT-1
+  STUB_TICKET=OT-1 _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(tr '\n' ' ' < "$T/sent")" "lone-ui root lone-ui "
+  assert_contains "$(cat "$T/msgs")" "cel run solo --product lone --lane ui"
+  eval "$real"
+  rm -rf "$T"
+}
+
+# Nudges sent before they carried an fp are taken down too, to any
+# recipient, matched on their own opening words - and only this ticket's.
+test_ready_ticket_of_a_manual_product_clears_legacy_fpless_nudges_to_anyone() {
+  _ready_owner_fixture
+  READY_OWNER_NODES='[{"identifier":"OT-1","title":"gadget work"}]'
+  local f="$CEL_INBOX_DIR/alpha.jsonl"
+  {
+    printf '%s\n' '{"id":"1690000000000000001","to":"root","from":"steward","kind":"status","message":"steward: OT-1 is in '"'"'Todo'"'"' with no branch anywhere - gadget work"}'
+    printf '%s\n' '{"id":"1690000000000000002","to":"lone-orch","from":"steward","kind":"status","message":"steward: OT-1 is in '"'"'Todo'"'"' with no branch anywhere - gadget work"}'
+    printf '%s\n' '{"id":"1690000000000000003","to":"root","from":"steward","kind":"status","message":"steward: OT-10 is in '"'"'Todo'"'"' with no branch anywhere - other"}'
+    printf '%s\n' '{"id":"1690000000000000004","to":"root","from":"someone","kind":"status","message":"steward: OT-1 is in '"'"'Todo'"'"' quoted"}'
+  } >> "$f"
+  local j; for j in 1 2 3; do _steward_ready_tickets "$ROSTER" >/dev/null; done
+  assert_eq "$(jq -rs '[.[] | select(.kind == "resolution") | .ref] | sort | join(" ")' "$f")" \
+    "1690000000000000001 1690000000000000002"
+  assert_eq "$(jq -s '[.[] | select((.message // "") | startswith("cleared:")) | select(.kind != "resolution")] | length' "$f")" 1
+  # no new nudge: the three seeded lines are all there is
+  assert_eq "$(jq -s '[.[] | select((.message // "") | startswith("steward: OT-1 "))] | length' "$f")" 3
   rm -rf "$T"
 }
 
