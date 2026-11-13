@@ -76,6 +76,16 @@ test('embedded provenance cannot waive aliases, native providers, malformed capa
   }
 });
 
+test('catalog provenance accepts the shared OMP cache versions and refuses others', () => {
+  const withVersion = schemaVersion => {
+    const value = structuredClone(catalog);
+    for (const row of [...value.sources, value.models[0].source, value.models[1].source]) row.schemaVersion = schemaVersion;
+    return value;
+  };
+  for (const version of [13, 14, 15]) assert.equal(catalogModels(withVersion(version)).size, 3);
+  assert.throws(() => catalogModels(withVersion(99)), /Invalid catalog source provenance/);
+});
+
 test('native inventory binds every tuple, capability and exact variant while preserving unrelated settings', () => {
   const inventory = catalog.models.map(row => ({ ...nativeModel(row), id: row.id, providerID: row.providerID, enabled: true }));
   // Actual v2.2.5 Model.Info omits the configuration-only reasoning field.

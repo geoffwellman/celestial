@@ -171,18 +171,52 @@ test('failed HTTP and malformed response never produce a partial usable catalog'
 });
 
 test('unknown cache schemas and non-authoritative sources cannot authorize models', () => {
-  for (const overrides of [{ schemaVersion: 15 }, { schemaVersion: '14' }, { authoritative: false }, { updatedAt: NaN }]) {
+  for (const overrides of [{ schemaVersion: 99 }, { schemaVersion: '14' }, { authoritative: false }, { updatedAt: NaN }]) {
     assert.deepEqual(resolveCatalog(['exact-chat'], [source([model()], overrides)]).excluded,
       [{ id: 'exact-chat', reason: 'metadata_unavailable' }]);
   }
 });
 
-test('cache versions 13 and 14 both supply exact capabilities', () => {
-  for (const schemaVersion of [13, 14]) {
+test('cache versions 13, 14 and 15 all supply exact capabilities', () => {
+  for (const schemaVersion of [13, 14, 15]) {
     const result = resolveCatalog(['exact-chat'], [source([model()], { schemaVersion })]);
     assert.equal(result.models[0].contextWindow, 500000);
     assert.equal(result.models[0].source.schemaVersion, schemaVersion);
   }
+});
+
+// The row shape OMP 18.16 writes (version 15), read through the real SQLite
+// reader and the CLI: no `type`, extra per-model keys, `kind` on image models.
+const v15 = (entry) => ({ ...entry, identity: { class: 'fixture', family: entry.identity?.family ?? 'fixture', revision: '1.0.0' },
+  cost: { input: 1 }, int: 3, promptCache: true, requiresGlyphTokenization: false, supportsComputerUse: false,
+  supportsComputerUseConfig: null, tokenizer: 'fixture', webSearch: false, webSearchModel: null, baseUrl: 'https://cache.invalid' });
+const fable = v15(model('claude-fable-5-2', { name: 'Claude Fable 5.2', api: 'anthropic-messages', contextWindow: 1000000,
+  thinking: { mode: 'anthropic-adaptive', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], supportsDisplay: true, prefixBinding: true } }));
+const v15Records = () => [
+  // Not image-shaped by name: only the v15 `kind` keeps it out of the chat catalog.
+  source([v15(model('gpt-6.1-sol')), v15(model('gpt-pixel-1', { kind: 'image', supportsTools: false, reasoning: false, thinking: undefined }))], { schemaVersion: 15 }),
+  source([fable], { providerKey: 'anthropic', schemaVersion: 15 }),
+];
+
+test('cache version 15 rows enrich newly published models and keep kind-image models out', async t => {
+  const { db } = await fixture(t, v15Records());
+  const result = resolveCatalog(['claude-fable-5-2', 'gpt-6.1-sol', 'gpt-pixel-1'], await loadNativeMetadata(db));
+  const claude = result.models.find(entry => entry.id === 'claude-fable-5-2');
+  assert.deepEqual([claude.providerID, claude.contextWindow, claude.maxTokens, claude.reasoning, claude.input],
+    ['ompgw-claude', 1000000, 128000, true, ['text', 'image']]);
+  assert.deepEqual(claude.thinking, fable.thinking);
+  assert.deepEqual(claude.source, { providerKey: 'anthropic', updatedAt: 100, schemaVersion: 15 });
+  assert.equal(result.models.find(entry => entry.id === 'gpt-6.1-sol').contextWindow, 500000);
+  assert.deepEqual(result.excluded, [{ id: 'gpt-pixel-1', reason: 'non_chat_model' }]);
+});
+
+test('the CLI names an unsupported cache schema instead of silently publishing defaults', async t => {
+  const { db } = await fixture(t, v15Records().map(record => ({ ...record, schemaVersion: 99 })));
+  const catalog = fileURLToPath(new URL('./catalog.mjs', import.meta.url));
+  const result = await child(process.execPath, [catalog, '--metadata-db', db], {}, JSON.stringify({ data: [{ id: 'claude-fable-5-2' }] }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).models[0].source.kind, 'gateway-advertised');
+  assert.match(result.stderr, /unsupported OMP model_cache schema anthropic v99, openai-codex v99 \(this Celestial reads 13, 14, 15\)/);
 });
 
 test('corrupt private SQLite input reports a generic error without exposing its contents', async t => {

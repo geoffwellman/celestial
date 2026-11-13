@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
+import { OMP_MODEL_CACHE_VERSIONS, cacheVersionLabel } from '../omp-model-cache.mjs';
 
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const families = [
@@ -169,7 +170,7 @@ with sqlite3.connect(pathlib.Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', 
  db.execute('PRAGMA query_only = ON')
  db.execute('BEGIN')
  rows = db.execute("SELECT provider_id, version, updated_at, authoritative, models FROM model_cache WHERE provider_id = 'anthropic' OR provider_id = 'openai-codex' OR provider_id LIKE 'openai-codex:%'").fetchall()
- fields = ('id', 'name', 'provider', 'api', 'type', 'reasoning', 'input', 'contextWindow', 'maxTokens', 'thinking')
+ fields = ('id', 'name', 'provider', 'api', 'type', 'kind', 'reasoning', 'input', 'contextWindow', 'maxTokens', 'thinking')
  output = []
  for provider, version, updated, authoritative, raw in rows:
   if authoritative != 1:
@@ -207,9 +208,9 @@ function selectCache(rows, family) {
   candidates.sort(compare);
   if (!candidates.length) return;
   const selected = candidates[0];
-  // OMP 18.x writes model_cache as version 13 or 14 depending on which binary
-  // refreshed it last; both carry the same per-model fields read here.
-  if (![13, 14].includes(selected.version)) throw new Error(`Unsupported authoritative OMP cache schema for ${family.provider}`);
+  if (!OMP_MODEL_CACHE_VERSIONS.includes(selected.version)) {
+    throw new Error(`Unsupported authoritative OMP cache schema ${cacheVersionLabel(selected.version)} for ${family.provider} (this Celestial reads ${OMP_MODEL_CACHE_VERSIONS.join(', ')})`);
+  }
   if (candidates[1] && compare(selected, candidates[1]) === 0 && JSON.stringify(selected.models) !== JSON.stringify(candidates[1].models)) throw new Error(`Conflicting authoritative OMP cache sources for ${family.provider}`);
   return selected;
 }
@@ -239,7 +240,9 @@ function mergeModels(native, cached, family) {
     if (typeof model.id !== 'string' || !model.id) throw new Error('Invalid authoritative model identity');
     if (model.provider !== family.provider || model.api !== family.api) throw new Error(`Authoritative model source conflict: ${model.id}`);
     if (model.id.includes('/')) { omit(model.id, 'scoped-alias'); continue; }
-    if (model.type !== undefined && model.type !== 'chat') { omit(model.id, 'non-chat-model'); continue; }
+    // Cache versions up to 14 mark a model's kind with `type`, 15 with `kind`.
+    const kind = model.type ?? model.kind;
+    if (kind !== undefined && kind !== 'chat') { omit(model.id, 'non-chat-model'); continue; }
     addExact(sourceModels, model, cached.provider);
     const entry = capabilities(model, family.api);
     if (!entry) { omit(model.id, 'incomplete-authoritative-chat-capabilities'); continue; }

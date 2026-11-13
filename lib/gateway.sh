@@ -509,16 +509,36 @@ gateway_pi_catalog_json() {
   node "$CEL_ROOT/tools/pi/codex-catalog.mjs" "$real"
 }
 
+# The one line codex-catalog.mjs (or a test stub) printed when it failed: its
+# {"error": ...} message, else the line itself, bounded. Never cached data -
+# the helper only reports its own fixed messages and integer versions.
+_gateway_pi_enrichment_cause() { # <stderr file>
+  local line
+  line="$(grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1)"
+  line="$(jq -er '.error | select(type == "string")' <<<"$line" 2>/dev/null || printf '%s' "$line")"
+  line="$(printf '%s' "$line" | tr -d '\000-\037' | cut -c1-240)"
+  printf '%s' "${line:-the Pi capability helper failed without a message}"
+}
+
 # Discovery is the availability authority, not the capability cache. Unknown
 # published chat IDs remain selectable with Pi defaults; omissions are explicit.
+# Enrichment failure never blocks a launch, but it is LOUD: every published
+# Claude/Codex ID then registers bare, and Pi gives a bare entry its own
+# defaults (128K context, 16K output, no thinking) - a long live session
+# overflows. .enrichment says whether it was available and, if not, why.
 gateway_pi_models_audit_json() {
-  local native published
-  native="$(gateway_pi_catalog_json)" || {
-    printf 'cel gateway pi-models: exact capability enrichment unavailable; published chat IDs use Pi defaults\n' >&2
+  local native published err cause=""
+  err="$(mktemp)" || return 1
+  if native="$(gateway_pi_catalog_json 2>"$err")"; then
+    cat "$err" >&2
+  else
+    cause="$(_gateway_pi_enrichment_cause "$err")"
+    printf 'cel gateway: WARNING: Pi capability enrichment unavailable (%s); published Claude/Codex chat IDs are registered without contextWindow, maxTokens or reasoning, so Pi applies its defaults. Fix the cause, then cel gateway pi-models --refresh\n' "$cause" >&2
     native='[]'
-  }
+  fi
+  rm -f "$err"
   published="$(gateway_models_json_existing)" || return 1
-  jq -cn --argjson native "$native" --argjson published "$published" --arg codex_re "$GATEWAY_CODEX_ID_RE" '
+  jq -cn --argjson native "$native" --argjson published "$published" --arg codex_re "$GATEWAY_CODEX_ID_RE" --arg cause "$cause" '
     if ($native | type) != "array" or ($published.data | type) != "array"
     then error("invalid Pi metadata or gateway model catalog") else . end |
     ($native | map(select(.api == "anthropic-messages" or .api == "openai-responses"))
@@ -534,7 +554,8 @@ gateway_pi_models_audit_json() {
       elif startswith("claude-") then "anthropic-messages"
       elif test($codex_re) then "openai-responses"
       else null end;
-    {models: [$ids[] | . as $id | (chat_api) as $api | select($api != null) |
+    {enrichment: (if $cause == "" then {available:true} else {available:false,cause:$cause} end),
+     models: [$ids[] | . as $id | (chat_api) as $api | select($api != null) |
                 $byid[$id] // {id:$id,api:$api}],
      defaults: [$ids[] | . as $id | select(chat_api != null and $byid[$id] == null) |
                   {id:$id,reason:"no exact capability metadata; using Pi defaults"}],
@@ -1002,7 +1023,30 @@ gateway_doctor_line() {
     [ "$n" -gt 0 ] 2>/dev/null && continue
     printf '  gateway: no %s account in the vault - cel gateway login %s\n' "$p" "$p"
   done
+  if have pi || [ -d "$(gateway_pi_dir)" ]; then gateway_pi_doctor_lines; fi
   return 0
+}
+
+# Pi registered a published Claude/Codex chat ID bare when capability
+# enrichment was unavailable; Pi then runs it at its own defaults (128K
+# context, 16K output, no thinking) and a long session overflows. Say both.
+gateway_pi_doctor_lines() {
+  local audit f bare claude_provider
+  audit="$(gateway_pi_models_audit_json 2>/dev/null)" || return 0
+  if [ "$(jq -r '.enrichment.available' <<<"$audit")" = false ]; then
+    printf '  gateway: Pi capability enrichment unavailable (%s) - fix it, then cel gateway pi-models --refresh\n' \
+      "$(jq -r '.enrichment.cause' <<<"$audit")"
+  fi
+  f="$(gateway_pi_dir)/models.json"
+  [ -s "$f" ] || return 0
+  claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
+  bare="$(jq -r --argjson audit "$audit" --arg claude "$claude_provider" '
+    ($audit.models | map(.id)) as $published
+    | [(.providers["ompgw-codex"].models // [])[], (.providers[$claude].models // [])[]
+       | select((.id | IN($published[])) and (has("contextWindow") | not)) | .id] | unique | join(" ")' "$f" 2>/dev/null)" || return 0
+  [ -n "$bare" ] || return 0
+  printf '  gateway: pi models.json: %s published Claude/Codex chat model(s) without contextWindow (Pi defaults apply): %s - cel gateway pi-models --refresh\n' \
+    "$(wc -w <<<"$bare" | tr -d ' ')" "$bare"
 }
 
 # --- the verbs ------------------------------------------------------------
