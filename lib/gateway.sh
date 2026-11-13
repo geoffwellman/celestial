@@ -241,7 +241,10 @@ gateway_models_json_existing() {
     return 1
   }
   printf 'Authorization: Bearer %s\n' "$key" \
-    | curl -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null
+    | curl -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null || {
+    printf 'cel gateway pi-models: could not read the published model catalog from %s/v1/models\n' "$(gateway_url)" >&2
+    return 1
+  }
 }
 
 # --- the account table ----------------------------------------------------
@@ -509,15 +512,15 @@ gateway_pi_catalog_json() {
   node "$CEL_ROOT/tools/pi/codex-catalog.mjs" "$real"
 }
 
-# The one line codex-catalog.mjs (or a test stub) printed when it failed: its
-# {"error": ...} message, else the line itself, bounded. Never cached data -
-# the helper only reports its own fixed messages and integer versions.
-_gateway_pi_enrichment_cause() { # <stderr file>
+# The last line a failed step printed on stderr: its {"error": ...} message,
+# else the line itself, bounded. Never cached data - the Pi capability helper
+# and the audit only report their own fixed messages, URLs and integer versions.
+_gateway_stderr_cause() { # <stderr file> <fallback>
   local line
   line="$(grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1)"
   line="$(jq -er '.error | select(type == "string")' <<<"$line" 2>/dev/null || printf '%s' "$line")"
   line="$(printf '%s' "$line" | tr -d '\000-\037' | cut -c1-240)"
-  printf '%s' "${line:-the Pi capability helper failed without a message}"
+  printf '%s' "${line:-$2}"
 }
 
 # Discovery is the availability authority, not the capability cache. Unknown
@@ -532,7 +535,7 @@ gateway_pi_models_audit_json() {
   if native="$(gateway_pi_catalog_json 2>"$err")"; then
     cat "$err" >&2
   else
-    cause="$(_gateway_pi_enrichment_cause "$err")"
+    cause="$(_gateway_stderr_cause "$err" 'the Pi capability helper failed without a message')"
     printf 'cel gateway: WARNING: Pi capability enrichment unavailable (%s); published Claude/Codex chat IDs are registered without contextWindow, maxTokens or reasoning, so Pi applies its defaults. Fix the cause, then cel gateway pi-models --refresh\n' "$cause" >&2
     native='[]'
   fi
@@ -1030,9 +1033,19 @@ gateway_doctor_line() {
 # Pi registered a published Claude/Codex chat ID bare when capability
 # enrichment was unavailable; Pi then runs it at its own defaults (128K
 # context, 16K output, no thinking) and a long session overflows. Say both.
+# The audit itself failing (no readable published catalog, no private key) is
+# reported too; gateway_doctor_line only gets here once the gateway is
+# installed and ready.
 gateway_pi_doctor_lines() {
-  local audit f bare claude_provider
-  audit="$(gateway_pi_models_audit_json 2>/dev/null)" || return 0
+  local audit f bare claude_provider err
+  err="$(mktemp)" || return 0
+  if ! audit="$(gateway_pi_models_audit_json 2>"$err")"; then
+    printf '  gateway: Pi model audit failed (%s) - cel gateway status, then cel gateway pi-models --list\n' \
+      "$(_gateway_stderr_cause "$err" 'the Pi model audit failed without a message')"
+    rm -f "$err"
+    return 0
+  fi
+  rm -f "$err"
   if [ "$(jq -r '.enrichment.available' <<<"$audit")" = false ]; then
     printf '  gateway: Pi capability enrichment unavailable (%s) - fix it, then cel gateway pi-models --refresh\n' \
       "$(jq -r '.enrichment.cause' <<<"$audit")"
