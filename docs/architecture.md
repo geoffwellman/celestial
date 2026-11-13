@@ -49,8 +49,16 @@ solo role, which also leads feature teams.
 
 People are declared in the committed `workspace.yaml` (`people:`: id, forge
 login, roles workspace-wide and per product), and a login names the person
-it is with `me:` in its gitignored `workspace.local.yaml` - the one key that
-file may set besides routing (`_WS_LOCAL_KEYS`, `lib/yaml.sh`). `ws_me` reads
+it is with `me:` in its gitignored `workspace.local.yaml` - besides routing,
+that file may set only `me:` and a product's one-way `orchestrator: manual`
+(`_WS_LOCAL_KEYS`, `lib/yaml.sh`). The merge carries a local
+`products[].orchestrator` only when it is `manual` and the committed one is
+not `none`; `ws_orchestrator_mode` applies it only over a committed `auto`
+(product, layout or default) and reports source `workspace.local.yaml`, so
+`cel ws up`, the steward's "set to manual" clear, `cel fleet`
+(`run_orchestrator_candidates`, which reads the merged view) and `cel doctor`
+agree; a local `auto` over a committed `manual` is dropped and
+`doctor_ws_local_lines` warns. `ws_me` reads
 `me` from `workspace.local.yaml` alone, never from the merged view: a local
 file that fails the merge falls back to `workspace.yaml`, and a committed `me`
 must not become this login's. `lib/workspace.sh` also reads

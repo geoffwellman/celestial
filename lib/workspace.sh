@@ -566,13 +566,28 @@ ws_product_get() { # <wsdir> <product> <key>
 # default. Any of auto|manual|none wins at each level - a product may opt IN,
 # not only out. The source is returned beside the mode so a reader can tell
 # which file said so.
-ws_orchestrator_mode() { # <wsdir> <product> -> "<mode>\t<product|layout|default>"
-  local own lay
+#
+# Then, ONE WAY ONLY: when that committed answer is auto, a
+# workspace.local.yaml `products[].orchestrator: manual` turns this box's
+# agent off (source `workspace.local.yaml`). The merge (lib/yaml.sh) carries
+# only that value, so a local auto can never start what a teammate committed
+# as manual; cel doctor names one that tries.
+ws_orchestrator_mode() { # <wsdir> <product> -> "<mode>\t<product|layout|default|workspace.local.yaml>"
+  local own lay mode src
   own="$(ws_product_get "$1" "$2" orchestrator)"
-  case "$own" in auto|manual|none) printf '%s\tproduct' "$own"; return 0 ;; esac
   lay="$(ws_layout_declared "$1" orchestrators)"
-  case "$lay" in auto|manual|none) printf '%s\tlayout' "$lay"; return 0 ;; esac
-  printf '%s\tdefault' "$(ws_orchestrators_default)"
+  case "$own" in
+    auto|manual|none) mode="$own"; src=product ;;
+    *) case "$lay" in
+         auto|manual|none) mode="$lay"; src=layout ;;
+         *) mode="$(ws_orchestrators_default)"; src=default ;;
+       esac ;;
+  esac
+  if [ "$mode" = auto ] && [ -f "$1/workspace.local.yaml" ] \
+    && [ "$(_yqr_ws -r --arg p "$2" '.products // [] | map(select(.name == $p))[0].orchestrator // "" | tostring' "$1")" = manual ]; then
+    mode=manual; src=workspace.local.yaml
+  fi
+  printf '%s\t%s' "$mode" "$src"
 }
 
 # HOW A PRODUCT IS BUILT. `solo`: one agent that plans, builds and ships

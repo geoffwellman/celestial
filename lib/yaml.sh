@@ -59,10 +59,12 @@ _yqr() { # <jq args...> <file>   - the shape every read call here already has
 # needs a local override that does not collide with every sync.
 #
 # workspace.local.yaml, gitignored, sits beside workspace.yaml and is allowed
-# to do four things and nothing else: override role_profiles (workspace-level,
+# to do five things and nothing else: override role_profiles (workspace-level,
 # and per products[]/repos[] entry, matched by name), add worker_profiles,
-# override env: keys, and say which person this login is (`me: <people id>`,
-# lib/workspace.sh ws_me). The allowed top-level keys are _WS_LOCAL_KEYS below -
+# override env: keys, say which person this login is (`me: <people id>`,
+# lib/workspace.sh ws_me), and turn one product's agent off on this box
+# (`products[].orchestrator: manual` - honoured only in that direction, see
+# ws_orchestrator_mode). The allowed top-level keys are _WS_LOCAL_KEYS below -
 # the merge, doctor and the docs all read that one list.
 # It cannot add a repo, change policy, or touch anything a teammate reading
 # workspace.yaml would need to know to understand what ships. Local wins,
@@ -87,11 +89,12 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
   # keys (already content+path, see _yaml_json) rather than restated here, so
   # it can't drift from that scheme - and, like them, an input converted
   # without a content hash is merged afresh on every read. The merge program
-  # itself is part of the identity too (`v2`: me:), so a box updated to a new
-  # merge never serves a result the old one wrote for the same two files.
+  # itself is part of the identity too (`v3`: products[].orchestrator), so a
+  # box updated to a new merge never serves a result the old one wrote for the
+  # same two files.
   local dir key out fresh=""
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
-  key="merged-v2-$(basename "$basej" .json)-$(basename "$localj" .json)"
+  key="merged-v3-$(basename "$basej" .json)-$(basename "$localj" .json)"
   out="$dir/$key.json"
   [[ "$key" == *nohash-* ]] && fresh=1
   if [ ! -s "$out" ] || [ -n "$fresh" ]; then
@@ -119,7 +122,13 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
       | .env = (($b.env // {}) + ($l.env // {}))
       | .products = (($b.products // []) | map(
           . as $p | local_role_profiles($p.name; $lprod) as $o |
-          if ($o | length) > 0 then $p + {role_profiles: (($p.role_profiles // {}) * $o)} else $p end))
+          (if ($o | length) > 0 then $p + {role_profiles: (($p.role_profiles // {}) * $o)} else $p end)
+          # ONE WAY ONLY: a local `orchestrator: manual` turns this box'"'"'s
+          # agent off; nothing local can turn one ON (a local auto is dropped
+          # here and named by cel doctor), and `none` is already stronger.
+          | if (first($lprod[] | select(.name == $p.name) | .orchestrator) // null) == "manual"
+               and ($p.orchestrator // "") != "none"
+            then .orchestrator = "manual" else . end))
       | .repos = (($b.repos // []) | map(
           . as $r | local_role_profiles($r.name; $lrepo) as $o |
           if ($o | length) > 0 then $r + {role_profiles: (($r.role_profiles // {}) * $o)} else $r end))

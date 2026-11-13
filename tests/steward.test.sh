@@ -303,6 +303,28 @@ test_steward_clears_an_old_start_fault_for_a_product_now_homed_elsewhere() {
   assert_eq "$(cat "$T/launched")" ""
   rm -rf "$T"
 }
+# THE OWNER TURNED IT OFF ON THIS BOX. A workspace.local.yaml
+# `orchestrator: manual` over a committed auto: the steward starts nothing,
+# raises nothing, and an old start fault comes down naming the local file.
+test_steward_honours_a_local_manual_over_a_committed_auto() {
+  _orch_fixture
+  export CEL_YAML_CACHE="$T/cache"
+  _steward_raise alpha "orch-ensure-bundle" blocked "steward: alpha/bundle resolves orchestrator: auto and bundle-orch will not start"
+  printf 'products:\n  - name: bundle\n    orchestrator: manual\n' > "$T/alpha/workspace.local.yaml"
+  local out; out="$(_steward_orchestrators "$ROSTER" 2>&1)"
+  assert_eq "$(cat "$T/launched")" "" || { rm -rf "$T"; return 1; }
+  ! cmd_inbox open --for root --workspace alpha 2>/dev/null | grep -q 'bundle-orch will not start' \
+    || { echo "the start fault is still open"; rm -rf "$T"; return 1; }
+  grep -rq "manual via workspace.local.yaml" "$CEL_INBOX_DIR" \
+    || { echo "the fault did not come down naming workspace.local.yaml: $out"; rm -rf "$T"; return 1; }
+  # ...and a local auto over the committed manual `lone` starts nothing
+  printf 'products:\n  - name: lone\n    orchestrator: auto\n' > "$T/alpha/workspace.local.yaml"
+  : > "$T/state"; : > "$T/launched"
+  _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  assert_eq "$(grep -c lone "$T/launched" || true)" "0"
+  unset CEL_YAML_CACHE
+  rm -rf "$T"
+}
 # With no people:, home: or me: the steward starts the auto product as
 # before; a me: alone changes nothing.
 test_steward_without_home_keys_is_unchanged() {
