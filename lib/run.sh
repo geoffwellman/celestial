@@ -3620,7 +3620,10 @@ _run_orch_verdict() { # ws role product name pane cwd runtime [session-file|-]
 # humans to read; callers that run it rebuild the argv from role/ws/product.
 run_orchestrator_candidates() { # <ws> <wsdir> <roster-json>
   local yj
-  yj="$(_yaml_json "$2/workspace.yaml")" || return 0
+  # The merged view, so a workspace.local.yaml `orchestrator: manual` (the
+  # only orchestrator value the merge carries) reads here exactly as
+  # ws_orchestrator_mode reads it.
+  yj="$(_ws_effective_json "$2")" || return 0
   jq -r --arg ws "$1" --arg wsdir "$2" --arg deflt "$(ws_orchestrators_default)" --argjson roster "${3:-null}" '
     def agent_name: ascii_downcase | gsub("[^a-z0-9_-]+"; "-") | sub("^[^a-z]+"; "") | sub("-$"; "") | .[0:32];
     def dash: if . == null or . == "" then "-" else . end;

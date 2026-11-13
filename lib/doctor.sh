@@ -331,8 +331,9 @@ doctor_repo_lane_lines() { # <wsdir> <workspace name> -> warning lines, or nothi
 }
 
 # workspace.local.yaml is allowed to override role_profiles, add
-# worker_profiles and override env: keys (see lib/yaml.sh:_ws_effective_json;
-# the allowed keys are _WS_LOCAL_KEYS there).
+# worker_profiles, override env: keys, name me: and set a product's
+# orchestrator: manual (see lib/yaml.sh:_ws_effective_json; the allowed keys
+# are _WS_LOCAL_KEYS there).
 # Everything else it might contain is silently ignored by the merge, on
 # purpose - but silent is wrong for a hand-written, per-box, uncovered-by-CI
 # file, so doctor says out loud what the merge would otherwise just drop.
@@ -359,14 +360,27 @@ doctor_ws_local_lines() { # <wsdir> <name> -> warns/errs on stderr via c_warn/c_
         fail=1
       fi
     done < <(yq -r ".${kind}[]?.name // empty" "$localf" 2>/dev/null)
-    # Inside an entry only routing is personal; a local `policy:` or `gate:`
-    # on a product/repo is dropped by the merge, so say so.
+    # Inside an entry only routing is personal - plus, on a product, the
+    # one-way `orchestrator: manual` (lib/yaml.sh); a local `policy:` or
+    # `gate:` on a product/repo is dropped by the merge, so say so.
+    local allowed='. != "name" and . != "role_profiles"'
+    [ "$kind" = products ] && allowed="$allowed and . != \"orchestrator\""
     while IFS=$'\t' read -r name k; do
       [ -n "$k" ] || continue
-      c_warn "$n: workspace.local.yaml $kind '$name' declares '$k' - only role_profiles is read inside an entry, so this is silently ignored"
+      c_warn "$n: workspace.local.yaml $kind '$name' declares '$k' - only role_profiles$([ "$kind" = products ] && printf ' and orchestrator: manual are' || printf ' is') read inside an entry, so this is silently ignored"
       fail=1
-    done < <(yq -r ".${kind}[]? | .name as \$e | keys_unsorted[] | select(. != \"name\" and . != \"role_profiles\") | [\$e, .] | @tsv" "$localf" 2>/dev/null)
+    done < <(yq -r ".${kind}[]? | .name as \$e | keys_unsorted[] | select($allowed) | [\$e, .] | @tsv" "$localf" 2>/dev/null)
   done
+  # orchestrator: is honoured locally in ONE direction only: manual turns this
+  # box's agent off. Anything else - above all a local auto over a teammate's
+  # committed manual - is dropped, and that must not be silent.
+  local v
+  while IFS=$'\t' read -r name v; do
+    [ -n "$name" ] || continue
+    [ "$v" = manual ] && continue
+    c_warn "$n: workspace.local.yaml product '$name' declares orchestrator: $v - ignored: locally only orchestrator: manual is honoured (it can turn this box's agent off, never on), so $name stays $(ws_orchestrator_mode "$wsdir" "$name" | cut -f1) as workspace.yaml says"
+    fail=1
+  done < <(yq -r '.products[]? | select(has("orchestrator")) | [.name, (.orchestrator | tostring)] | @tsv' "$localf" 2>/dev/null)
   [ "$fail" -eq 0 ]
 }
 

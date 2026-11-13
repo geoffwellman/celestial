@@ -1814,16 +1814,35 @@ A team workspace has three layers:
 | Layer | File | Committed | Holds |
 |---|---|---|---|
 | Team contract | `workspace.yaml` | yes | everything, including the default routing |
-| Personal routing | `workspace.local.yaml` | no | routing overrides, and `me:` |
+| Personal routing | `workspace.local.yaml` | no | routing overrides, `me:`, and turning a product's agent off on this box |
 | Secrets | `env.local` | no | keys |
 
 The local file may change `role_profiles` (workspace-level and per
 `products[]`/`repos[]` entry), add or replace `worker_profiles`, override
-`env:` keys, and set `me:`. It may not change `policy`, `tickets`, `repos`,
+`env:` keys, set `me:`, and set `orchestrator: manual` on a `products[]`
+entry. It may not change `policy`, `tickets`, `repos`,
 `products`, `people`, gates, prefixes, merge or review settings, or
 `services` - and the policy block rendered into CLAUDE.md/AGENTS.md always
 comes from `workspace.yaml` alone. `cel doctor` fails if `workspace.yaml` is
 not committed.
+
+**Turning a product's agent off on one box.** A local
+`products[].orchestrator: manual` over a committed `auto` (on the product,
+`layout.orchestrators` or the default) means this box's `cel ws up` and
+steward never start that product's agent, and the steward raises nothing
+about it (it clears an old fault with `... (manual via workspace.local.yaml)`).
+`cel ws status`, `cel fleet` and `cel doctor` read the same answer. It works
+in that direction only: a local `orchestrator: auto` over a committed
+`manual` (or anything but `manual`) is ignored and `cel doctor` warns - a
+teammate's committed decision not to auto-start wins. Repos carry no
+`orchestrator:`, so there is no repo-level form.
+
+```yaml
+# workspace.local.yaml - I stopped bundle's agent on this box; leave it stopped
+products:
+  - name: bundle
+    orchestrator: manual
+```
 
 **People.** `people:` in `workspace.yaml` lists who is on the team: an `id`
 (`[a-z][a-z0-9-]{0,30}`), their own forge `login`, `roles:` held for every
@@ -1903,12 +1922,14 @@ matched by name) and adds `worker_profiles` - or replaces one whole, by name,
 if it names one the committed file already has, so a local `sonnet` profile
 never inherits a base `sonnet` profile's `via:`, `fallback:` or `thinking:`.
 It is allowed to do only that, plus `me:` (which person this login is, see
-[Team workspaces](#team-workspaces)): it cannot add a repo, change policy, or hide
+[Team workspaces](#team-workspaces)) and a product's `orchestrator: manual`
+(off on this box, never on): it cannot add a repo, change policy, or hide
 anything a teammate reading `workspace.yaml` needs to know. Local always wins
-over the committed file. `cel doctor` warns on anything else the file
-declares (an unrelated top-level key, or a `products[]`/`repos[]` name with
-no counterpart in the committed file) since the merge otherwise drops it
-with no error.
+over the committed file, except that a local `orchestrator:` can only start
+fewer agents. `cel doctor` warns on anything else the file
+declares (an unrelated top-level key, a `products[]`/`repos[]` name with
+no counterpart in the committed file, or a local `orchestrator:` other than
+`manual`) since the merge otherwise drops it with no error.
 
 ```yaml
 # workspace.local.yaml, gitignored, this box only

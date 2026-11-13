@@ -367,3 +367,61 @@ test_ws_new_local_example_offers_me() {
   assert_contains "$(cat "$T/t3/workspace.local.example.yaml")" "# me: "
   rm -rf "$T"
 }
+
+# A LOCAL `orchestrator: manual` TURNS A PRODUCT'S AGENT OFF ON THIS BOX ONLY.
+# It is honoured in the one direction that starts fewer agents: over a
+# committed auto (on the product, the layout or the default) it wins and says
+# it came from workspace.local.yaml; a local auto over a committed manual is
+# ignored - a teammate's decision not to auto-start wins - and doctor says so.
+_wl_orch() { # <committed orchestrator value or ''> <local orchestrator value or ''>
+  _wl_setup
+  source "$CEL_ROOT/lib/workspace.sh"
+  yq -y --arg o "$1" '.products = [{name: "bundle", repos: ["widget"]} + (if $o == "" then {} else {orchestrator: $o} end)]' \
+    "$T/alpha/workspace.yaml" > "$T/w" && mv "$T/w" "$T/alpha/workspace.yaml"
+  [ -z "$2" ] || printf 'products:\n  - name: bundle\n    orchestrator: %s\n' "$2" > "$T/alpha/workspace.local.yaml"
+}
+
+test_local_manual_overrides_a_committed_auto() {
+  _wl_orch auto manual
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'manual\tworkspace.local.yaml')"
+  assert_eq "$(_yqr_ws -r '.products[0].orchestrator' "$T/alpha")" manual
+  assert_eq "$(doctor_ws_local_lines "$T/alpha" alpha 2>&1)" ""
+  # the committed file still says auto: only this box is off
+  assert_eq "$(ws_product_get "$T/alpha" bundle orchestrator)" auto
+  rm -rf "$T"
+}
+
+test_local_manual_overrides_an_inherited_auto() {
+  _wl_orch '' manual
+  yq -y '.layout = {orchestrators: "auto"}' "$T/alpha/workspace.yaml" > "$T/w" && mv "$T/w" "$T/alpha/workspace.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'manual\tworkspace.local.yaml')"
+  rm -rf "$T"
+}
+
+test_local_auto_never_overrides_a_committed_manual() {
+  _wl_orch manual auto
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'manual\tproduct')"
+  assert_eq "$(_yqr_ws -r '.products[0].orchestrator' "$T/alpha")" manual
+  local out; out="$(doctor_ws_local_lines "$T/alpha" alpha 2>&1)" || true
+  assert_contains "$out" "orchestrator: auto"
+  assert_contains "$out" "ignored"
+  rm -rf "$T"
+}
+
+test_no_local_orchestrator_leaves_the_mode_unchanged() {
+  _wl_orch auto ''
+  printf 'role_profiles: { worker: mine }\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'auto\tproduct')"
+  rm -f "$T/alpha/workspace.local.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'auto\tproduct')"
+  rm -rf "$T"
+}
+
+# The merge's shape changed, so an older cached merge must not be served.
+test_the_merge_cache_key_is_v3() {
+  _wl_orch auto manual
+  _yqr_ws -r .name "$T/alpha" >/dev/null
+  assert_eq "$(find "$T/cache" -name 'merged-v3-*' | wc -l | tr -d ' ')" "1"
+  assert_eq "$(find "$T/cache" -name 'merged-v2-*' | wc -l | tr -d ' ')" "0"
+  rm -rf "$T"
+}
