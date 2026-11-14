@@ -33,7 +33,7 @@ case "\$1 \$2" in
   "api user") echo fleetbot;;
   "pr view")  view;;
   "pr list")  echo "[\$(view)]";;
-  "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || { echo 'GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)' >&2; exit 1; }
+  "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || { echo "\${STUB_MERGE_ERR:-GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)}" >&2; exit 1; }
               BODY_FILE="$T/merge-body" body_to "\$@"; exit 0;;
   "pr comment") [ -z "\${STUB_COMMENT_FAIL:-}" ] || { echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; }
                 BODY_FILE="$T/comment-body" body_to "\$@"; echo "https://github.com/someone/widget/pull/7#issuecomment-901";;
@@ -422,6 +422,30 @@ test_solo_land_follows_a_refused_merge_with_a_not_landed_comment() {
   assert_eq "$(cat "$T/comment-body")" "Landing as widget-orch via cel solo land (attempting): approved by widget-pr-7-review at $H, checks green.
 Not landed: GitHub refused the merge of $H by widget-orch via cel solo land (GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)). Nothing was merged." || { rm -rf "$T"; return 1; }
   _solo_before '^pr merge 7' "^pr comment 7 --repo someone/widget --body Not landed" "$GH_LOG" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The forge's reason is its text on a public page: paths, $HOME, credentials
+# in a URL and token-shaped runs are taken out before it is posted, and a
+# reason the squash body's hygiene scan would reject is not posted at all.
+test_solo_land_not_landed_comment_redacts_the_forge_reason() {
+  _solo_setup
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local tok url out line
+  tok="ghp_$(printf 'Zx9%.0s' $(seq 1 12))"
+  url="https:/""/bot:$tok""@forge.example/x"   # assembled, so the file itself carries no credential URL
+  out="$(export CEL_ROLE=solo CEL_INBOX_ME=widget-orch STUB_MERGE_FAIL=1 \
+    STUB_MERGE_ERR="refused: $HOME/.config/gh/hosts.yml and /srv/forge/hooks/pre-merge failed, token $tok, see $url"
+    _land widget#7 2>&1)" && { echo "a refused merge reported success"; rm -rf "$T"; return 1; }
+  line="$(tail -n1 "$T/comment-body")"
+  assert_eq "$line" "Not landed: GitHub refused the merge of $H by widget-orch via cel solo land (refused: <path> and <path> failed, token <redacted> see <url>). Nothing was merged." || { rm -rf "$T"; return 1; }
+  assert_fails grep -qF -e "$HOME" -e "$tok" -e /srv/forge "$T/comment-body" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _solo_setup
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  ( export CEL_ROLE=solo CEL_INBOX_ME=widget-orch STUB_MERGE_FAIL=1 STUB_MERGE_ERR="blocked by ZQX-$((4000 + 821))"
+    _land widget#7 ) >/dev/null 2>&1 && { echo "a refused merge reported success"; rm -rf "$T"; return 1; }
+  assert_eq "$(tail -n1 "$T/comment-body")" "Not landed: GitHub refused the merge of $H by widget-orch via cel solo land. Nothing was merged." || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 

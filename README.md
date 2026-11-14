@@ -988,7 +988,9 @@ Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
   paragraph above them), and just before the merge it comments on the PR:
   `Landing as widget-orch via cel solo land (attempting): approved by
   widget-pr-7-review at <head>, checks green.` If the forge refuses the merge,
-  a second comment says `Not landed: ...` with the forge's reason. The lander
+  a second comment says `Not landed: ...` with the forge's reason, paths and
+  token-shaped text taken out (and left off entirely if the comment would fail
+  the squash body's hygiene scan). The lander
   is the alias the agent's launch gave it, named only for a role that lands
   (solo, orchestrator); a shell with no role is the account, `by hand`, and any
   other role is `an unnamed agent`. Every name is one token: one carrying a

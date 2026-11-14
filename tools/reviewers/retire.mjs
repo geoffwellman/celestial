@@ -248,13 +248,20 @@ export function parseNative(bytes, cwd, roundAt, leaf) {
 // Pi 1.5's footer (FooterComponent.render, modes/interactive/components/
 // footer.js) under the composer: the session's cwd - `~`-relative inside
 // HOME - then ` (<branch>)` in a git checkout (`detached` off a branch) and
-// ` • <name>` for a named session; under it the stats line, which always
-// carries the context usage, `<n>%/<window>` or `?/<window>` (` (auto)` while
-// auto-compaction is on); then at most one line of extension statuses. Only
-// this checkout's own line is this reviewer's: another or longer path, a
-// line Pi cut off, or anything else after the branch is an unknown footer.
+// ` • <name>` for a named session; under it the stats line, which is Pi's
+// own from its first character: optional counters (`↑<in> ↓<out> R<read>
+// W<write> CH<hit%>`, a cost `$<n>` with ` (sub)` on a subscription), then
+// the context usage, `<n>%/<window>` or `?/<window>` (` (auto)` while
+// auto-compaction is on), then - after two or more spaces - the provider,
+// model and ` • <thinking level>`; then at most one line of extension
+// statuses. Only this checkout's own line is this reviewer's: another or
+// longer path, a line Pi cut off, or anything else after the branch is an
+// unknown footer, and so is a stats line that does not start Pi's way (an
+// extension status that merely carries a usage-like token).
 const PI_CWD_SUFFIX = /^(?: \(\S+\))?(?: • \S.*)?$/;
-const PI_CONTEXT_USAGE = /(?:^|\s)(?:\d+(?:\.\d+)?%|\?)\/\d+(?:\.\d+)?[kM]?(?: \(auto\))?(?:\s|$)/;
+const PI_STATS_LINE = /^(?:(?:[↑↓RW]\d+(?:\.\d+)?[kM]?|CH\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?(?: \(sub\))?) )*(?:\d+(?:\.\d+)?%|\?)\/\d+(?:\.\d+)?[kM]?(?: \(auto\))?(?: {2,}(\S.*))?$/;
+const PI_THINKING_LEVEL = / • (?:thinking off|off|minimal|low|medium|high|xhigh)$/;
+const PI_BUSY = /working|thinking|compacting|queued|pending|retrying|running/i;
 function piFooterCwd(line, cwd) {
   const home = process.env.HOME ? path.resolve(process.env.HOME) : '';
   const forms = [cwd];
@@ -273,10 +280,13 @@ export function emptyComposer(capture, cwd) {
   requireProof(bottom > top && bottom - top <= 12, 'unknown_composer_layout');
   requireProof(lines.slice(top + 1, bottom).every(line => /^\s*$/.test(line)), 'unsent_composer_draft', 'protected');
   const footer = lines.slice(bottom + 1).filter(line => line.trim()).map(line => line.trimEnd());
-  requireProof(footer.length >= 2 && footer.length <= 3 && (!cwd || piFooterCwd(footer[0], cwd)) && PI_CONTEXT_USAGE.test(footer[1]), 'unknown_pi_footer');
-  // The cwd and stats lines are proven above (a branch or model name may say
-  // anything); what is left is the extension status line.
-  requireProof(!footer.slice(2).some(line => /working|thinking|compacting|queued|pending|retrying|running/i.test(line)), 'unsettled_terminal_tail', 'protected');
+  const stats = footer.length >= 2 ? PI_STATS_LINE.exec(footer[1]) : null;
+  requireProof(footer.length >= 2 && footer.length <= 3 && (!cwd || piFooterCwd(footer[0], cwd)) && stats, 'unknown_pi_footer');
+  // The cwd line is proven above (a branch name may say anything). On the
+  // stats line, what follows the usage - provider and model, less Pi's own
+  // thinking level - is scanned like the extension status line.
+  const tail = [(stats[1] || '').replace(PI_THINKING_LEVEL, ''), ...footer.slice(2)];
+  requireProof(!tail.some(line => PI_BUSY.test(line)), 'unsettled_terminal_tail', 'protected');
   return sha(Buffer.from(text.slice(text.lastIndexOf(lines[top]))));
 }
 

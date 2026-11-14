@@ -468,6 +468,27 @@ _solo_land_name() { # <name> -> the name to record
   printf '%s' "$n"
 }
 
+# A forge's merge error is the forge's text, not ours, and it goes on a public
+# PR page: a URL carrying credentials, $HOME, an absolute or `~` path, a
+# `token=`/`password:`/`Bearer` value, and any long hex or base64-like run
+# (a token, a key) are replaced with a placeholder. Fails when it cannot run.
+_solo_redact_forge_reason() { # <text>
+  printf '%s' "$1" | python3 -c '
+import os, re, sys
+s = sys.stdin.read()
+s = re.sub(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]*@\S*", "<url>", s)
+home = os.environ.get("HOME", "").rstrip("/")
+if len(home) > 1: s = s.replace(home, "<home>")
+s = re.sub(r"(?i)\b(token|password|passwd|secret|api[_-]?key|authorization)\b(\s*[=:]\s*|\s+)(bearer\s+|basic\s+)?\S+", r"\1\2<redacted>", s)
+s = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 <redacted>", s)
+s = re.sub(r"(^|[\s(\x27\"=,\[])(?:~|<home>)?/[A-Za-z0-9._~@%+-][^\s\x27\")\],]*", r"\1<path>", s)
+s = re.sub(r"(^|[\s(\x27\"=,\[])(?:~|<home>)(?=[\s\x27\"),\]]|$)", r"\1<path>", s)
+s = re.sub(r"\b[0-9A-Fa-f]{32,}\b", "<hex>", s)
+s = re.sub(r"[A-Za-z0-9+/_-]{32,}={0,2}", "<redacted>", s)
+sys.stdout.write(s)
+'
+}
+
 cmd_solo_land() { # <ref> [--workspace W]
   [ $# -ge 1 ] || die "usage: cel solo land <repo>#<pr> [--workspace NAME]"
   # Landing is the solo agent's (or a person's) act, never a reviewer's: the
@@ -658,8 +679,16 @@ Nothing merged."
     why="$(grep -v '^forge: token sent unencrypted' "$merge_err" | grep -m1 . | tr -d '[:cntrl:]' | cut -c1-300)" || why=""
     rm -f "$merge_err"
     afk_end failed "the merge did not go through"
-    _solo_forge forge_pr_comment "$wsdir" "$SOLO_REPO" "$num" \
-      "Not landed: $forge refused the merge of $head by $as via cel solo land${why:+ ($why)}. Nothing was merged." >/dev/null \
+    # The reason goes on a public page: anything token- or path-shaped is
+    # taken out first, and a comment the squash body's own hygiene scan
+    # would reject is posted without the reason at all.
+    local said_why="" note bad
+    [ -z "$why" ] || said_why="$(_solo_redact_forge_reason "$why")" || said_why=""
+    note="Not landed: $forge refused the merge of $head by $as via cel solo land${said_why:+ ($said_why)}. Nothing was merged."
+    if [ -n "$said_why" ] && { ! bad="$(land_body_hygiene "$note")" || [ -n "$bad" ]; }; then
+      note="Not landed: $forge refused the merge of $head by $as via cel solo land. Nothing was merged."
+    fi
+    _solo_forge forge_pr_comment "$wsdir" "$SOLO_REPO" "$num" "$note" >/dev/null \
       || c_warn "cel solo land: could not post the not-landed comment on #$num (see above)"
     die "cel solo land: merge of #$num failed${why:+ ($why)} - check the PR page; nothing here retries a merge"
   fi
