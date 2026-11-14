@@ -972,6 +972,32 @@ Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
   body cites. Only when neither protection nor any ruleset requires a check
   does the repo gate run locally instead, in a clean checkout at exactly that
   head; requirements that cannot be read refuse the land.
+- the land says who landed it. The forge shows every land as merged by the
+  workspace's account (on Forgejo, and on GitHub when that account is the
+  owner's), so `cel solo land` names the agent itself: the squash message ends
+  in git trailers -
+
+  ```
+  Reviewed-by: widget-pr-7-review (approved)
+  Landed-by: widget-orch (cel solo land)
+  Gate: CI (suite) on <head>
+  ```
+
+  (`Reviewed-by:` for the recorded verdict's reviewer, each approving forge
+  account and each required extra reviewer; the review note, if any, in a
+  paragraph above them), and just before the merge it comments on the PR:
+  `Landing as widget-orch via cel solo land (attempting): approved by
+  widget-pr-7-review at <head>, checks green.` If the forge refuses the merge,
+  a second comment says `Not landed: ...` with the forge's reason. The lander
+  is the alias the agent's launch gave it, named only for a role that lands
+  (solo, orchestrator); a shell with no role is the account, `by hand`, and any
+  other role is `an unnamed agent`. Every name is one token: one carrying a
+  control character refuses the land before anything is posted, so a newline
+  cannot forge a trailer. A refused comment is reported and does not stop the
+  merge - the trailers carry the record. The body is checked against the
+  history scan's ticket rule before anything is posted. Separate forge
+  accounts per agent would put the name in "merged by" itself; that is the
+  owner's call, not something `cel solo land` changes.
 
 The rest of the box sees a solo product for what it is: `cel fleet` draws it as
 `solo <agent state>  worktrees N` (JSON: `mode`, `solo_worktrees`), the

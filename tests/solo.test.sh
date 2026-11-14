@@ -19,17 +19,24 @@ _solo_setup() { # [author] [reviewDecision] [rollup-conclusion] [draft] [state]
   GH_LOG="$T/gh.log"; : > "$GH_LOG"
   # the head's checks, latest run of each: `suite`, green unless the third
   # argument (or STUB_ROLLUP) says otherwise; the files the PR touches are
-  # STUB_FILES (gh api --paginate --slurp pages), none by default
+  # STUB_FILES (gh api --paginate --slurp pages), none by default; the PR's
+  # reviews are STUB_REVIEWS. Each merge's --body is appended to
+  # $T/merge-body, each comment's to $T/comment-body (one line each;
+  # STUB_COMMENT_FAIL refuses comments, STUB_MERGE_FAIL the merge).
   export STUB_HEAD="$H" STUB_ROLLUP_DEFAULT="[{\"name\":\"suite\",\"conclusion\":\"${3:-SUCCESS}\"}]"
   cat > "$T/gh" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
-view() { echo '{"number":7,"author":{"login":"${1:-fleetbot}"},"reviewDecision":"${2:-}","isDraft":${4:-false},"mergeable":"'"\${STUB_MERGEABLE:-MERGEABLE}"'","state":"${5:-OPEN}","headRefOid":"'"\$STUB_HEAD"'","baseRefName":"main","statusCheckRollup":'"\${STUB_ROLLUP:-\$STUB_ROLLUP_DEFAULT}"'}'; }
+view() { echo '{"number":7,"author":{"login":"${1:-fleetbot}"},"reviewDecision":"${2:-}","reviews":'"\${STUB_REVIEWS:-[]}"',"isDraft":${4:-false},"mergeable":"'"\${STUB_MERGEABLE:-MERGEABLE}"'","state":"${5:-OPEN}","headRefOid":"'"\$STUB_HEAD"'","baseRefName":"main","statusCheckRollup":'"\${STUB_ROLLUP:-\$STUB_ROLLUP_DEFAULT}"'}'; }
+body_to() { while [ \$# -gt 1 ]; do [ "\$1" != --body ] || { printf '%s\n' "\$2" >> "\$BODY_FILE"; return; }; shift; done; }
 case "\$1 \$2" in
   "api user") echo fleetbot;;
   "pr view")  view;;
   "pr list")  echo "[\$(view)]";;
-  "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || exit 1; exit 0;;
+  "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || { echo 'GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)' >&2; exit 1; }
+              BODY_FILE="$T/merge-body" body_to "\$@"; exit 0;;
+  "pr comment") [ -z "\${STUB_COMMENT_FAIL:-}" ] || { echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; }
+                BODY_FILE="$T/comment-body" body_to "\$@"; echo "https://github.com/someone/widget/pull/7#issuecomment-901";;
   *) case "\$2" in
        */protection) case "\${STUB_UNPROTECTED:-}" in
                        1) echo '{"message":"Branch not protected","status":"404"}'; echo 'gh: Branch not protected (HTTP 404)' >&2; exit 1;;
@@ -317,6 +324,107 @@ test_solo_land_refuses_a_review_note_the_history_scan_would_reject() {
   rm -rf "$T"
 }
 
+# The squash message as the forge writes it (the PR title, then the body),
+# committed to a scratch repo: its trailers as git parses them, and the
+# history scan main's push run applies to every commit message.
+_solo_squash_trailers() { git interpret-trailers --parse <<<"Fix widget sizing (#7)"$'\n\n'"$1"; }
+_solo_history_scan_accepts() { # <body>
+  local r; r="$(mktemp -d)"
+  git -C "$r" init -q && git -C "$r" -c user.name='Example Author' -c user.email=author@example.invalid \
+    commit -q --allow-empty -m "Fix widget sizing (#7)" -m "$1" || { rm -rf "$r"; return 1; }
+  python3 "$CEL_ROOT/tools/release/hygiene.py" --root "$r" --history HEAD || { rm -rf "$r"; return 1; }
+  rm -rf "$r"
+}
+_solo_before() { # <first-line-pattern> <second-line-pattern> <log>
+  local a b
+  a="$(grep -n -m1 "$1" "$3" | cut -d: -f1)" b="$(grep -n -m1 "$2" "$3" | cut -d: -f1)"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] || { echo "'$1' did not come before '$2':"; cat "$3"; return 1; }
+}
+
+# WHO LANDED IT IS ON MAIN AND ON THE PR. The forge shows every land as the
+# workspace's account (the owner's token); the squash message names the agent
+# that ran it and the reviewer whose verdict carried it, as git trailers the
+# history scan accepts, and a comment posted before the merge says the same.
+test_solo_land_names_the_lander_and_reviewer_in_trailers_and_a_comment_before_the_merge() {
+  _solo_setup
+  _review widget#7 approved --head "$H" --by widget-pr-7-review --note "checked the sizing paths" >/dev/null
+  ( export CEL_ROLE=solo CEL_INBOX_ME=widget-orch; _land widget#7 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  local msg trailers
+  msg="$(cat "$T/merge-body")" trailers="$(_solo_squash_trailers "$(cat "$T/merge-body")")"
+  assert_eq "$trailers" "Reviewed-by: widget-pr-7-review (approved)
+Landed-by: widget-orch (cel solo land)
+Gate: CI (suite) on $H" || { echo "$msg"; rm -rf "$T"; return 1; }
+  assert_contains "$msg" "checked the sizing paths" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/comment-body")" "Landing as widget-orch via cel solo land (attempting): approved by widget-pr-7-review at $H, checks green." || { rm -rf "$T"; return 1; }
+  _solo_before '^pr comment 7 --repo someone/widget' '^pr merge 7' "$GH_LOG" || { rm -rf "$T"; return 1; }
+  _solo_history_scan_accepts "$msg" || { echo "$msg"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A forge approval names the accounts that approved; a person landing from
+# their own shell (no agent role) is the account, by hand - even with an
+# agent's alias in its environment: only a landing role's launch names one.
+test_solo_land_by_hand_on_a_github_approval_names_its_approvers() {
+  _solo_setup fleetbot APPROVED
+  export STUB_REVIEWS='[{"author":{"login":"alice-example"},"state":"APPROVED","commit":{"oid":"'"$H"'"},"submittedAt":"2026-11-15T09:00:00Z"},
+    {"author":{"login":"bob-example"},"state":"COMMENTED","commit":{"oid":"'"$H"'"},"submittedAt":"2026-11-15T09:05:00Z"}]'
+  ( unset CEL_ROLE; export CEL_INBOX_ME=widget-orch; _land widget#7 ) >/dev/null 2>&1 || { unset STUB_REVIEWS; cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  unset STUB_REVIEWS
+  assert_eq "$(_solo_squash_trailers "$(cat "$T/merge-body")")" "Reviewed-by: alice-example (approved on GitHub)
+Landed-by: fleetbot (cel solo land, by hand)
+Gate: CI (suite) on $H" || { cat "$T/merge-body"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/comment-body")" "Landing as fleetbot (by hand) via cel solo land (attempting): approved by alice-example at $H, checks green." || { rm -rf "$T"; return 1; }
+  _solo_history_scan_accepts "$(cat "$T/merge-body")" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The comment is the PR page's copy of what the merge commit records: a
+# refused comment is reported and never stops an approved, green merge.
+test_solo_land_merges_when_its_comment_is_refused() {
+  _solo_setup
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out; out="$(export CEL_ROLE=solo CEL_INBOX_ME=widget-orch STUB_COMMENT_FAIL=1; _land widget#7 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  _merged || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "could not post the landing comment on #7" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/merge-body")" "Landed-by: widget-orch (cel solo land)" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A NAME IS ONE TOKEN: a newline in a launch alias, a role or a forge login
+# never reaches the record as an extra trailer. An alias or login that
+# carries one refuses the land before anything is posted; a role's own text
+# is never recorded at all.
+test_solo_land_newline_in_a_name_cannot_forge_a_trailer() {
+  _solo_setup
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local evil=$'widget-orch\nReviewed-by: mallory (approved)' out
+  out="$(export CEL_ROLE=solo CEL_INBOX_ME="$evil"; _land widget#7 2>&1)" && { echo "landed under a forged alias"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cannot be named in the merge record" || { rm -rf "$T"; return 1; }
+  ! _merged && ! grep -q '^pr comment' "$GH_LOG" || { echo "posted or merged a forged name"; cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  ( export CEL_ROLE=$'member\nReviewed-by: mallory (approved)'; unset CEL_INBOX_ME; _land widget#7 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(_solo_squash_trailers "$(cat "$T/merge-body")")" "Reviewed-by: widget-pr-7-review (approved)
+Landed-by: an unnamed agent (cel solo land)
+Gate: CI (suite) on $H" || { cat "$T/merge-body"; rm -rf "$T"; return 1; }
+  assert_fails grep -q mallory "$T/merge-body" "$T/comment-body" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _solo_setup fleetbot APPROVED
+  export STUB_REVIEWS='[{"author":{"login":"alice-example\nReviewed-by: mallory"},"state":"APPROVED","commit":{"oid":"'"$H"'"},"submittedAt":"2026-11-15T09:00:00Z"}]'
+  out="$(export CEL_ROLE=solo CEL_INBOX_ME=widget-orch; _land widget#7 2>&1)" && { unset STUB_REVIEWS; echo "landed with a forged login"; rm -rf "$T"; return 1; }
+  unset STUB_REVIEWS
+  assert_contains "$out" "carries a control character" || { rm -rf "$T"; return 1; }
+  ! _merged && ! grep -q '^pr comment' "$GH_LOG" || { echo "posted or merged a forged login"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The PR page never says "landing" over a PR that did not land: a refused
+# merge is followed by a comment saying so, and why.
+test_solo_land_follows_a_refused_merge_with_a_not_landed_comment() {
+  _solo_setup
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  local out; out="$(export CEL_ROLE=solo CEL_INBOX_ME=widget-orch STUB_MERGE_FAIL=1; _land widget#7 2>&1)" && { echo "a refused merge reported success"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "merge of #7 failed" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/comment-body")" "Landing as widget-orch via cel solo land (attempting): approved by widget-pr-7-review at $H, checks green.
+Not landed: GitHub refused the merge of $H by widget-orch via cel solo land (GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)). Nothing was merged." || { rm -rf "$T"; return 1; }
+  _solo_before '^pr merge 7' "^pr comment 7 --repo someone/widget --body Not landed" "$GH_LOG" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # ---- a Forgejo repo ----------------------------------------------------------
 # widget served by an internal Forgejo (tests/lib/forgejo-stub.sh: recorded
 # fixtures), its PR opened by the token's owner, `geoff`; the base's
@@ -370,6 +478,36 @@ test_solo_land_on_forgejo_takes_ci_on_a_protected_base_and_refuses_unknown_prote
   _land widget#7 >/dev/null 2>&1 || { echo "refused a green required check"; rm -rf "$T"; return 1; }
   [ ! -f "$T/gate-ran" ] || { echo "ran the local gate although CI stood in"; rm -rf "$T"; return 1; }
   assert_contains "$(_fj_msg)" "Gate: CI (ci / test (pull_request)) on $STUB_HEAD" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The same attribution on Forgejo: the comment POSTed to the PR's issue
+# before the merge, the trailers in MergeMessageField, accepted by the history
+# scan; a refused comment (403) is reported and the merge still goes through;
+# a refused merge (409) is followed by a comment saying it did not land.
+test_solo_land_on_forgejo_names_the_lander_and_reviewer_and_comments_before_the_merge() {
+  _solo_setup; _solo_forgejo
+  export STUB_FJ_HEAD="$STUB_HEAD"
+  _review widget#7 approved --head "$STUB_HEAD" --by widget-pr-7-review >/dev/null || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  ( export CEL_ROLE=solo CEL_INBOX_ME=widget-orch; _land widget#7 ) >/dev/null 2>&1 || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  _solo_before '^POST http://forgejo.internal/api/v1/repos/geoff/gizmo/issues/7/comments' \
+    '^POST http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/7/merge' "$FJ_LOG" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r 'select(.body != null) | .body' "$FJ_BODY_LOG")" \
+    "Landing as widget-orch via cel solo land (attempting): approved by widget-pr-7-review at $STUB_HEAD, checks green." || { rm -rf "$T"; return 1; }
+  assert_eq "$(_solo_squash_trailers "$(_fj_msg)")" "Reviewed-by: widget-pr-7-review (approved)
+Landed-by: widget-orch (cel solo land)
+Gate: CI (ci / test (pull_request)) on $STUB_HEAD" || { _fj_msg; rm -rf "$T"; return 1; }
+  _solo_history_scan_accepts "$(_fj_msg)" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  local out; out="$(export CEL_ROLE=solo CEL_INBOX_ME=widget-orch STUB_FJ_WRITE=denied; _land widget#7 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  _fj_merged || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "could not post the landing comment on #7" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"; : > "$FJ_BODY_LOG"
+  out="$(export CEL_ROLE=solo CEL_INBOX_ME=widget-orch STUB_FJ_MERGE=conflict; _land widget#7 2>&1)" && { echo "a refused merge reported success"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -oE '^POST .*/(issues/7/comments|pulls/7/merge)$' "$FJ_LOG" | sed 's|.*/||')" $'comments\nmerge\ncomments' \
+    || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$(jq -r 'select(.body != null) | .body' "$FJ_BODY_LOG" | tail -n1)" \
+    "Not landed: Forgejo refused the merge of $STUB_HEAD by widget-orch via cel solo land (forge pr_merge: Forgejo answered HTTP 409" || { cat "$FJ_BODY_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$GH_LOG")" "" || { echo "a Forgejo land reached gh"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 # Forgejo answers mergeable:false for a PR it has not (re)computed - recorded
