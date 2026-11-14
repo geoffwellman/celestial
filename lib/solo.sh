@@ -591,10 +591,12 @@ Nothing merged."
 # the same native proof and graceful shutdown `cel gc` uses, never a blind
 # close. It is not part of the land's result - the PR is merged whatever
 # happens here - and a reviewer kept now (mid-turn, mail owed, proof
-# unknown) is retried by every `cel gc` sweep. A Herdr reviewer, or none, is
-# left to that sweep as before.
+# unknown) is retried by every `cel gc` sweep. An unknown answer here is the
+# first attempt of the count gc carries on (gc.sh _gc_retire_note): a reason
+# that keeps coming back reaches the product agent, once. A Herdr reviewer,
+# or none, is left to that sweep as before.
 _solo_land_retire_reviewer() { # <wsdir> <repo> <pr> [slot, one per line]
-  local out rc reason pane slot who focus kind
+  local out rc reason pane slot who focus kind owner
   local -a slots=("")
   while IFS= read -r slot; do [ -z "$slot" ] || slots+=("$slot"); done <<<"${4:-}"
   for slot in "${slots[@]}"; do
@@ -612,7 +614,8 @@ _solo_land_retire_reviewer() { # <wsdir> <repo> <pr> [slot, one per line]
       0) c_ok "retired the Rex reviewer for $who${pane:+ (pane $pane)}; native evidence and checkout kept" ;;
       4) : ;;
       3) c_warn "kept the reviewer for $who: ${reason:-protected} - \`cel gc\` retires it once it settles" ;;
-      *) c_warn "reviewer retirement for $who is incomplete: ${reason:-unknown} - \`cel gc\` retries it" ;;
+      *) owner="$(cel_alias_norm "$(ws_product_of_repo "$1" "$2" 2>/dev/null || printf '%s' "$2")-orch")"
+         c_warn "reviewer retirement for $who is incomplete: ${reason:-unknown} - \`cel gc\` retries it every tick and tells $owner if it keeps failing" ;;
     esac
   done
   return 0

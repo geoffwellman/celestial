@@ -641,6 +641,54 @@ _gc_unknown_clear() { # <pane> <repo> <pr>
   return 0
 }
 
+# A RETIREMENT THAT KEEPS FAILING IS SAID, ONCE. A Rex reviewer whose
+# retirement answers `unknown` - no proof either way: a footer this code
+# cannot read, a forge that does not answer - is tried again by every sweep,
+# and `cel solo land`'s own attempt after its merge is the first try. Each is
+# counted here, keyed by pane and PR. At the Nth (CEL_GC_RETIRE_ALERT_ATTEMPTS,
+# default 6) or a day after the first, the product agent that owns the repo
+# hears it once, naming the reviewer and the reason: a reason that retrying
+# does not clear has nobody else to notice it, and the warning each sweep
+# prints goes to a log. Any other answer - retired, gone, protected (waiting
+# on something real, which it is retired after) - ends the run.
+_gc_retire_file() { printf '%s' "${CEL_GC_RETIRE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-reviewer-retire.json}"; }
+
+_gc_retire_note() { # <wsdir-or-empty> <repo> <pr> <pane> <agent> <status> <reason>
+  local f now cur key="$4 $2#$3" since attempts reported limit product to=root ws="" when
+  f="$(_gc_retire_file)"; now="$(date +%s)"
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  cur="$(jq -c 'if type == "object" then . else {} end' "$f" 2>/dev/null)" || cur='{}'
+  [ -n "$cur" ] || cur='{}'
+  if [ "$6" != unknown ]; then
+    printf '%s' "$cur" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1 || return 0
+    printf '%s' "$cur" | jq --arg k "$key" 'del(.[$k])' > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp"
+    return 0
+  fi
+  # No field is ever empty: read collapses the tabs around an empty one.
+  IFS=$'\t' read -r since attempts reported < <(printf '%s' "$cur" | jq -r --arg k "$key" \
+    '.[$k] // {} | [(.since // 0 | tostring), (.attempts // 0 | tostring), (.reported // false | tostring)] | @tsv')
+  [[ "${since:-}" =~ ^[1-9][0-9]*$ ]] || since="$now"
+  [[ "${attempts:-}" =~ ^[0-9]+$ ]] || attempts=0
+  [ "${reported:-}" = true ] || reported=false
+  attempts=$((attempts + 1))
+  limit="${CEL_GC_RETIRE_ALERT_ATTEMPTS:-6}"
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || limit=6
+  if [ "$reported" != true ] && { [ "$attempts" -ge "$limit" ] || [ $((now - since)) -ge 86400 ]; }; then
+    if [ -n "$1" ]; then
+      ws="$(ws_name "$1" 2>/dev/null)" || ws=""
+      product="$(ws_product_of_repo "$1" "$2" 2>/dev/null)" || product=""
+      [ -z "$product" ] || to="$(_run_agent_name "$product-orch")"
+    fi
+    when="$(date -d "@$since" '+%F %H:%M' 2>/dev/null)" || when="$since"
+    cmd_inbox send "$to" "gc: the Rex reviewer ${5:-in pane $4} for $2#$3 could not be retired: $7 - $attempts attempts since $when. \`cel gc\` retries it every tick, but this reason has not cleared on its own: look at its pane ($4), then fix the cause or retire it by hand. Until then it keeps its memory." \
+      --from gc ${ws:+--workspace "$ws"} --kind blocked --fp "gc-reviewer-retire-${5:-$4}-$2-$3" >/dev/null 2>&1 \
+      && reported=true   # a send that failed was not a report; the next attempt retries it
+  fi
+  printf '%s' "$cur" | jq --arg k "$key" --arg a "$5" --arg r "$7" --argjson s "$since" --argjson n "$attempts" --argjson rep "$reported" \
+    '.[$k] = {agent:$a, since:$s, attempts:$n, reason:$r, reported:$rep}' > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp"
+  return 0
+}
+
 # Everything this sweep can see, from both directions: the rows `cel run`
 # recorded, and the reviewer panes on the roster that nobody recorded. A pane
 # in both is ONE reviewer - keyed by pane id, so it is never closed or
@@ -748,6 +796,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
         else
           c_ok "retired native $who for $repo#$pr (pane $pane; native evidence and checkout kept)"
         fi
+        _gc_retire_note "" "$repo" "$pr" "$pane" "$agent" retired ""
       elif [ "$status" = gone ] && _gc_rex_row_runtime_gone "$agent" "$pane" "$retirement"; then
         # Gone by other means, with no retirement of ours in flight: the row
         # is bookkeeping, and keeping it would refuse every relaunch for the
@@ -757,6 +806,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
         else
           drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
           c_ok "dropped the stale row for $repo#$pr (Rex pane $pane gone, runtime exited; evidence kept)"
+          _gc_retire_note "" "$repo" "$pr" "$pane" "$agent" gone ""
         fi
       else
         _gc_reviewers_adopt
@@ -764,6 +814,15 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
           retirement_reason="$(printf '%s' "$retirement" | jq -r '.reason // "native retirement proof unavailable"' 2>/dev/null)" || retirement_reason='native retirement proof unavailable'
           retirement_detail="$(printf '%s' "$retirement" | jq -r '.detail // ""' 2>/dev/null)" || retirement_detail=''
           c_warn "native reviewer retirement incomplete for $repo#$pr: $retirement_reason${retirement_detail:+ ($retirement_detail)}"
+        fi
+        if [ "$dry" -eq 0 ]; then
+          local retire_ws; retire_ws="$(printf '%s' "$cand" | jq -r '.workspace // ""')"
+          [ -n "$retire_ws" ] || retire_ws="$(_gc_reviewer_ws "$repo" "$repodir" | cut -f1)"
+          if [ "$retirement_status" = protected ]; then
+            _gc_retire_note "$retire_ws" "$repo" "$pr" "$pane" "$agent" protected ""
+          else
+            _gc_retire_note "$retire_ws" "$repo" "$pr" "$pane" "$agent" unknown "$retirement_reason"
+          fi
         fi
       fi
       continue
@@ -910,6 +969,15 @@ reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1> [focus] [kind]
   result="$(rex_reviewer_retire "$repo" "$pr" "$pane" "$agent" "$dry" "$wsdir/repos/$repo")" || rc=$?
   status="$(printf '%s' "$result" | jq -er '.status | select(type == "string")' 2>/dev/null)" \
     || { printf '%s\n' '{"status":"unknown","reason":"invalid native retirement response"}'; return 2; }
+  # The same count gc keeps (_gc_retire_note): land's attempt is its first.
+  if [ "$dry" = 0 ]; then
+    case "$rc:$status" in
+      0:retired) _gc_retire_note "$wsdir" "$repo" "$pr" "$pane" "$agent" retired "" ;;
+      3:protected) _gc_retire_note "$wsdir" "$repo" "$pr" "$pane" "$agent" protected "" ;;
+      *) _gc_retire_note "$wsdir" "$repo" "$pr" "$pane" "$agent" unknown \
+           "$(printf '%s' "$result" | jq -r '.reason // "native retirement proof unavailable"' 2>/dev/null)" ;;
+    esac
+  fi
   if [ "$rc" = 0 ] && [ "$dry" = 0 ] && [ "$status" = retired ]; then
     # A QA agent's preview and checkout go with it, released while its row
     # still names them (reviewer_checkout_release, as gc's Herdr paths do).
