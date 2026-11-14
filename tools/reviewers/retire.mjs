@@ -260,7 +260,6 @@ export function parseNative(bytes, cwd, roundAt, leaf) {
 // extension status that merely carries a usage-like token).
 const PI_CWD_SUFFIX = /^(?: \(\S+\))?(?: • \S.*)?$/;
 const PI_STATS_LINE = /^(?:(?:[↑↓RW]\d+(?:\.\d+)?[kM]?|CH\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?(?: \(sub\))?) )*(?:\d+(?:\.\d+)?%|\?)\/\d+(?:\.\d+)?[kM]?(?: \(auto\))?(?: {2,}(\S.*))?$/;
-const PI_THINKING_LEVEL = / • (?:thinking off|off|minimal|low|medium|high|xhigh)$/;
 const PI_BUSY = /working|thinking|compacting|queued|pending|retrying|running/i;
 function piFooterCwd(line, cwd) {
   const home = process.env.HOME ? path.resolve(process.env.HOME) : '';
@@ -280,13 +279,11 @@ export function emptyComposer(capture, cwd) {
   requireProof(bottom > top && bottom - top <= 12, 'unknown_composer_layout');
   requireProof(lines.slice(top + 1, bottom).every(line => /^\s*$/.test(line)), 'unsent_composer_draft', 'protected');
   const footer = lines.slice(bottom + 1).filter(line => line.trim()).map(line => line.trimEnd());
-  const stats = footer.length >= 2 ? PI_STATS_LINE.exec(footer[1]) : null;
-  requireProof(footer.length >= 2 && footer.length <= 3 && (!cwd || piFooterCwd(footer[0], cwd)) && stats, 'unknown_pi_footer');
-  // The cwd line is proven above (a branch name may say anything). On the
-  // stats line, what follows the usage - provider and model, less Pi's own
-  // thinking level - is scanned like the extension status line.
-  const tail = [(stats[1] || '').replace(PI_THINKING_LEVEL, ''), ...footer.slice(2)];
-  requireProof(!tail.some(line => PI_BUSY.test(line)), 'unsettled_terminal_tail', 'protected');
+  requireProof(footer.length >= 2 && footer.length <= 3 && (!cwd || piFooterCwd(footer[0], cwd)) && PI_STATS_LINE.test(footer[1]), 'unknown_pi_footer');
+  // The cwd and stats lines are proven above, each in Pi's own shape; what
+  // follows the usage is provider and model (a model may be named
+  // `*-thinking`), so only the extension status line is scanned.
+  requireProof(!footer.slice(2).some(line => PI_BUSY.test(line)), 'unsettled_terminal_tail', 'protected');
   return sha(Buffer.from(text.slice(text.lastIndexOf(lines[top]))));
 }
 

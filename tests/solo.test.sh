@@ -447,6 +447,29 @@ test_solo_land_not_landed_comment_redacts_the_forge_reason() {
     _land widget#7 ) >/dev/null 2>&1 && { echo "a refused merge reported success"; rm -rf "$T"; return 1; }
   assert_eq "$(tail -n1 "$T/comment-body")" "Not landed: GitHub refused the merge of $H by widget-orch via cel solo land. Nothing was merged." || { rm -rf "$T"; return 1; }
   rm -rf "$T"
+  # A key with a prefix (`access_token`, `client_secret`), an Authorization
+  # header's scheme and value, and a token the 300-character cut would split.
+  local case pad expect
+  pad="$(printf 'w %.0s' $(seq 1 145))"
+  for case in "access""_token=abc123 rejected|access_token=<redacted> rejected" \
+              "client""_secret=hunter2 rejected|client_secret=<redacted> rejected" \
+              "Authorization: token abc rejected|Authorization: <redacted> rejected" \
+              "$pad$tok tail|"; do
+    expect="${case#*|}"
+    _solo_setup
+    _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+    ( export CEL_ROLE=solo CEL_INBOX_ME=widget-orch STUB_MERGE_FAIL=1 STUB_MERGE_ERR="${case%%|*}"
+      _land widget#7 ) >/dev/null 2>&1 && { echo "a refused merge reported success"; rm -rf "$T"; return 1; }
+    line="$(tail -n1 "$T/comment-body")"
+    if [ -n "$expect" ]; then
+      assert_eq "$line" "Not landed: GitHub refused the merge of $H by widget-orch via cel solo land ($expect). Nothing was merged." || { rm -rf "$T"; return 1; }
+    else
+      assert_contains "$line" "w w <redacted>" || { rm -rf "$T"; return 1; }
+      assert_fails grep -qF -e ghp_ -e Zx9 "$T/comment-body" || { rm -rf "$T"; return 1; }
+    fi
+    rm -rf "$T"
+  done
+  return 0
 }
 
 # ---- a Forgejo repo ----------------------------------------------------------

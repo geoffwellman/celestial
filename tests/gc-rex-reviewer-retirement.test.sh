@@ -675,6 +675,21 @@ test_gc_retire_counts_are_pruned_and_reset_with_the_reviewer() {
   _rr_cleanup
 }
 
+# An empty roster is no proof that a reviewer is gone (Rex restarting, a
+# roster read mid-relaunch): the pass keeps every count, so a 24h clock is
+# not reset. A roster that does list agents prunes as before.
+test_gc_retire_prune_skips_an_empty_roster() {
+  _rr_fixture
+  local reviewers_closed=0
+  reviewers_write '[]'
+  jq -n '{"rex/gone/terminal widget-pr-9-review widget#9": {pane:"rex/gone/terminal", agent:"widget-pr-9-review", repo:"widget", pr:"9", since:1, attempts:3, reason:"x", reported:false}}' > "$CEL_GC_RETIRE_STATE"
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  assert_eq "$(jq 'keys | length' "$CEL_GC_RETIRE_STATE")" 1 || return
+  _gc_reviewers 0 '{"result":{"agents":[{"pane_id":"w:1","name":"widget-orch","agent_status":"idle","cwd":"/nowhere"}]}}' >/dev/null 2>&1
+  assert_eq "$(jq 'keys | length' "$CEL_GC_RETIRE_STATE")" 0 || return
+  _rr_cleanup
+}
+
 # gc and land update the same file; concurrent notes lose nothing: every
 # reviewer's entry is there, and one reviewer noted N times counts N.
 test_gc_retire_notes_from_concurrent_runs_lose_no_update() {

@@ -959,9 +959,11 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   # stale row and adopts nothing.
   [ "$dry" -eq 1 ] && return 0
   # Every reviewer on the registry or the roster was seen above; a retire
-  # count for any other has nobody left to retire. An unreadable registry -
-  # or rows that produced no candidate at all - proves nothing about who is gone.
-  if [ "${#recover[@]}" -eq 0 ] && { [ -n "$seen" ] || [ "$(printf '%s' "$rows" | jq 'length' 2>/dev/null)" = 0 ]; }; then
+  # count for any other has nobody left to retire. An unreadable registry,
+  # an empty roster (a momentary one would reset every 24h clock), or rows
+  # that produced no candidate at all prove nothing about who is gone.
+  if [ "${#recover[@]}" -eq 0 ] && printf '%s' "$agents" | jq -e '.result.agents | length > 0' >/dev/null 2>&1 \
+    && { [ -n "$seen" ] || [ "$(printf '%s' "$rows" | jq 'length' 2>/dev/null)" = 0 ]; }; then
     _gc_retire_prune "$(printf '%s' "$seen" | jq -sc 'map({repo, pr, pane, agent})')"
   fi
   mkdir -p "$(dirname "$rv_file")" 2>/dev/null && printf '%s\n' "$rv_next" > "$rv_file" 2>/dev/null || true
