@@ -41,6 +41,9 @@ case "$1 $2" in
   "pr list") cat "$FX/pr-list.json" ;;
   "pr close") echo "✓ Closed pull request acme/widget#12" >&2 ;;
   "pr ready") echo "✓ Pull request acme/widget#12 is marked as \"ready for review\"" >&2 ;;
+  "pr comment")
+    [ -z "${STUB_COMMENT_FAIL:-}" ] || { echo 'GraphQL: Resource not accessible by integration (addComment)' >&2; exit 1; }
+    echo "https://github.com/acme/widget/pull/12#issuecomment-2471" ;;
   "run list") cat "$FX/run-list.json" ;;
   "run rerun") echo "✓ Requested rerun of job" >&2 ;;
   "run view")
@@ -295,6 +298,23 @@ test_forge_pr_merge_squashes_only_the_expected_head() {
   assert_fails forge_pr_merge "$T" widget 12 877d852 || { rm -rf "$T"; return 1; }
   assert_fails forge_pr_merge "$T" widget 12 || { rm -rf "$T"; return 1; }
   assert_eq "$(cat "$GH_LOG")" "" || { echo "merged without a full expected head"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A plain comment on the PR's conversation, its url from gh's own answer; an
+# empty body or a bad number sends nothing, and a refusal is a refusal.
+test_forge_pr_comment_posts_on_the_pr() {
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  local out; out="$(forge_pr_comment "$T" widget 12 "Landing as widget-orch via cel solo land" 2>/dev/null)" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  _json_eq "$out" '{"commented":true,"number":12,"url":"https://github.com/acme/widget/pull/12#issuecomment-2471"}' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "pr comment 12 --repo acme/widget --body Landing as widget-orch via cel solo land|" || { rm -rf "$T"; return 1; }
+  : > "$GH_LOG"
+  out="$(STUB_COMMENT_FAIL=1 forge_pr_comment "$T" widget 12 "x" 2>/dev/null)" && { echo "a refused comment reported success"; rm -rf "$T"; return 1; }
+  assert_eq "$out" "" || { rm -rf "$T"; return 1; }
+  : > "$GH_LOG"
+  assert_fails forge_pr_comment "$T" widget 12 "" || { rm -rf "$T"; return 1; }
+  assert_fails forge_pr_comment "$T" widget 0 "x" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$GH_LOG")" "" || { echo "posted an empty comment or to no PR"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
@@ -1013,6 +1033,24 @@ test_forgejo_pr_merge_squashes_only_the_expected_head() {
   : > "$FJ_LOG"
   assert_fails forge_pr_merge "$T" widget 31 3c1f0e9 || { rm -rf "$T"; return 1; }
   STUB_FJ_STATE=closed assert_fails forge_pr_merge "$T" widget 31 "$FJ_FIXTURE_HEAD" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^POST' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The same on Forgejo: POST /issues/<n>/comments (a PR is an issue); a 403 is
+# a refusal and an empty body sends nothing.
+test_forgejo_pr_comment_posts_on_the_pr() {
+  _fj_ws
+  local out; out="$(forge_pr_comment "$T" widget 31 "Landing as widget-orch via cel solo land" 2>/dev/null)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  _json_eq "$out" '{"commented":true,"number":31,"url":null}' || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -E '^(POST|PATCH)' "$FJ_LOG")" "POST http://forgejo.internal/api/v1/repos/geoff/gizmo/issues/31/comments" || { rm -rf "$T"; return 1; }
+  _json_eq "$(tail -n1 "$FJ_BODY_LOG")" '{"body":"Landing as widget-orch via cel solo land"}' || { rm -rf "$T"; return 1; }
+  out="$(STUB_FJ_WRITE=denied forge_pr_comment "$T" widget 31 "x" 2>"$T/err")" && { echo "a refused comment reported success"; rm -rf "$T"; return 1; }
+  assert_eq "$out" "" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/err")" "HTTP 403" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  assert_fails forge_pr_comment "$T" widget 31 "" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -c '^POST' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
   _fj_no_gh || { rm -rf "$T"; return 1; }
   rm -rf "$T"

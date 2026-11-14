@@ -545,7 +545,7 @@ example:
 `lib/forge.sh` holds pull-request and CI operations in Celestial's own
 vocabulary (`forge_pr_view`, `forge_pr_list`, `forge_pr_checks`,
 `forge_pr_reviews`, `forge_pr_files`, `forge_pr_merge`, `forge_pr_create`, `forge_pr_close`,
-`forge_pr_ready`, `forge_whoami`, `forge_run_list`, `forge_run_view`,
+`forge_pr_comment`, `forge_pr_ready`, `forge_whoami`, `forge_run_list`, `forge_run_view`,
 `forge_run_rerun`, `forge_run_resolve`): each prints one normalised JSON value
 or fails, with the same shape from either backend; `forge_run_logs` prints a
 job's log as plain text. Run and job ids are the API's (the web UI's run

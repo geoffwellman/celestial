@@ -39,6 +39,10 @@
 #   forge_pr_close  <wsdir> <repo> <number> [comment-file]
 #       <the forge_pr_view object> after closing - the comment, if any, is
 #       posted first; the branch is never deleted.
+#   forge_pr_comment <wsdir> <repo> <number> <body>
+#       {commented: true, number, url} - a plain comment on the PR's
+#       conversation, posted as the workspace's account; `url` is null when
+#       the forge does not say where it is.
 #   forge_pr_ready  <wsdir> <repo> <number>
 #       <the forge_pr_view object> once it is ready for review; a PR that is
 #       not a draft is left as it is.
@@ -115,6 +119,7 @@ forge_pr_reviews() { _forge_call pr_reviews "$@"; }
 forge_pr_files()   { _forge_call pr_files "$@"; }
 forge_pr_merge()   { _forge_call pr_merge "$@"; }
 forge_pr_close()   { _forge_call pr_close "$@"; }
+forge_pr_comment() { _forge_call pr_comment "$@"; }
 forge_pr_ready()   { _forge_call pr_ready "$@"; }
 forge_whoami()     { _forge_call whoami "$@"; }
 forge_run_view()   { _forge_call run_view "$@"; }
@@ -455,6 +460,16 @@ _forge_github_pr_close() { # <wsdir> <slug> <number> [comment-file]
   fi
   _forge_gh "$1" "${args[@]}" >&2 || return 1
   _forge_github_pr_view "$1" "$2" "$3"
+}
+
+# gh answers with the new comment's url on stdout.
+_forge_github_pr_comment() { # <wsdir> <slug> <number> <body>
+  _forge_number_ok pr_comment "${3:-}" || return 1
+  [ -n "${4:-}" ] || { printf 'forge pr_comment: an empty comment - nothing posted\n' >&2; return 1; }
+  local out url
+  out="$(_forge_gh "$1" pr comment "$3" --repo "$2" --body "$4")" || return 1
+  url="$(printf '%s\n' "$out" | grep -oE 'https?://[^[:space:]]+' | tail -n1)"
+  jq -nc --argjson n "$3" --arg u "$url" '{commented: true, number: $n, url: (if $u == "" then null else $u end)}'
 }
 
 _forge_github_pr_ready() { # <wsdir> <slug> <number>
@@ -849,6 +864,18 @@ _forge_forgejo_pr_close() { # <wsdir> <desc> <number> [comment-file]
   _forge_fj "$host" PATCH "$api/pulls/$3" '{"state":"closed"}' || { _forge_fj_fail pr_close; return 1; }
   printf '%s' "$FJ_BODY" | jq -c "$_FORGE_JQ_FJ"' fj_pr' 2>/dev/null \
     || { printf 'forge pr_close: Forgejo answered %s without a pull request\n' "$FJ_CODE" >&2; return 1; }
+}
+
+# A PR is an issue: its conversation is POST /issues/<n>/comments.
+_forge_forgejo_pr_comment() { # <wsdir> <desc> <number> <body>
+  _forge_number_ok pr_comment "${3:-}" || return 1
+  [ -n "${4:-}" ] || { printf 'forge pr_comment: an empty comment - nothing posted\n' >&2; return 1; }
+  local payload
+  payload="$(jq -nc --arg b "$4" '{body: $b}')" || return 1
+  _forge_fj "$(_forge_fj_host "$2")" POST "$(_forge_fj_api "$2")/issues/$3/comments" "$payload" \
+    || { _forge_fj_fail pr_comment; printf 'forge pr_comment: nothing was posted on #%s\n' "$3" >&2; return 1; }
+  printf '%s' "$FJ_BODY" | jq -c --argjson n "$3" '{commented: true, number: $n, url: (.html_url // null)}' 2>/dev/null \
+    || { printf 'forge pr_comment: Forgejo answered %s without a comment\n' "$FJ_CODE" >&2; return 1; }
 }
 
 # Ready = the `WIP:` / `[WIP]` title prefix removed (the prefix IS Forgejo's

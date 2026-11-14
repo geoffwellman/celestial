@@ -493,19 +493,25 @@ cmd_solo_land() { # <ref> [--workspace W]
 
   # WHO SAYS THIS IS APPROVED: the forge's own review decision where it can;
   # where the author would have to approve their own PR, the recorded
-  # verdict - for this exact head.
-  local reviews rd rv review_by="" review_note="" approved_via=""
+  # verdict - for this exact head. Either way the approvers are named: the
+  # recorded verdict's reviewer when it approved this head, and the accounts
+  # whose latest review the forge counted.
+  local reviews rd rv review_by="" review_note="" approved_via="" forge_by=""
   reviews="$(_solo_forge forge_pr_reviews "$wsdir" "$SOLO_REPO" "$num")" || die "cel solo land: cannot read #$num's reviews from $forge. Nothing merged."
   rd="$(printf '%s' "$reviews" | jq -r '.decision // "none"')"
   rv="$(solo_review_get "$wsdir" "$SOLO_REPO" "$num")"
-  if [ "$rd" = approved ]; then
-    approved_via="$forge approval"
-  elif [ "$(printf '%s' "$rv" | jq -r '.verdict // ""')" = approved ]; then
-    [ "$(printf '%s' "$rv" | jq -r '.head // ""')" = "$head" ] \
-      || die "cel solo land: the recorded approval is for head $(printf '%s' "$rv" | jq -r '.head // "?"' | cut -c1-12), but #$num is at ${head:0:12} - the PR moved since its review; re-review it. Nothing merged."
+  if [ "$(printf '%s' "$rv" | jq -r '.verdict // ""')" = approved ] && [ "$(printf '%s' "$rv" | jq -r '.head // ""')" = "$head" ]; then
     review_by="$(printf '%s' "$rv" | jq -r '.by // ""')"
     review_note="$(printf '%s' "$rv" | jq -r '.note // ""')"
+  fi
+  if [ "$rd" = approved ]; then
+    approved_via="$forge approval"
+    forge_by="$(printf '%s' "$reviews" | jq -r '[.reviews[] | select((.author // "") != "")] | group_by(.author)
+      | map(last | select(.state == "approved") | .author) | .[]')"
+  elif [ -n "$review_by" ]; then
     approved_via="verdict by $review_by ($forge cannot approve a PR its own author would review)"
+  elif [ "$(printf '%s' "$rv" | jq -r '.verdict // ""')" = approved ]; then
+    die "cel solo land: the recorded approval is for head $(printf '%s' "$rv" | jq -r '.head // "?"' | cut -c1-12), but #$num is at ${head:0:12} - the PR moved since its review; re-review it. Nothing merged."
   else
     die "cel solo land: #$num is not approved (review decision=$rd, recorded verdict=$(printf '%s' "$rv" | jq -r '.verdict // "none"' 2>/dev/null || printf none))"
   fi
@@ -567,13 +573,35 @@ Nothing merged."
       || die "cel solo land: AFK did not authorise this merge - see the refusal above. Nothing was merged."
   fi
 
-  local body="$gate_body"
-  [ -z "$extra_by" ] || body="$extra_by"$'\n'"$body"
-  if [ -n "$review_by" ]; then
-    body="Reviewed-by: $review_by (approved)${review_note:+$'\n'$review_note}"$'\n'"$body"
-  fi
+  # WHO LANDED IT AND WHO APPROVED IT. The forge shows every land as merged by
+  # the workspace's account - the owner's token - whichever agent ran it. So
+  # the squash message names them as git trailers in its last paragraph (the
+  # review note, free text, in a paragraph of its own above them), and a
+  # comment says the same on the PR page just before the merge. The lander
+  # is the alias this agent's launch gave it (CEL_INBOX_ME); a person at
+  # their own shell (no agent role) is the forge account itself, by hand.
+  local lander by_hand="" l trailers=""
+  if [ -n "${CEL_INBOX_ME:-}" ]; then lander="$(cel_alias_norm "$CEL_INBOX_ME")"
+  elif [ -n "${CEL_ROLE:-}" ]; then lander="an unnamed $CEL_ROLE agent"
+  else lander="$me" by_hand=1; fi
+  [ -z "$review_by" ] || trailers="Reviewed-by: $review_by (approved)"$'\n'
+  while IFS= read -r l; do [ -z "$l" ] || trailers+="Reviewed-by: $l (approved on $forge)"$'\n'; done <<<"$forge_by"
+  [ -z "$extra_by" ] || trailers+="$extra_by"$'\n'
+  trailers+="Landed-by: $lander (cel solo land${by_hand:+, by hand})"$'\n'"$gate_body"
+  local body="${review_note:+$review_note$'\n\n'}$trailers"
   local bad; bad="$(land_body_hygiene "$body")" || die "cel solo land: could not run the hygiene check on the commit body - nothing was merged"
-  [ -z "$bad" ] || die "cel solo land: the review note carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
+  [ -z "$bad" ] || die "cel solo land: the commit body (the review note, or a name in it) carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
+  # The comment is the PR page's copy of what the merge commit records, part
+  # of the land AFK (when on) has just admitted: a refused one is reported and
+  # never stops the merge - the trailers carry the record either way.
+  local reviewers said="checks green"
+  reviewers="$(jq -rn --arg r "$review_by" --arg f "$forge_by" --argjson e "$extra" \
+    '[$r, ($f | split("\n")[]), $e.required[].alias] | map(select(. != ""))
+     | reduce .[] as $x ([]; if index([$x]) then . else . + [$x] end) | join(", ")')"
+  case "$gate_body" in "Gate: local"*) said="checks green, repo gate passed at that head" ;; esac
+  _solo_forge forge_pr_comment "$wsdir" "$SOLO_REPO" "$num" \
+    "Landing as $lander${by_hand:+ (by hand)} via cel solo land: approved by ${reviewers:-a $forge reviewer} at $head, $said." >/dev/null \
+    || c_warn "cel solo land: could not post the landing comment on #$num (see above) - merging anyway; the merge commit's Landed-by trailer still names the lander"
   # MERGE ONLY THE HEAD THAT WAS CHECKED: the forge refuses if it moved since.
   if ! _solo_forge forge_pr_merge "$wsdir" "$SOLO_REPO" "$num" "$head" "$body" >/dev/null 2>&1; then
     afk_end failed "the merge did not go through"
