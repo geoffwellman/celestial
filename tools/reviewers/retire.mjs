@@ -245,6 +245,23 @@ export function parseNative(bytes, cwd, roundAt, leaf) {
   return { id: header.id, leaf, final: final.id, finalAt: timestamp(final.timestamp) };
 }
 
+// Pi 1.5's footer (FooterComponent.render, modes/interactive/components/
+// footer.js) under the composer: the session's cwd - `~`-relative inside
+// HOME - then ` (<branch>)` in a git checkout (`detached` off a branch) and
+// ` • <name>` for a named session; under it the stats line, which always
+// carries the context usage, `<n>%/<window>` or `?/<window>` (` (auto)` while
+// auto-compaction is on); then at most one line of extension statuses. Only
+// this checkout's own line is this reviewer's: another or longer path, a
+// line Pi cut off, or anything else after the branch is an unknown footer.
+const PI_CWD_SUFFIX = /^(?: \(\S+\))?(?: • \S.*)?$/;
+const PI_CONTEXT_USAGE = /(?:^|\s)(?:\d+(?:\.\d+)?%|\?)\/\d+(?:\.\d+)?[kM]?(?: \(auto\))?(?:\s|$)/;
+function piFooterCwd(line, cwd) {
+  const home = process.env.HOME ? path.resolve(process.env.HOME) : '';
+  const forms = [cwd];
+  if (home && home !== '/' && (cwd === home || cwd.startsWith(`${home}/`))) forms.push(`~${cwd.slice(home.length)}`);
+  return forms.some(form => line.startsWith(form) && PI_CWD_SUFFIX.test(line.slice(form.length)));
+}
+
 export function emptyComposer(capture, cwd) {
   requireProof(object(capture) && capture.eof === true && typeof capture.content === 'string' && Number.isInteger(capture.total) && capture.total >= 0 && capture.total <= 983040 && Buffer.byteLength(capture.content) === capture.total, 'incomplete_terminal_capture');
   const text = capture.content.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
@@ -255,9 +272,11 @@ export function emptyComposer(capture, cwd) {
   const top = borders.at(-2), bottom = borders.at(-1);
   requireProof(bottom > top && bottom - top <= 12, 'unknown_composer_layout');
   requireProof(lines.slice(top + 1, bottom).every(line => /^\s*$/.test(line)), 'unsent_composer_draft', 'protected');
-  const footer = lines.slice(bottom + 1).filter(line => line.trim());
-  requireProof(footer.length >= 2 && (!cwd || footer[0].trim() === cwd || footer[0].trim() === cwd.replace(process.env.HOME || '\0', '~')) && footer.slice(1).some(line => /\([^\n()]+\)\s+\S+/.test(line)), 'unknown_pi_footer');
-  requireProof(!lines.slice(bottom + 1).some(line => /working|thinking|compacting|queued|pending|retrying|running/i.test(line)), 'unsettled_terminal_tail', 'protected');
+  const footer = lines.slice(bottom + 1).filter(line => line.trim()).map(line => line.trimEnd());
+  requireProof(footer.length >= 2 && footer.length <= 3 && (!cwd || piFooterCwd(footer[0], cwd)) && PI_CONTEXT_USAGE.test(footer[1]), 'unknown_pi_footer');
+  // The cwd and stats lines are proven above (a branch or model name may say
+  // anything); what is left is the extension status line.
+  requireProof(!footer.slice(2).some(line => /working|thinking|compacting|queued|pending|retrying|running/i.test(line)), 'unsettled_terminal_tail', 'protected');
   return sha(Buffer.from(text.slice(text.lastIndexOf(lines[top]))));
 }
 

@@ -84,7 +84,10 @@ test('old stops, interrupted stops, malformed/truncated branches, and unsupporte
   assert.throws(() => parseNative(Buffer.from('{bad json}\n'), cwd, 0));
 });
 
-const capture = (draft = '', footer = `${cwd}\n1k tokens (fixture) widget-model`) => {
+// Pi 1.5's stats line: token counters, the context usage, then the provider
+// and model right-aligned (fixtures/pi-1.5.0-idle-footer.txt is a real one).
+const stats = '↑12k ↓3.4k R1.2M W40k CH98.5% 23.4%/200k (auto)  (fixture-gate) widget-model • medium';
+const capture = (draft = '', footer = `${cwd} (review-widget)\n${stats}`) => {
   const content = `Review complete.\n────────────────────\n${draft}\n────────────────────\n${footer}\n`;
   return { content, eof: true, total: Buffer.byteLength(content) };
 };
@@ -94,10 +97,57 @@ test('only a complete recognized Pi blank composer is eligible', () => {
   refusal(() => emptyComposer(capture('Please wait'), cwd), 'unsent_composer_draft', 'protected');
   refusal(() => emptyComposer({ ...capture(), eof: false }, cwd), 'incomplete_terminal_capture');
   refusal(() => emptyComposer({ ...capture(), total: 1 }, cwd), 'incomplete_terminal_capture');
-  refusal(() => emptyComposer(capture('', '/another/checkout\n1k (fixture) widget-model'), cwd), 'unknown_pi_footer');
-  refusal(() => emptyComposer(capture('', `${cwd}\n1k (fixture) widget-model\nCompacting`), cwd), 'unsettled_terminal_tail', 'protected');
+  refusal(() => emptyComposer(capture('', `/another/checkout (review-widget)\n${stats}`), cwd), 'unknown_pi_footer');
+  refusal(() => emptyComposer(capture('', `${cwd} (review-widget)\n${stats}\nCompacting`), cwd), 'unsettled_terminal_tail', 'protected');
   const modal = capture(); modal.content = 'Unknown modal'; modal.total = Buffer.byteLength(modal.content);
   refusal(() => emptyComposer(modal, cwd), 'unknown_composer_layout');
+});
+
+// What an idle Pi 1.5.0 pane actually showed (Rex `block call format`, the
+// same call retirement makes): its checkout in `~` form followed by the git
+// branch, then the stats line. Only the path, branch and model are
+// placeholders; the borders, counters and padding are as rendered.
+test('the footer of a live idle Pi 1.5.0 pane is recognized', () => {
+  const real = fs.readFileSync(new URL('./fixtures/pi-1.5.0-idle-footer.txt', import.meta.url), 'utf8');
+  const live = cwdLine => {
+    const content = `Review complete; verdict recorded.\n\n${real.replace('~/reviews/widget-pr-7 (review-widget)', cwdLine)}`;
+    return { content, eof: true, total: Buffer.byteLength(content) };
+  };
+  const home = process.env.HOME;
+  assert.ok(home && home !== '/');
+  const checkout = path.join(home, 'reviews/widget-pr-7');
+  assert.equal(typeof emptyComposer(live('~/reviews/widget-pr-7 (review-widget)'), checkout), 'string');
+  // Pi prints the `~` form inside HOME; the absolute form is the same checkout.
+  assert.equal(typeof emptyComposer(live(`${checkout} (review-widget)`), checkout), 'string');
+  // Another checkout, a longer path sharing the prefix, a cut-off line, or
+  // anything else after the branch is not this reviewer's footer.
+  for (const other of ['~/reviews/widget-pr-70 (review-widget)', '~/reviews/widget-pr-7-old (review-widget)', '~/reviews/widget-pr-7/sub (review-widget)', '~/reviews/wid...', '~/reviews/widget-pr-7 (review-widget) (other)', '~/reviews/widget-pr-7 review-widget', '~/reviews/widget-pr-7 (review widget)']) {
+    refusal(() => emptyComposer(live(other), checkout), 'unknown_pi_footer');
+  }
+});
+
+test('every Pi 1.5 footer variant of this checkout is recognized, nothing else is', () => {
+  const accepted = [
+    `${cwd}\n${stats}`, // not a git checkout: no branch
+    `${cwd} (detached)\n${stats}`, // Pi's word for a detached HEAD
+    `${cwd} (fix/a-b(1))\n${stats}`,
+    `${cwd} (review-widget) • named session\n${stats}`,
+    `${cwd} (review-widget)\n↑1.2k ↓300 $0.042 (sub) ?/200k  widget-model`, // context unknown, one provider
+    `${cwd} (review-widget)\n↑1.2k ↓300 1.5%/128k  widget-model • thinking off`, // auto-compaction off
+    `${cwd} (review-widget)\n0.0%/1.0M (auto)  (fixture-gate) widget-model → routed-model • high`,
+    `${cwd} (review-widget)\n${stats}\nci: green inbox: 0 unread`, // one extension status line
+  ];
+  for (const footer of accepted) assert.equal(typeof emptyComposer(capture('', footer), cwd), 'string', footer);
+  const unknown = [
+    `${cwd}\n1k tokens (fixture) widget-model`, // no context usage: not Pi's stats line
+    `${cwd} (review-widget)`, // no stats line
+    `${cwd} (review-widget)\n${stats}\nci: green\nanother line`, // more than Pi renders
+    `widget-model ${cwd}\n${stats}`,
+    `${cwd}-other (review-widget)\n${stats}`,
+  ];
+  for (const footer of unknown) refusal(() => emptyComposer(capture('', footer), cwd), 'unknown_pi_footer');
+  // A status line still says when something is under way.
+  refusal(() => emptyComposer(capture('', `${cwd} (review-widget)\n${stats}\ninbox: 1 pending`), cwd), 'unsettled_terminal_tail', 'protected');
 });
 
 const protocolRequest = phase => ({ version: 1, type: 'cel-reviewer-retirement-request', phase, nonce: 'fixture-nonce', name: 'widget-pr-7-review', pid: 123, pid_start: '456', native_session: '/tmp/widget-session.jsonl', created_at: 1000, expires_at: 16000, ...(phase === 'exit' ? { expected_leaf: 'final' } : {}) });

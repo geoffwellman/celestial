@@ -17,7 +17,7 @@ _rr_fixture() {
   trap '_rr_cleanup' EXIT
   export HOME="$RR_T/home" CEL_REGISTRY="$RR_T/registry.yaml"
   export CEL_REX_STATE="$RR_T/rex" CEL_REVIEWERS_STATE="$RR_T/reviewers.json"
-  export CEL_GC_REVIEWER_STOP_STATE="$RR_T/stop.json" RR_T
+  export CEL_GC_REVIEWER_STOP_STATE="$RR_T/stop.json" CEL_GC_RETIRE_STATE="$RR_T/retire.json" RR_T
   RR_STATUS=idle
   export CEL_ROOT="$RR_T/root"
   RR_WS="$RR_T/workspace" RR_CO="$RR_T/workspace/.cel/reviewers/widget/71"
@@ -225,8 +225,10 @@ NODE
   printf '{"type":"module"}\n' > "$RR_T/bin/package.json"
   ln -s boundary "$RR_T/bin/rex"; ln -s boundary "$RR_T/bin/gh"; ln -s boundary "$RR_T/bin/cel"
   export PATH="$RR_T/bin:${RR_NODE%/*}:$PATH" CEL_REX_BIN="$RR_T/bin/rex" GH="$RR_T/bin/gh"
+  # The capture is Pi 1.5's idle screen: an empty composer, then the footer -
+  # the checkout and its branch, the stats line (tools/reviewers/fixtures).
   jq -n --arg head "$RR_HEAD" --arg cwd "$RR_CO" \
-    '{head:$head,cwd:$cwd,prState:"MERGED",mail:0,capture:("Review complete; verdict recorded.\n────────────────────\n\n────────────────────\n"+$cwd+"\nusage counters (fixture) fixture-model\n")}' > "$RR_T/boundary.json"
+    '{head:$head,cwd:$cwd,prState:"MERGED",mail:0,capture:("Review complete; verdict recorded.\n────────────────────\n\n────────────────────\n"+$cwd+" (review-widget)\n↑12k ↓3.4k R1.2M W40k CH98.5% 23.4%/200k (auto)  (fixture-gate) fixture-model • medium\n")}' > "$RR_T/boundary.json"
   : > "$RR_T/calls.jsonl"
   _rr_native completed
   jq -n --arg head "$RR_HEAD" --arg by "$RR_ALIAS" \
@@ -520,6 +522,102 @@ test_solo_land_retirement_uses_the_shared_proof_and_never_fails_the_land() {
   assert_eq "$(reviewers_rows | jq length)" 0 || return
   assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
   _rr_preserved
+}
+
+# A REFUSAL THAT DOES NOT CLEAR IS SAID, ONCE. Every tick retries a reviewer
+# whose retirement came back unknown and counts the attempt; at the Nth
+# attempt its product agent hears about it - once - naming the reviewer and
+# the reason. A retirement that then goes through clears the count.
+_rr_unknown_footer() { _rr_set '.capture="Review complete.\n────────────────────\n\n────────────────────\n/elsewhere (main)\n1.0%/200k (auto)  fixture-model\n"'; }
+_rr_attempts() { jq -r --arg k "$RR_PANE widget#71" '.[$k].attempts // 0' "$CEL_GC_RETIRE_STATE" 2>/dev/null || printf 0; }
+test_gc_rex_unknown_retirement_is_counted_and_reported_once_to_its_product() {
+  _rr_fixture
+  export CEL_GC_RETIRE_ALERT_ATTEMPTS=3
+  cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; }
+  _rr_unknown_footer
+  local tick
+  for tick in 1 2; do
+    _rr_gc; _rr_kept || return
+    assert_contains "$(cat "$RR_T/gc.out")" 'retirement incomplete for widget#71: unknown_pi_footer' || return
+    assert_eq "$(_rr_attempts)" "$tick" || return
+    [ ! -s "$RR_T/mail" ] || return 1
+  done
+  _rr_gc; _rr_kept || return
+  assert_eq "$(_rr_attempts)" 3 || return
+  assert_eq "$(grep -c . "$RR_T/mail")" 1 || return
+  local mail; mail="$(cat "$RR_T/mail")"
+  assert_contains "$mail" "send widget-orch " || return
+  assert_contains "$mail" "$RR_ALIAS" || return
+  assert_contains "$mail" 'widget#71' || return
+  assert_contains "$mail" 'unknown_pi_footer' || return
+  assert_contains "$mail" '--workspace bundle' || return
+  assert_contains "$mail" "--fp gc-reviewer-retire-$RR_ALIAS" || return
+  _rr_gc; _rr_kept || return
+  assert_eq "$(_rr_attempts)" 4 || return
+  assert_eq "$(grep -c . "$RR_T/mail")" 1 || return
+  # the cause fixed, the next tick retires it and the count goes with it
+  jq --arg c "$RR_CO" '.capture=("Review complete.\n────────────────────\n\n────────────────────\n"+$c+" (review-widget)\n23.4%/200k (auto)  fixture-model\n")' "$RR_T/boundary.json" > "$RR_T/boundary.next" && mv "$RR_T/boundary.next" "$RR_T/boundary.json"
+  _rr_gc
+  _rr_exited || return
+  assert_eq "$(jq -r --arg k "$RR_PANE widget#71" 'has($k)' "$CEL_GC_RETIRE_STATE")" false || return
+  unset CEL_GC_RETIRE_ALERT_ATTEMPTS
+  _rr_cleanup
+}
+
+# A day after the first failed attempt is enough, however few ticks ran; a
+# report that did not go out was not made, and the next tick sends it.
+test_gc_rex_unknown_retirement_is_reported_after_a_day_and_a_failed_send_retries() {
+  _rr_fixture
+  _rr_unknown_footer
+  jq -n --arg k "$RR_PANE widget#71" --argjson t "$(( $(date +%s) - 90000 ))" \
+    '{($k):{since:$t, attempts:1, reason:"unknown_pi_footer", reported:false}}' > "$CEL_GC_RETIRE_STATE"
+  cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; return 1; }
+  _rr_gc; _rr_kept || return
+  assert_eq "$(grep -c . "$RR_T/mail")" 1 || return
+  assert_eq "$(jq -r --arg k "$RR_PANE widget#71" '.[$k].reported' "$CEL_GC_RETIRE_STATE")" false || return
+  cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; }
+  _rr_gc; _rr_kept || return
+  assert_eq "$(grep -c . "$RR_T/mail")" 2 || return
+  assert_eq "$(jq -r --arg k "$RR_PANE widget#71" '.[$k].reported' "$CEL_GC_RETIRE_STATE")" true || return
+  _rr_gc; _rr_kept || return
+  assert_eq "$(grep -c . "$RR_T/mail")" 2 || return
+  _rr_cleanup
+}
+
+# A protected reviewer is waiting on something real (mail owed, a turn under
+# way) that gc retires it after: that is no failed attempt, and it ends a run
+# of them. A dry run counts nothing.
+test_gc_rex_protected_or_dry_retirement_is_not_a_failed_attempt() {
+  _rr_fixture
+  cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; }
+  local footer; footer="$(jq -c .capture "$RR_T/boundary.json")"
+  _rr_unknown_footer
+  _rr_gc 1; _rr_kept || return
+  assert_eq "$(_rr_attempts)" 0 || return
+  _rr_gc; assert_eq "$(_rr_attempts)" 1 || return
+  # its own footer back, but mail owed: protected
+  _rr_set ".capture=$footer | .mail=1"
+  _rr_gc; _rr_kept || return
+  assert_eq "$(_rr_attempts)" 0 || return
+  [ ! -s "$RR_T/mail" ] || return 1
+  _rr_cleanup
+}
+
+# `cel solo land`'s own attempt is the first of the count gc carries on, and
+# its warning says what gc will do - retry every tick, and tell the product.
+test_solo_land_unknown_retirement_starts_the_count_gc_continues() {
+  _rr_fixture
+  cel_agent_list() { _rr_agents; }
+  cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; }
+  _rr_unknown_footer
+  local out rc=0
+  out="$(_solo_land_retire_reviewer "$RR_WS" widget 71 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || return
+  assert_contains "$out" 'reviewer retirement for widget#71 is incomplete: unknown_pi_footer - `cel gc` retries it every tick and tells widget-orch if it keeps failing' || return
+  assert_eq "$(_rr_attempts)" 1 || return
+  _rr_gc; _rr_kept || return
+  assert_eq "$(_rr_attempts)" 2 || return
+  _rr_cleanup
 }
 
 test_gc_rex_active_pending_tools_and_later_user_work_keep_registry() {
