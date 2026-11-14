@@ -529,7 +529,8 @@ test_solo_land_retirement_uses_the_shared_proof_and_never_fails_the_land() {
 # attempt its product agent hears about it - once - naming the reviewer and
 # the reason. A retirement that then goes through clears the count.
 _rr_unknown_footer() { _rr_set '.capture="Review complete.\n────────────────────\n\n────────────────────\n/elsewhere (main)\n1.0%/200k (auto)  fixture-model\n"'; }
-_rr_attempts() { jq -r --arg k "$RR_PANE widget#71" '.[$k].attempts // 0' "$CEL_GC_RETIRE_STATE" 2>/dev/null || printf 0; }
+_rr_key() { printf '%s' "$RR_PANE $RR_ALIAS widget#71"; }
+_rr_attempts() { jq -r --arg k "$(_rr_key)" '.[$k].attempts // 0' "$CEL_GC_RETIRE_STATE" 2>/dev/null || printf 0; }
 test_gc_rex_unknown_retirement_is_counted_and_reported_once_to_its_product() {
   _rr_fixture
   export CEL_GC_RETIRE_ALERT_ATTEMPTS=3
@@ -559,7 +560,7 @@ test_gc_rex_unknown_retirement_is_counted_and_reported_once_to_its_product() {
   jq --arg c "$RR_CO" '.capture=("Review complete.\n────────────────────\n\n────────────────────\n"+$c+" (review-widget)\n23.4%/200k (auto)  fixture-model\n")' "$RR_T/boundary.json" > "$RR_T/boundary.next" && mv "$RR_T/boundary.next" "$RR_T/boundary.json"
   _rr_gc
   _rr_exited || return
-  assert_eq "$(jq -r --arg k "$RR_PANE widget#71" 'has($k)' "$CEL_GC_RETIRE_STATE")" false || return
+  assert_eq "$(jq -r --arg k "$(_rr_key)" 'has($k)' "$CEL_GC_RETIRE_STATE")" false || return
   unset CEL_GC_RETIRE_ALERT_ATTEMPTS
   _rr_cleanup
 }
@@ -569,16 +570,16 @@ test_gc_rex_unknown_retirement_is_counted_and_reported_once_to_its_product() {
 test_gc_rex_unknown_retirement_is_reported_after_a_day_and_a_failed_send_retries() {
   _rr_fixture
   _rr_unknown_footer
-  jq -n --arg k "$RR_PANE widget#71" --argjson t "$(( $(date +%s) - 90000 ))" \
-    '{($k):{since:$t, attempts:1, reason:"unknown_pi_footer", reported:false}}' > "$CEL_GC_RETIRE_STATE"
+  jq -n --arg k "$(_rr_key)" --arg p "$RR_PANE" --arg a "$RR_ALIAS" --argjson t "$(( $(date +%s) - 90000 ))" \
+    '{($k):{pane:$p, agent:$a, repo:"widget", pr:"71", since:$t, attempts:1, reason:"unknown_pi_footer", reported:false}}' > "$CEL_GC_RETIRE_STATE"
   cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; return 1; }
   _rr_gc; _rr_kept || return
   assert_eq "$(grep -c . "$RR_T/mail")" 1 || return
-  assert_eq "$(jq -r --arg k "$RR_PANE widget#71" '.[$k].reported' "$CEL_GC_RETIRE_STATE")" false || return
+  assert_eq "$(jq -r --arg k "$(_rr_key)" '.[$k].reported' "$CEL_GC_RETIRE_STATE")" false || return
   cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; }
   _rr_gc; _rr_kept || return
   assert_eq "$(grep -c . "$RR_T/mail")" 2 || return
-  assert_eq "$(jq -r --arg k "$RR_PANE widget#71" '.[$k].reported' "$CEL_GC_RETIRE_STATE")" true || return
+  assert_eq "$(jq -r --arg k "$(_rr_key)" '.[$k].reported' "$CEL_GC_RETIRE_STATE")" true || return
   _rr_gc; _rr_kept || return
   assert_eq "$(grep -c . "$RR_T/mail")" 2 || return
   _rr_cleanup
@@ -617,6 +618,94 @@ test_solo_land_unknown_retirement_starts_the_count_gc_continues() {
   assert_eq "$(_rr_attempts)" 1 || return
   _rr_gc; _rr_kept || return
   assert_eq "$(_rr_attempts)" 2 || return
+  _rr_cleanup
+}
+
+# An unknown answer before the retirement ran - here the roster cannot be
+# read, so neither pane nor alias is known - is counted by the same note, so
+# land's "tells widget-orch if it keeps failing" holds; the retirement that
+# later goes through ends that count too.
+test_solo_land_early_unknown_retirement_is_counted_and_reported() {
+  _rr_fixture
+  export CEL_GC_RETIRE_ALERT_ATTEMPTS=2
+  cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; }
+  cel_agent_list() { return 1; }
+  local out rc=0 k="- - widget#71"
+  out="$(_solo_land_retire_reviewer "$RR_WS" widget 71 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || return
+  assert_contains "$out" 'native_inventory_unreadable - `cel gc` retries it every tick and tells widget-orch if it keeps failing' || return
+  assert_eq "$(jq -r --arg k "$k" '.[$k].attempts' "$CEL_GC_RETIRE_STATE")" 1 || return
+  [ ! -s "$RR_T/mail" ] || return 1
+  _solo_land_retire_reviewer "$RR_WS" widget 71 >/dev/null 2>&1
+  assert_eq "$(jq -r --arg k "$k" '.[$k].attempts' "$CEL_GC_RETIRE_STATE")" 2 || return
+  assert_eq "$(grep -c . "$RR_T/mail")" 1 || return
+  assert_contains "$(cat "$RR_T/mail")" 'send widget-orch ' || return
+  assert_contains "$(cat "$RR_T/mail")" 'native_inventory_unreadable' || return
+  cel_agent_list() { _rr_agents; }
+  out="$(_solo_land_retire_reviewer "$RR_WS" widget 71 2>&1)" || return
+  assert_contains "$out" "retired the Rex reviewer for widget#71" || return
+  assert_eq "$(jq -c . "$CEL_GC_RETIRE_STATE")" '{}' || return
+  unset CEL_GC_RETIRE_ALERT_ATTEMPTS
+  _rr_cleanup
+}
+
+# A count belongs to one reviewer: pane, alias and PR. A reviewer that went
+# some other way (on neither registry nor roster) loses its entry at the next
+# gc pass, and a pane id that now carries another reviewer does not inherit
+# the old one's count or its `reported`.
+test_gc_retire_counts_are_pruned_and_reset_with_the_reviewer() {
+  _rr_fixture
+  cmd_inbox() { printf '%s\n' "$*" >> "$RR_T/mail"; }
+  jq -n --arg p "$RR_PANE" '{
+      "rex/gone/terminal widget-pr-9-review widget#9": {pane:"rex/gone/terminal", agent:"widget-pr-9-review", repo:"widget", pr:"9", since:1, attempts:9, reason:"x", reported:true},
+      "- - widget#9": {pane:"-", agent:"", repo:"widget", pr:"9", since:1, attempts:2, reason:"x", reported:false},
+      ($p + " widget-pr-70-review widget#70"): {pane:$p, agent:"widget-pr-70-review", repo:"widget", pr:"70", since:1, attempts:9, reason:"x", reported:true},
+      ($p + " widget#71"): {agent:"widget-pr-71-review", since:1, attempts:9, reason:"x", reported:true}
+    }' > "$CEL_GC_RETIRE_STATE"
+  _rr_unknown_footer
+  _rr_gc; _rr_kept || return
+  assert_eq "$(jq -c 'keys' "$CEL_GC_RETIRE_STATE")" "$(jq -nc --arg k "$(_rr_key)" '[$k]')" || return
+  assert_eq "$(_rr_attempts)" 1 || return
+  assert_eq "$(jq -r --arg k "$(_rr_key)" '.[$k].reported' "$CEL_GC_RETIRE_STATE")" false || return
+  [ ! -s "$RR_T/mail" ] || return 1
+  # The same pane id, relaunched as another reviewer: a fresh count.
+  _gc_retire_note "$RR_WS" widget 71 "$RR_PANE" widget-pr-71-qa unknown unknown_pi_footer
+  assert_eq "$(jq -c 'keys' "$CEL_GC_RETIRE_STATE")" "$(jq -nc --arg k "$RR_PANE widget-pr-71-qa widget#71" '[$k]')" || return
+  assert_eq "$(jq -r --arg k "$RR_PANE widget-pr-71-qa widget#71" '.[$k].attempts' "$CEL_GC_RETIRE_STATE")" 1 || return
+  _rr_cleanup
+}
+
+# An empty roster is no proof that a reviewer is gone (Rex restarting, a
+# roster read mid-relaunch): the pass keeps every count, so a 24h clock is
+# not reset. A roster that does list agents prunes as before.
+test_gc_retire_prune_skips_an_empty_roster() {
+  _rr_fixture
+  local reviewers_closed=0
+  reviewers_write '[]'
+  jq -n '{"rex/gone/terminal widget-pr-9-review widget#9": {pane:"rex/gone/terminal", agent:"widget-pr-9-review", repo:"widget", pr:"9", since:1, attempts:3, reason:"x", reported:false}}' > "$CEL_GC_RETIRE_STATE"
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  assert_eq "$(jq 'keys | length' "$CEL_GC_RETIRE_STATE")" 1 || return
+  _gc_reviewers 0 '{"result":{"agents":[{"pane_id":"w:1","name":"widget-orch","agent_status":"idle","cwd":"/nowhere"}]}}' >/dev/null 2>&1
+  assert_eq "$(jq 'keys | length' "$CEL_GC_RETIRE_STATE")" 0 || return
+  _rr_cleanup
+}
+
+# gc and land update the same file; concurrent notes lose nothing: every
+# reviewer's entry is there, and one reviewer noted N times counts N.
+test_gc_retire_notes_from_concurrent_runs_lose_no_update() {
+  _rr_fixture
+  cmd_inbox() { :; }
+  printf '{}\n' > "$CEL_GC_RETIRE_STATE"
+  local i pids=()
+  for i in $(seq 1 16); do
+    _gc_retire_note "" widget "$i" "rex/r$i/terminal" "widget-pr-$i-review" unknown fixture & pids+=($!)
+    _gc_retire_note "" widget 99 rex/r99/terminal widget-pr-99-review unknown fixture & pids+=($!)
+  done
+  wait "${pids[@]}"
+  assert_eq "$(jq 'keys | length' "$CEL_GC_RETIRE_STATE")" 17 || return
+  assert_eq "$(jq -r '.["rex/r99/terminal widget-pr-99-review widget#99"].attempts' "$CEL_GC_RETIRE_STATE")" 16 || return
+  # No temp left beside it.
+  assert_eq "$(find "$(dirname "$CEL_GC_RETIRE_STATE")" -maxdepth 1 -name '.retire.json.*' | wc -l)" 0 || return
   _rr_cleanup
 }
 

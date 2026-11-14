@@ -148,6 +148,19 @@ test('every Pi 1.5 footer variant of this checkout is recognized, nothing else i
   for (const footer of unknown) refusal(() => emptyComposer(capture('', footer), cwd), 'unknown_pi_footer');
   // A status line still says when something is under way.
   refusal(() => emptyComposer(capture('', `${cwd} (review-widget)\n${stats}\ninbox: 1 pending`), cwd), 'unsettled_terminal_tail', 'protected');
+  // The stats line is Pi's own shape from its start - counters, then the
+  // usage - not any line with a usage-like token in it: a 2-line footer whose
+  // second line is an extension status is not Pi's stats line.
+  for (const status of ['build running 40%/100', 'ci: 3/4 jobs 75%/100 (auto)', 'deploy 1.0%/1.0M (auto)  queued']) {
+    refusal(() => emptyComposer(capture('', `${cwd} (review-widget)\n${status}`), cwd), 'unknown_pi_footer');
+  }
+  // What follows the usage is provider and model: a model named `*-thinking`
+  // is no busy word, and an idle reviewer on one is still retired.
+  for (const model of ['(fixture-gate) kimi-k2-thinking • medium', 'qwen3-235b-a22b-thinking • thinking off', 'fixture-thinking']) {
+    assert.equal(typeof emptyComposer(capture('', `${cwd} (review-widget)\n23.4%/200k (auto)  ${model}`), cwd), 'string', model);
+    assert.equal(typeof emptyComposer(capture('', `${cwd} (review-widget)\n23.4%/200k (auto)  ${model}\nci: green`), cwd), 'string', model);
+  }
+  refusal(() => emptyComposer(capture('', `${cwd} (review-widget)\n23.4%/200k (auto)  kimi-k2-thinking\nbuild running`), cwd), 'unsettled_terminal_tail', 'protected');
 });
 
 const protocolRequest = phase => ({ version: 1, type: 'cel-reviewer-retirement-request', phase, nonce: 'fixture-nonce', name: 'widget-pr-7-review', pid: 123, pid_start: '456', native_session: '/tmp/widget-session.jsonl', created_at: 1000, expires_at: 16000, ...(phase === 'exit' ? { expected_leaf: 'final' } : {}) });
