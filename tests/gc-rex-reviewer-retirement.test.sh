@@ -786,6 +786,25 @@ test_gc_rex_group_writable_evidence_is_tightened_then_retired() {
   assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
   _rr_preserved
 }
+# ...and so is the Pi task metadata in its checkout (<checkout>/.pi/tasks),
+# which retire.mjs reads with the same mask: an old reviewer's settled 0664
+# task is tightened and the reviewer retires.
+test_gc_rex_group_writable_task_metadata_is_tightened_then_retired() {
+  _rr_fixture
+  local tasks="$RR_CO/.pi/tasks/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee-$RR_PID"
+  mkdir -p "$tasks"
+  jq -n --arg cwd "$RR_CO" --arg output "$tasks/job.output" \
+    '{id:"job",command:"true",status:"completed",outputPath:$output,cwd:$cwd,startTime:1767225600000,endTime:1767225670000,notified:true,notifyOnCompletion:true,triggerOnCompletion:false}' > "$tasks/job.json"
+  chmod 775 "$RR_CO/.pi" "$RR_CO/.pi/tasks" "$tasks"; chmod 664 "$tasks/job.json"
+  _rr_gc 1
+  assert_contains "$(cat "$RR_T/gc.out")" unsafe_evidence_permissions || return
+  _rr_gc
+  _rr_exited || return
+  [ ! -e "$RR_RECEIPT" ] || return 1
+  assert_eq "$(stat -c %a "$RR_CO/.pi/tasks") $(stat -c %a "$tasks") $(stat -c %a "$tasks/job.json") $(stat -c %a "$RR_CO/.pi")" "700 700 600 775" || return
+  assert_contains "$(cat "$RR_T/gc.out")" "tightened review evidence $tasks/job.json from 0664 to 0600" || return
+  _rr_preserved
+}
 # ...but never through a symlink: a symlinked native session (or one in a
 # symlinked session directory) keeps its mode and the reviewer still refuses.
 test_gc_rex_symlinked_group_writable_evidence_is_left_and_still_refuses() {
