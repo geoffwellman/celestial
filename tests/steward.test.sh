@@ -2944,6 +2944,53 @@ test_steward_unledgered_symlinked_repo_and_sibling_worktree_route_to_the_repo_ow
   _ul_down
 }
 
+# No git identity - an empty path (git -C '' would answer for the steward's
+# own cwd), a bare repo or .git dir, an unreadable dir - is the path rules'.
+test_steward_unledgered_owner_without_git_identity_falls_back_to_path_rules() {
+  _ul_fixture
+  ( cd "$T/elsewhere/slots" && assert_eq "$(_serve_dir_owner '')" "alpha root outside" ) || { _ul_down; return 1; }
+  git init -q --bare "$T/alpha/repos/widget/bare.git"
+  assert_eq "$(_serve_dir_owner "$T/alpha/repos/widget/bare.git")" "alpha bundle-orch" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/.git")" "alpha root outside" || { _ul_down; return 1; }
+  mkdir -p "$T/elsewhere/slots/locked/web"; chmod 000 "$T/elsewhere/slots/locked"
+  if [ ! -r "$T/elsewhere/slots/locked" ]; then
+    assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/locked/web")" "alpha root outside" || { chmod 755 "$T/elsewhere/slots/locked"; _ul_down; return 1; }
+  fi
+  chmod 755 "$T/elsewhere/slots/locked"
+  # and a report with an empty path goes to root alone
+  ( cd "$T/elsewhere/slots" && _ul_tick '{"pid":3900001,"port":5173,"memory_mb":9,"age_seconds":9,"worktree":"","command":"node x"}' )
+  assert_eq "$(_ul_sent_to bundle-builder)" 0 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to root)" 1
+  _ul_down
+}
+
+# Each repo's common dir is asked of git once per tick, however many servers.
+test_steward_unledgered_repo_common_dirs_are_read_once_per_tick() {
+  _ul_fixture
+  mkdir -p "$T/bin"; : > "$T/git.log"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/git.log"\nexec %s "$@"\n' "$T" "$(command -v git)" > "$T/bin/git"; chmod +x "$T/bin/git"
+  PATH="$T/bin:$PATH" _ul_tick "$(_ul_pid 3900001 "$T/elsewhere/slots/web"),$(_ul_pid 3900002 "$T/elsewhere/slots-worktrees/review/web" 100 50),$(_ul_pid 3900003 "$T/alpha/.cel/solo/bundle/CEL-x/app" 100 60)"
+  assert_eq "$(grep -c "$T/alpha/repos/slots " "$T/git.log")" 1 || { cat "$T/git.log"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to bundle-builder)" 1
+  _ul_down
+}
+
+# The one-time re-key: state written under the old dir+command keys gives one
+# message - those keys gone, the same servers new - and an owner line still
+# owed under an old key is dropped (intended: the new key's owner is owed it).
+test_steward_unledgered_old_keys_rekey_in_one_message() {
+  _ul_fixture
+  printf '{"dir:/srv/app node":{"name":"node in /srv/app"},"dir:%s/alpha/products/bundle node":{"name":"node in %s/alpha/products/bundle","owed":"alpha bundle-orch"}}\n' "$T" "$T" \
+    > "$CEL_SERVE_STATE/unledgered-reported.json"
+  _ul_tick "$(_ul_pid 3900001 /srv/app)"
+  _ul_tick "$(_ul_pid 3900001 /srv/app)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "New: node on port 5173 in /srv/app (pid 3900001" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "Gone: node in /srv/app; node in $T/alpha/products/bundle." || { _ul_down; return 1; }
+  assert_eq "$(jq -c 'keys' "$CEL_SERVE_STATE/unledgered-reported.json")" '["dir:/srv/app node port 5173"]'
+  _ul_down
+}
+
 # With several workspaces, a server in none goes to the first one's root, and
 # the message says which; with one, nothing extra is said.
 test_steward_unledgered_server_outside_every_workspace_names_the_root_told() {

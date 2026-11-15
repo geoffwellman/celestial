@@ -706,10 +706,27 @@ serve_sweep() {
 # is the repo's owner, .cel/solo/<product>/... the product's agent, anything
 # else inside a workspace that workspace's root. Anything outside every
 # workspace is the first one's root, said with a third word, "outside".
+# A git call that cannot answer in 2s (a hung mount) is no git identity: the
+# path rules decide. An empty or missing dir has none either (git -C '' would
+# answer for the steward's own cwd).
 _serve_git_common() { # <dir> -> the resolved common git dir of the work tree <dir> is in
   local c
-  c="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [ -n "$c" ] || return 1
+  [ -n "$1" ] && [ -d "$1" ] || return 1
+  local -a git=(git -C "$1" rev-parse --is-inside-work-tree --path-format=absolute --git-common-dir)
+  command -v timeout >/dev/null 2>&1 && git=(timeout 2 "${git[@]}")
+  c="$("${git[@]}" 2>/dev/null)" || return 1
+  # a bare repo, or a .git dir, is no work tree
+  [ "${c%%$'\n'*}" = true ] || return 1
+  c="${c#*$'\n'}"
+  [ -n "$c" ] || return 1
   readlink -f "$c" 2>/dev/null || printf '%s\n' "$c"
+}
+# Each workspace's repos/<repo> common dirs, read once per tick: the report
+# empties this before it resolves any owner.
+declare -gA _SERVE_REPO_COMMON=()
+_serve_repo_common() { # <dir> -> memoised _serve_git_common (empty: none)
+  [ "${_SERVE_REPO_COMMON[$1]+x}" = x ] || _SERVE_REPO_COMMON[$1]="$(_serve_git_common "$1" || true)"
+  printf '%s' "${_SERVE_REPO_COMMON[$1]}"
 }
 _serve_dir_owner() { # <dir> -> "<ws> <mailbox>" | "<first-ws> root outside"
   local dir="$1" ws wsdir rel p rest repo common i
@@ -733,7 +750,7 @@ _serve_dir_owner() { # <dir> -> "<ws> <mailbox>" | "<first-ws> root outside"
   if common="$(_serve_git_common "$dir")"; then
     for i in "${!names[@]}"; do
       while IFS= read -r repo; do
-        [ -n "$repo" ] && [ "$(_serve_git_common "${dirs[$i]}/repos/$repo")" = "$common" ] || continue
+        [ -n "$repo" ] && [ "$(_serve_repo_common "${dirs[$i]}/repos/$repo")" = "$common" ] || continue
         printf '%s %s\n' "${names[$i]}" "$(ws_repo_pr_owner "${dirs[$i]}" "$repo")"; return 0
       done < <(ws_repo_names "${dirs[$i]}" 2>/dev/null)
     done
@@ -801,6 +818,15 @@ _serve_unledgered_report() {
   if [ -n "$new$gone" ]; then
     root_ws="$(registry_names 2>/dev/null | head -n1)"
     [ -n "$root_ws" ] || return 0
+    # this tick's repo common dirs, read here (not in the subshells below) so
+    # each is asked of git once
+    _SERVE_REPO_COMMON=()
+    local w wd r
+    for w in $(registry_names 2>/dev/null); do
+      wd="$(registry_path "$w")" && [ -n "$wd" ] || continue
+      wd="$(readlink -f "$wd" 2>/dev/null || printf '%s' "$wd")"
+      while IFS= read -r r; do [ -z "$r" ] || _serve_repo_common "$wd/repos/$r" >/dev/null; done < <(ws_repo_names "$wd" 2>/dev/null)
+    done
     while IFS=$'\t' read -r key dir name; do
       [ -n "$key" ] || continue
       owner="$(_serve_dir_owner "$dir")"
@@ -819,6 +845,10 @@ _serve_unledgered_report() {
       c_warn "unledgered-server change not delivered to root ($root_ws) - retried next tick"
       return 0
     fi
+    # Keys change shape now and then (dir+comm became dir+comm+port/script):
+    # the first tick after reports the old keys gone and the same servers new,
+    # once, and an owner's line still owed under an old key is dropped - the
+    # new key's owner is owed it afresh, which is intended.
     next="$(jq -c --argjson plan "$plan" --argjson owners "$owners" '
       with_entries(select($plan.now[.key] != null))
       + ($plan.new | map({(.key): ({name} + (if $owners[.key] then {owed: $owners[.key]} else {} end))}) | add // {})' <<<"$prev")"
