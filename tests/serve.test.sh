@@ -330,8 +330,9 @@ test_serve_agent_harness_browsers_are_not_unledgered_servers() {
 # A BUILD TOOL'S DAEMON IS NOT A PREVIEW. Every Gradle build leaves a
 # GradleDaemon (and a KotlinCompileDaemon, and worker processes) listening on
 # a random loopback port; it used to be reported as a new unledgered server and
-# then Gone minutes later. Judged by main class, never by the java binary: a
-# plain `java -jar app.jar` server is still reported.
+# then Gone minutes later. Judged by the main class of a java process (by
+# position, NUL-split argv), never by the java binary or a class name passed
+# as a program argument: a plain `java -jar app.jar` server is still reported.
 test_serve_build_tool_daemons_are_not_unledgered_servers() {
   local t out; t="$(mktemp -d)"
   export CEL_SERVE_STATE="$t/state" CEL_SERVE_PROC_ROOT="$t/proc" CEL_SERVE_SYSTEMCTL="$t/systemctl"
@@ -339,13 +340,24 @@ test_serve_build_tool_daemons_are_not_unledgered_servers() {
   mkdir -p "$CEL_SERVE_STATE" "$CEL_SERVE_PROC_ROOT"
   printf '{}\n' > "$CEL_CONFIG_FILE"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
+  _serve_fake_java() { # <pid> <port> <argv...>
+    local pid="$1" port="$2"; shift 2
+    mkdir -p "$CEL_SERVE_PROC_ROOT/$pid"
+    printf '%s\0' "$@" > "$CEL_SERVE_PROC_ROOT/$pid/cmdline"
+    CEL_SERVE_PROC_DATA+="$pid"$'\t'"$port"$'\t4096\t60\t/w/app\t'"$*"$'\n'
+  }
   local java=/usr/lib/jvm/java-21-openjdk-amd64/bin/java
-  CEL_SERVE_PROC_DATA+=$'3001\t38211\t4096\t60\t/w/app\t'"$java -Xmx2g -cp /home/u/.gradle/wrapper/dists/gradle-8.10/lib/gradle-daemon-main-8.10.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10"$'\n'
-  CEL_SERVE_PROC_DATA+=$'3002\t40117\t4096\t60\t/w/app\t'"$java -cp /home/u/.gradle/caches/kotlin-compiler-embeddable.jar -Djava.awt.headless=true org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon-runFilesPath /home/u/.local/share/kotlin/daemon"$'\n'
-  CEL_SERVE_PROC_DATA+=$'3003\t40555\t4096\t60\t/w/app\t'"$java -cp /home/u/.gradle/caches/8.10/workerMain/gradle-worker.jar worker.org.gradle.process.internal.worker.GradleWorkerMain Gradle Test Executor 1"$'\n'
-  CEL_SERVE_PROC_DATA+=$'3004\t8080\t4096\t60\t/w/app\t'"$java -jar app.jar --server.port=8080"$'\n'
+  _serve_fake_java 3001 38211 "$java" -Xmx2g -cp /home/u/.gradle/wrapper/dists/gradle-8.10/lib/gradle-daemon-main-8.10.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10
+  _serve_fake_java 3002 40117 "$java" -cp /home/u/.gradle/caches/kotlin-compiler-embeddable.jar -Djava.awt.headless=true org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon-runFilesPath /home/u/.local/share/kotlin/daemon
+  _serve_fake_java 3003 40555 "$java" -cp /home/u/.gradle/caches/8.10/workerMain/gradle-worker.jar worker.org.gradle.process.internal.worker.GradleWorkerMain 'Gradle Test Executor 1'
+  _serve_fake_java 3005 40600 "$java" -Xss4m '-Dmetals.client=vscode x' -classpath /home/u/.cache/coursier/metals.jar scala.meta.metals.Main
+  _serve_fake_java 3004 8080 "$java" -jar app.jar --server.port=8080
+  # a class name as a program argument does not make a server a daemon
+  _serve_fake_java 3006 8081 "$java" -jar app.jar scala.meta.metals.Main
+  _serve_fake_java 3007 8082 "$java" -jar app.jar --server.port=8082 org.gradle.launcher.daemon.bootstrap.GradleDaemon
+  _serve_fake_java 3008 8083 node server.js org.gradle.launcher.daemon.bootstrap.GradleDaemon
   out="$(serve_adopt_json)"
-  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[3004]'
+  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[3004,3006,3007,3008]'
   unset CEL_SERVE_STATE CEL_SERVE_PROC_ROOT CEL_SERVE_SYSTEMCTL CEL_CONFIG_FILE CEL_SERVE_ADOPT_DATA CEL_SERVE_PROC_DATA
   rm -rf "$t"
 }
