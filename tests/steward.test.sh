@@ -3335,7 +3335,7 @@ _bd_uptime() { printf '%s.00 1.00\n' "$1" > "$T/proc/uptime"; }
 _bd_proc() { # <pid> <ppid> <cputicks> <start-s> <cwd> <state> <argv...>
   local pid="$1" ppid="$2" cpu="$3" start="$4" cwd="$5" st="$6" d; shift 6; d="$T/proc/$pid"
   mkdir -p "$d"
-  printf '%s (java) %s %s 1 1 0 -1 0 0 0 0 0 %s 0 0 0 20 0 40 0 %s 0 0\n' "$pid" "$st" "$ppid" "$cpu" "$((start * 100))" > "$d/stat"
+  printf '%s (%s) %s %s 1 1 0 -1 0 0 0 0 0 %s 0 0 0 20 0 40 0 %s 0 0\n' "$pid" "${BD_COMM:-java}" "$st" "$ppid" "$cpu" "$((start * 100))" > "$d/stat"
   printf '%s\0' "$@" > "$d/cmdline"
   printf 'Name:\tjava\nPPid:\t%s\nVmRSS:\t  819200 kB\n' "$ppid" > "$d/status"
   [ -e "$d/environ" ] || : > "$d/environ"
@@ -3457,7 +3457,7 @@ test_steward_build_daemon_without_cel_inbox_me_is_routed_by_its_cwd() {
   _bd_done
 }
 
-# A send that fails is not a report: offered again next tick.
+# A send that fails everywhere (root too) is not a report: offered again next tick.
 test_steward_idle_build_daemon_undelivered_is_retried() {
   _bd_fixture
   _bd_kotlin 4700 1 100
@@ -3467,6 +3467,60 @@ test_steward_idle_build_daemon_undelivered_is_retried() {
   rm -f "$T/inbox-down"; _bd_uptime 10600; _bd_tick
   _bd_uptime 10900; _bd_tick
   assert_eq "$(_ul_sent_to bundle-orch)" 2 || { cat "$T/sent"; _bd_done; return 1; }
-  assert_contains "$(sed -n 2p "$T/sent")" "idle 10 min" || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(grep '^bundle-orch ' "$T/sent" | tail -n1)" "idle 10 min" || { cat "$T/sent"; _bd_done; return 1; }
+  _bd_done
+}
+
+# Records "<to> <fp>" per send; a mailbox listed in $T/missing refuses.
+_bd_fp_inbox() {
+  cmd_inbox() {
+    local to="$2" msg="$3" fp=""; shift 3
+    while [ $# -gt 0 ]; do [ "$1" = --fp ] && fp="$2"; shift; done
+    printf '%s %s\t%s\n' "$to" "$fp" "$msg" >> "$T/sent"
+    ! grep -qxF -- "$to" "$T/missing" 2>/dev/null
+  }
+}
+
+# Two idle daemons, one owner: two inbox items, never folded into one.
+test_steward_two_idle_build_daemons_to_one_owner_are_two_items() {
+  _bd_fixture; _bd_fp_inbox
+  _bd_kotlin 4800 1 100 100
+  _bd_kotlin 4801 1 100 150
+  _bd_env 4800 CEL_INBOX_ME=bundle-orch; _bd_env 4801 CEL_INBOX_ME=bundle-orch
+  _bd_tick; _bd_uptime 10300; _bd_tick
+  assert_eq "$(cut -f1 "$T/sent" | sort -u | tr '\n' ' ')" "bundle-orch idle-build-daemon-4800-10000 bundle-orch idle-build-daemon-4801-15000 " || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(cat "$T/sent")" "kill 4800 (check it is still a GradleDaemon / KotlinCompileDaemon first)" || { _bd_done; return 1; }
+  _bd_done
+}
+
+# A Gradle daemon whose only live child is the Kotlin daemon is idle; a
+# process whose stat comm is not java is never read as a daemon.
+test_steward_gradle_daemon_with_a_kotlin_daemon_child_is_idle() {
+  _bd_fixture
+  _bd_gradle 4900 1 100
+  _bd_env 4900 CEL_INBOX_ME=bundle-orch
+  _bd_kotlin 4901 4900 100
+  BD_COMM=bash _bd_kotlin 4902 1 100
+  _bd_env 4902 CEL_INBOX_ME=bundle-orch
+  _bd_tick; _bd_uptime 10300; _bd_tick
+  assert_contains "$(cat "$T/sent")" "idle Gradle daemon pid 4900" || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(cat "$T/sent")" "idle Kotlin daemon pid 4901" || { cat "$T/sent"; _bd_done; return 1; }
+  case "$(cat "$T/sent")" in *"pid 4902"*) echo "a non-java comm was read as a daemon"; _bd_done; return 1 ;; esac
+  _bd_done
+}
+
+# An owner mailbox that refuses: root is told once, and never again.
+test_steward_idle_build_daemon_for_a_missing_mailbox_goes_to_root_once() {
+  _bd_fixture; _bd_fp_inbox
+  printf 'ghost-orch\n' > "$T/missing"
+  _bd_kotlin 5000 1 100
+  _bd_env 5000 CEL_INBOX_ME=ghost-orch
+  _bd_tick
+  _bd_uptime 10300; _bd_tick
+  _bd_uptime 10600; _bd_tick
+  _bd_uptime 10900; _bd_tick
+  assert_eq "$(_ul_sent_to ghost-orch)" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(grep '^root ' "$T/sent")" "Not delivered to ghost-orch, so sent to root." || { _bd_done; return 1; }
   _bd_done
 }
