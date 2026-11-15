@@ -1033,7 +1033,10 @@ test_solo_qa_verdict_needs_head_named_evidence_from_its_own_agent() {
   assert_contains "$out" "--focus and --qa name two different agents" || { rm -rf "$T"; return 1; }
   good="$(_qa_shot "login-${H:0:12}.png")"
   printf 'console clean\n' > "$T/shots/console-${H:0:12}.log"
-  _qa_as approved "$H" --evidence "$good" --evidence "$T/shots/console-${H:0:12}.log" >/dev/null || { rm -rf "$T"; return 1; }
+  # under a group-writable umask, as on a box with umask 002: the copies are
+  # still private (0700 directories, 0600 files), like the evidence itself
+  chmod 664 "$good"
+  ( umask 002; _qa_as approved "$H" --evidence "$good" --evidence "$T/shots/console-${H:0:12}.log" ) >/dev/null || { rm -rf "$T"; return 1; }
   local rec kept="$T/.cel/qa-evidence/widget-pr-7/qa-browser/login-${H:0:12}.png"
   rec="$(solo_review_get "$T" widget 7 qa-browser)"
   assert_eq "$(jq -r .by <<<"$rec")" "$QA" || { rm -rf "$T"; return 1; }
@@ -1042,6 +1045,8 @@ test_solo_qa_verdict_needs_head_named_evidence_from_its_own_agent() {
   assert_eq "$(jq -r '.evidence[0].size' <<<"$rec")" "$(stat -c %s "$good")" || { rm -rf "$T"; return 1; }
   [ -f "$kept" ] && [ ! -L "$kept" ] || { echo "evidence not kept as a file"; rm -rf "$T"; return 1; }
   assert_eq "$(jq -r '.evidence | length' <<<"$rec")" 2 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$kept") $(stat -c %a "$(dirname "$kept")") $(stat -c %a "$T/.cel/qa-evidence/widget-pr-7") $(stat -c %a "$T/.cel/qa-evidence")" \
+    "600 700 700 700" || { echo "QA evidence copies are not private"; rm -rf "$T"; return 1; }
   # the plain reviewer's and a review extra's slots are untouched
   assert_eq "$(solo_review_get "$T" widget 7)$(solo_review_get "$T" widget 7 review-browser)" "" || { rm -rf "$T"; return 1; }
   rm -rf "$T"

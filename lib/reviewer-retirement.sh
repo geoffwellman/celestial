@@ -41,6 +41,14 @@ rex_reviewer_retire() ( # repo pr pane agent dry [repodir]
     [ -z "${_RUN_ADMISSION_FD:-}" ] || exec {_RUN_ADMISSION_FD}>&-
     [ -z "${_REX_LAUNCH_FD:-}" ] || exec {_REX_LAUNCH_FD}>&-
     [ -z "${lock_fd:-}" ] || exec {lock_fd}>&-
+    # A reviewer launched under umask 002 left group-writable evidence, which
+    # retire.mjs refuses for good (unsafe_evidence_permissions). Before a real
+    # attempt, under the receipt lock, its own evidence is made private when
+    # it is this user's and no symlink is in its path - said on stderr - and
+    # the check below stays exactly as strict. A dry run changes nothing.
+    if [ "$dry" = 0 ] && [ -f "$file" ]; then
+      node "$CEL_ROOT/tools/reviewers/private-evidence.mjs" retirement "$file" >&2 || true
+    fi
     exec node "$CEL_ROOT/tools/reviewers/retire.mjs" "$repo" "$pr" "$pane" "$agent" "$dry" "$file" "$wsname" "$slug" "$helpers" "$user" "$repodir" "$ghbin" "$toolpath" "$forge"
   )
 )
