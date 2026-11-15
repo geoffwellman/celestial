@@ -2406,11 +2406,173 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   # previews of PRs that closed or merged, and checkouts of reaped previews
   ( . "${BASH_SOURCE[0]%/*}/preview.sh"; preview_sweep ) || true
   _serve_unledgered_report
+  _steward_build_daemons
   # Keep the fleet cache warm so the first console read after an idle
   # spell serves a recent board. One detached refill, only when stale; the
   # tick never waits on it.
   ( . "${BASH_SOURCE[0]%/*}/fleet.sh" && fleet_cache_warm ) || true
   c_ok "tick complete"
+}
+
+# ── idle build-tool daemons ──────────────────────────────────────────────────
+#
+# A Gradle daemon or Kotlin compile daemon (by main class,
+# _serve_build_daemon_class; a GradleWorkerMain is a short-lived child of a
+# daemon and never reported) holds hundreds of MB long after its build. One is
+# IDLE when it has no live child other than another such daemon (a Gradle
+# daemon starts the Kotlin daemon as its child), its CPU time (utime+stime) grew by less than
+# CEL_BUILD_DAEMON_IDLE_CPU_SECONDS (default 2) since the previous tick, and it
+# has been alive more than CEL_BUILD_DAEMON_IDLE_MIN minutes (default 30). The
+# first tick that sees a daemon has no CPU history, so says nothing of it.
+# Reported ONCE per pid+start - a reused pid is another daemon; busy and then
+# idle again is the same one - to its owner: the CEL_INBOX_ME of the nearest
+# ancestor that carries one, else the daemon's own (the environment of what
+# started the build), else the agent whose directory it runs in
+# (_serve_dir_owner: repo, lane, product, workspace root), else root. Only that
+# one variable is read from any environ. A Gradle daemon's cwd is
+# ~/.gradle/daemon/<version>, not the project: the project is the directory of
+# a gradlew ancestor when there is one, else "its project". Nothing is stopped
+# or signalled. A send to the owner that fails goes to root instead, once; when
+# root's fails too it is offered again next tick.
+# State, one line per live daemon, pruned of every other pid each tick:
+#   <pid>:<start-ticks> <cpu-ticks> <seen-uptime> <idle-since-uptime|-> <reported 0|1>
+_steward_build_daemons_state() { printf '%s' "${CEL_STEWARD_STATE:-$_STEWARD_STATE}.build-daemons"; }
+_steward_inbox_me_of() { # <proc-pid-dir> -> its CEL_INBOX_ME; nothing else of the environ is kept
+  local e
+  { while IFS= read -r -d '' e || [ -n "$e" ]; do
+      case "$e" in
+        CEL_INBOX_ME=*)
+          e="${e#CEL_INBOX_ME=}"
+          [[ "$e" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && { printf '%s' "$e"; return 0; }
+          return 1 ;;
+      esac
+    done < "$1/environ"; } 2>/dev/null
+  return 1
+}
+_steward_gradlew_dir() { # <proc-pid-dir> -> the project a gradlew process runs for
+  local a cwd n=0
+  cwd="$(readlink -f "$1/cwd" 2>/dev/null)" && [ -n "$cwd" ] || return 1
+  { while IFS= read -r -d '' a || [ -n "$a" ]; do
+      n=$((n + 1))
+      case "$a" in
+        org.gradle.wrapper.GradleWrapperMain) printf '%s' "$cwd"; return 0 ;;
+      esac
+      # the script itself, or an interpreter's first argument - never a later word
+      [ "$n" -le 2 ] || continue
+      case "$a" in
+        gradlew) printf '%s' "$cwd"; return 0 ;;
+        /*/gradlew) a="${a%/gradlew}" ;;
+        */gradlew) a="$cwd/${a%/gradlew}" ;;
+        *) continue ;;
+      esac
+      readlink -f "$a" 2>/dev/null || printf '%s' "$a"
+      return 0
+    done < "$1/cmdline"; } 2>/dev/null
+  return 1
+}
+_steward_build_daemon_report() { # <proc> <pid> <Gradle|Kotlin> <idle-min> <start-ticks>; uses the caller's ppid_of
+  local proc="$1" pid="$2" kind="$3" idle="$4" p n=0 me="" holder="" project="" cwd rss=0 k v owner ws mbox how msg root_ws
+  root_ws="$(registry_names 2>/dev/null | head -n1)"
+  [ -n "$root_ws" ] || return 1
+  cwd="$(readlink -f "$proc/$pid/cwd" 2>/dev/null)" && [ -n "$cwd" ] || cwd="?"
+  { while read -r k v _; do
+      [ "$k" = VmRSS: ] && [[ "$v" =~ ^[0-9]+$ ]] && { rss=$((v / 1024)); break; }
+    done < "$proc/$pid/status"; } 2>/dev/null
+  p="${ppid_of[$pid]:-}"
+  while [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -gt 1 ] && [ "$n" -lt 64 ]; do
+    n=$((n + 1))
+    if [ -z "$me" ] && me="$(_steward_inbox_me_of "$proc/$p")"; then holder="$p"; fi
+    if [ "$kind" = Gradle ] && [ -z "$project" ]; then project="$(_steward_gradlew_dir "$proc/$p")" || project=""; fi
+    [ -n "$me" ] && { [ "$kind" != Gradle ] || [ -n "$project" ]; } && break
+    p="${ppid_of[$p]:-}"
+  done
+  if [ -z "$me" ] && me="$(_steward_inbox_me_of "$proc/$pid")"; then holder="$pid"; fi
+  if [ -n "$me" ]; then
+    # the mailbox's workspace: the one the holder (or the project) is in
+    mbox="$me"
+    owner="$(_serve_dir_owner "${project:-$(readlink -f "$proc/$holder/cwd" 2>/dev/null)}")"
+    case "$owner" in ""|*" outside") ws="$root_ws" ;; *) ws="${owner%% *}" ;; esac
+  else
+    owner="$(_serve_dir_owner "${project:-$cwd}")"
+    case "$owner" in ""|*" outside") ws="$root_ws"; mbox=root ;; *) ws="${owner%% *}"; mbox="${owner#* }" ;; esac
+  fi
+  local check="kill $pid (check it is still a GradleDaemon / KotlinCompileDaemon first)"
+  if [ "$kind" = Gradle ]; then how="./gradlew --stop in ${project:-its project} or $check"; else how="$check"; fi
+  msg="steward: idle $kind daemon pid $pid, $rss MB, idle $idle min, cwd $cwd: stop it with $how. Nothing was stopped."
+  # one inbox item per daemon: a shared fingerprint would fold a second idle
+  # daemon into the first's open item
+  local fp="idle-build-daemon-$pid-$5"
+  cmd_inbox send "$mbox" "$msg" --from steward --workspace "$ws" --kind status --fp "$fp" >/dev/null 2>&1 && return 0
+  # a mailbox that does not exist would refuse every tick forever: root is
+  # told once instead, and that is the report
+  if [ "$mbox" != root ] \
+     && cmd_inbox send root "$msg (Not delivered to $mbox, so sent to root.)" --from steward --workspace "$root_ws" --kind status --fp "$fp" >/dev/null 2>&1; then
+    return 0
+  fi
+  c_warn "idle $kind daemon pid $pid: note not delivered to $mbox ($ws) or root - retried next tick"
+  return 1
+}
+_steward_build_daemons() {
+  local proc="${CEL_SERVE_PROC_ROOT:-/proc}" up clk min cpu_s file d pid line a0 cls key age idle since rep out="" tmp
+  local k c s i r
+  local -a f=() daemons=()
+  local -A ppid_of=() live_kids=() kind_of=() cpu_of=() start_of=() p_cpu=() p_seen=() p_since=() p_rep=()
+  local comm kid busy
+  { IFS=' .' read -r up _ < "$proc/uptime"; } 2>/dev/null || return 0
+  [[ "$up" =~ ^[0-9]+$ ]] || return 0
+  clk="$(getconf CLK_TCK 2>/dev/null)" || clk=100
+  [[ "$clk" =~ ^[1-9][0-9]*$ ]] || clk=100
+  min="${CEL_BUILD_DAEMON_IDLE_MIN:-30}"; [[ "$min" =~ ^[0-9]+$ ]] || min=30
+  cpu_s="${CEL_BUILD_DAEMON_IDLE_CPU_SECONDS:-2}"; [[ "$cpu_s" =~ ^[0-9]+$ ]] || cpu_s=2
+  file="$(_steward_build_daemons_state)"
+  for d in "$proc"/[0-9]*; do
+    pid="${d##*/}"; [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    line=""; { IFS= read -r line < "$d/stat"; } 2>/dev/null || continue
+    comm="${line#*(}"; comm="${comm%)*}"
+    line="${line##*) }"; read -r -a f <<<"$line"
+    [ "${#f[@]}" -ge 20 ] && [[ "${f[1]}" =~ ^[0-9]+$ && "${f[11]}" =~ ^[0-9]+$ && "${f[12]}" =~ ^[0-9]+$ && "${f[19]}" =~ ^[0-9]+$ ]] || continue
+    ppid_of[$pid]="${f[1]}"
+    case "${f[0]}" in Z|X|x) ;; *) live_kids[${f[1]}]+=" $pid" ;; esac
+    # cmdline is read only for a java process (stat's comm), not every pid
+    [ "$comm" = java ] || continue
+    a0=""; { IFS= read -r -d '' a0 < "$d/cmdline"; } 2>/dev/null
+    [ "${a0##*/}" = java ] || continue
+    cls="$(_serve_build_daemon_class "$pid" "")" || continue
+    case "$cls" in
+      org.gradle.launcher.daemon.bootstrap.GradleDaemon) kind_of[$pid]=Gradle ;;
+      org.jetbrains.kotlin.daemon.KotlinCompileDaemon) kind_of[$pid]=Kotlin ;;
+      *) continue ;;
+    esac
+    cpu_of[$pid]=$((f[11] + f[12])); start_of[$pid]="${f[19]}"
+    daemons+=("$pid")
+  done
+  if [ -f "$file" ]; then
+    while read -r k c s i r; do
+      [[ "$k" =~ ^[0-9]+:[0-9]+$ && "$c" =~ ^[0-9]+$ && "$s" =~ ^[0-9]+$ ]] || continue
+      p_cpu[$k]="$c"; p_seen[$k]="$s"; p_since[$k]="$i"; p_rep[$k]="$r"
+    done < "$file"
+  fi
+  for pid in "${daemons[@]}"; do
+    key="$pid:${start_of[$pid]}"; since=-; idle=0
+    rep="${p_rep[$key]:-0}"; [ "$rep" = 1 ] || rep=0
+    # a live child is a build in progress - unless it is itself a daemon (a
+    # Gradle daemon starts the Kotlin daemon as its child); a worker is not
+    busy=""
+    for kid in ${live_kids[$pid]:-}; do [ -n "${kind_of[$kid]:-}" ] || { busy=1; break; }; done
+    if [ -n "${p_cpu[$key]:-}" ] && [ -z "$busy" ] \
+       && [ $((cpu_of[$pid] - p_cpu[$key])) -lt $((cpu_s * clk)) ]; then
+      idle=1; since="${p_since[$key]:-}"
+      [[ "$since" =~ ^[0-9]+$ ]] || since="${p_seen[$key]}"
+    fi
+    age=$((up - start_of[$pid] / clk))
+    if [ "$idle" = 1 ] && [ "$rep" = 0 ] && [ "$age" -gt $((min * 60)) ]; then
+      _steward_build_daemon_report "$proc" "$pid" "${kind_of[$pid]}" $(((up - since) / 60)) "${start_of[$pid]}" && rep=1
+    fi
+    out+="$key ${cpu_of[$pid]} $up $since $rep"$'\n'
+  done
+  [ -n "$out" ] || [ -s "$file" ] || return 0
+  mkdir -p "$(dirname "$file")" && tmp="$(mktemp "$file.XXXXXX")" || return 0
+  printf '%s' "$out" > "$tmp" && mv -f "$tmp" "$file" || rm -f "$tmp"
 }
 
 # ── declared services ────────────────────────────────────────────────────────

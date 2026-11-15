@@ -3315,3 +3315,212 @@ test_steward_team_clears_the_item_of_a_bad_team_that_was_removed() {
   assert_eq "$(grep -c '^team-bad/' "$T/state" || true)" 0
   rm -rf "$T"
 }
+
+# --- idle build-tool daemons: reported once per pid+start to their owner -------
+# A /proc fixture: uptime, and per pid stat (state, ppid, utime, stime,
+# starttime), cmdline, status (VmRSS), cwd and environ. CLK_TCK is pinned by
+# a getconf shim on PATH; kill/pkill shims record any signal.
+_bd_fixture() {
+  _ul_fixture
+  export CEL_STEWARD_STATE="$T/steward-state"
+  mkdir -p "$T/bin" "$T/gradle/daemon/8.10" "$T/alpha/repos/widget/app"
+  printf '#!/usr/bin/env bash\necho 100\n' > "$T/bin/getconf"
+  printf '#!/usr/bin/env bash\necho "$@" >> "%s/signalled"\n' "$T" > "$T/bin/kill"
+  printf '#!/usr/bin/env bash\necho "$@" >> "%s/signalled"\n' "$T" > "$T/bin/pkill"
+  chmod +x "$T/bin/getconf" "$T/bin/kill" "$T/bin/pkill"
+  kill() { echo "$@" >> "$T/signalled"; }
+  _bd_uptime 10000
+}
+_bd_uptime() { printf '%s.00 1.00\n' "$1" > "$T/proc/uptime"; }
+_bd_proc() { # <pid> <ppid> <cputicks> <start-s> <cwd> <state> <argv...>
+  local pid="$1" ppid="$2" cpu="$3" start="$4" cwd="$5" st="$6" d; shift 6; d="$T/proc/$pid"
+  mkdir -p "$d"
+  printf '%s (%s) %s %s 1 1 0 -1 0 0 0 0 0 %s 0 0 0 20 0 40 0 %s 0 0\n' "$pid" "${BD_COMM:-java}" "$st" "$ppid" "$cpu" "$((start * 100))" > "$d/stat"
+  printf '%s\0' "$@" > "$d/cmdline"
+  printf 'Name:\tjava\nPPid:\t%s\nVmRSS:\t  819200 kB\n' "$ppid" > "$d/status"
+  [ -e "$d/environ" ] || : > "$d/environ"
+  rm -f "$d/cwd"; ln -s "$cwd" "$d/cwd"
+}
+_bd_env() { printf '%s\0' "$2" "PATH=/usr/bin" > "$T/proc/$1/environ"; }
+_bd_gradle() { # <pid> <ppid> <cputicks> [start-s]
+  _bd_proc "$1" "$2" "$3" "${4:-100}" "$T/gradle/daemon/8.10" S /usr/bin/java -Xmx2g -cp /g/gradle-launcher.jar \
+    org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10
+}
+_bd_kotlin() { # <pid> <ppid> <cputicks> [start-s] [cwd]
+  _bd_proc "$1" "$2" "$3" "${4:-100}" "${5:-$T/alpha/repos/widget/app}" S /usr/bin/java -cp /k/kotlin-daemon.jar \
+    org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon-runFilesPath /tmp/k
+}
+_bd_tick() { PATH="$T/bin:$PATH" _steward_build_daemons >/dev/null 2>&1; }
+_bd_done() { # asserts nothing was signalled, then tears down
+  [ ! -e "$T/signalled" ] || { echo "a process was signalled: $(cat "$T/signalled")"; _ul_down; return 1; }
+  _ul_down
+}
+
+test_steward_idle_gradle_daemon_is_reported_once_to_its_cel_inbox_me_ancestor() {
+  _bd_fixture
+  # an agent shell (carries CEL_INBOX_ME) ran ./gradlew in the repo; the
+  # daemon still runs under it
+  _bd_proc 500 1 0 50 "$T/alpha/repos/widget" S bash
+  _bd_env 500 CEL_INBOX_ME=bundle-orch
+  _bd_proc 510 500 0 90 "$T/alpha/repos/widget" S /bin/sh ./gradlew build
+  _bd_gradle 4242 510 5000
+  _bd_tick
+  # one sample is no CPU history: nothing yet
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 0 || { cat "$T/sent"; _bd_done; return 1; }
+  _bd_uptime 10300; _bd_gradle 4242 510 5050
+  _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  local line; line="$(cat "$T/sent")"
+  assert_contains "$line" "bundle-orch alpha" || { _bd_done; return 1; }
+  assert_contains "$line" "idle Gradle daemon pid 4242, 800 MB, idle 5 min, cwd $T/gradle/daemon/8.10: stop it with ./gradlew --stop in $T/alpha/repos/widget or kill 4242" || { _bd_done; return 1; }
+  # idle on: said once; busy (CPU) then idle again: still not again
+  _bd_uptime 10600; _bd_gradle 4242 510 5060; _bd_tick
+  _bd_uptime 10900; _bd_gradle 4242 510 9000; _bd_tick
+  _bd_uptime 11200; _bd_gradle 4242 510 9001; _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  _bd_done
+}
+
+test_steward_busy_build_daemon_is_not_reported() {
+  _bd_fixture
+  _bd_kotlin 4300 1 1000
+  _bd_env 4300 CEL_INBOX_ME=bundle-orch
+  _bd_gradle 4301 1 1000
+  _bd_env 4301 CEL_INBOX_ME=bundle-orch
+  _bd_proc 4302 4301 10 5000 /tmp S /usr/bin/java -cp /g/w.jar worker.org.gradle.process.internal.worker.GradleWorkerMain 'Gradle Worker 1'
+  _bd_tick
+  # 4300 burns CPU; 4301 has a live worker child; neither is idle
+  _bd_uptime 10300; _bd_kotlin 4300 1 9000; _bd_gradle 4301 1 1000
+  _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 0 || { cat "$T/sent"; _bd_done; return 1; }
+  # the worker is a zombie: no longer a live child, so 4301 is idle; a
+  # GradleWorkerMain itself is never reported
+  _bd_proc 4302 4301 10 5000 /tmp Z /usr/bin/java -cp /g/w.jar worker.org.gradle.process.internal.worker.GradleWorkerMain
+  _bd_uptime 10600; _bd_kotlin 4300 1 9001; _bd_gradle 4301 1 1000
+  _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 2 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(cat "$T/sent")" "idle Gradle daemon pid 4301" || { _bd_done; return 1; }
+  assert_contains "$(cat "$T/sent")" "stop it with ./gradlew --stop in its project or kill 4301" || { _bd_done; return 1; }
+  assert_contains "$(cat "$T/sent")" "idle Kotlin daemon pid 4300" || { _bd_done; return 1; }
+  case "$(cat "$T/sent")" in *"pid 4302"*) echo "a worker was reported"; _bd_done; return 1 ;; esac
+  _bd_done
+}
+
+test_steward_build_daemon_under_the_idle_minimum_is_not_reported() {
+  _bd_fixture
+  # started at 9000s, now 10000s: 16 min old
+  _bd_kotlin 4400 1 100 9000
+  _bd_env 4400 CEL_INBOX_ME=bundle-orch
+  _bd_tick
+  _bd_uptime 10300; _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 0 || { cat "$T/sent"; _bd_done; return 1; }
+  # the minimum is configurable
+  _bd_uptime 10600; CEL_BUILD_DAEMON_IDLE_MIN=10 _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  _bd_done
+}
+
+test_steward_build_daemon_reused_pid_with_a_new_start_is_a_new_daemon() {
+  _bd_fixture
+  _bd_kotlin 4500 1 100 100
+  _bd_env 4500 CEL_INBOX_ME=bundle-orch
+  _bd_tick; _bd_uptime 10300; _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  # the daemon died and its pid came back as another daemon: no history yet,
+  # then reported afresh
+  _bd_kotlin 4500 1 50 200
+  _bd_uptime 10600; _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  _bd_uptime 10900; _bd_tick
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 2 || { cat "$T/sent"; _bd_done; return 1; }
+  # state holds only live daemons: the old start is pruned, and a dead pid too
+  assert_eq "$(awk '{print $1}' "$CEL_STEWARD_STATE.build-daemons")" "4500:20000" || { _bd_done; return 1; }
+  rm -rf "$T/proc/4500"; _bd_uptime 11200; _bd_tick
+  assert_eq "$(grep -c . "$CEL_STEWARD_STATE.build-daemons" || true)" 0 || { _bd_done; return 1; }
+  _bd_done
+}
+
+# No CEL_INBOX_ME anywhere: the daemon's directory decides, through the
+# resolver the unledgered-server report uses - a checkout of a lane's repo is
+# the lane's; a Gradle daemon's own dir, outside every workspace, is root's.
+test_steward_build_daemon_without_cel_inbox_me_is_routed_by_its_cwd() {
+  _bd_fixture
+  _bd_kotlin 4600 1 100 100 "$T/elsewhere/slots/web"
+  _bd_gradle 4601 1 100 100
+  _bd_tick; _bd_uptime 10300; _bd_tick
+  assert_eq "$(_ul_sent_to bundle-builder)" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(grep '^bundle-builder ' "$T/sent")" "bundle-builder alpha" || { _bd_done; return 1; }
+  assert_contains "$(grep '^bundle-builder ' "$T/sent")" "idle Kotlin daemon pid 4600, 800 MB, idle 5 min, cwd $T/elsewhere/slots/web: stop it with kill 4600" || { _bd_done; return 1; }
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(grep '^root ' "$T/sent")" "root alpha" || { _bd_done; return 1; }
+  assert_contains "$(grep '^root ' "$T/sent")" "idle Gradle daemon pid 4601" || { _bd_done; return 1; }
+  _bd_done
+}
+
+# A send that fails everywhere (root too) is not a report: offered again next tick.
+test_steward_idle_build_daemon_undelivered_is_retried() {
+  _bd_fixture
+  _bd_kotlin 4700 1 100
+  _bd_env 4700 CEL_INBOX_ME=bundle-orch
+  _bd_tick
+  : > "$T/inbox-down"; _bd_uptime 10300; _bd_tick
+  rm -f "$T/inbox-down"; _bd_uptime 10600; _bd_tick
+  _bd_uptime 10900; _bd_tick
+  assert_eq "$(_ul_sent_to bundle-orch)" 2 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(grep '^bundle-orch ' "$T/sent" | tail -n1)" "idle 10 min" || { cat "$T/sent"; _bd_done; return 1; }
+  _bd_done
+}
+
+# Records "<to> <fp>" per send; a mailbox listed in $T/missing refuses.
+_bd_fp_inbox() {
+  cmd_inbox() {
+    local to="$2" msg="$3" fp=""; shift 3
+    while [ $# -gt 0 ]; do [ "$1" = --fp ] && fp="$2"; shift; done
+    printf '%s %s\t%s\n' "$to" "$fp" "$msg" >> "$T/sent"
+    ! grep -qxF -- "$to" "$T/missing" 2>/dev/null
+  }
+}
+
+# Two idle daemons, one owner: two inbox items, never folded into one.
+test_steward_two_idle_build_daemons_to_one_owner_are_two_items() {
+  _bd_fixture; _bd_fp_inbox
+  _bd_kotlin 4800 1 100 100
+  _bd_kotlin 4801 1 100 150
+  _bd_env 4800 CEL_INBOX_ME=bundle-orch; _bd_env 4801 CEL_INBOX_ME=bundle-orch
+  _bd_tick; _bd_uptime 10300; _bd_tick
+  assert_eq "$(cut -f1 "$T/sent" | sort -u | tr '\n' ' ')" "bundle-orch idle-build-daemon-4800-10000 bundle-orch idle-build-daemon-4801-15000 " || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(cat "$T/sent")" "kill 4800 (check it is still a GradleDaemon / KotlinCompileDaemon first)" || { _bd_done; return 1; }
+  _bd_done
+}
+
+# A Gradle daemon whose only live child is the Kotlin daemon is idle; a
+# process whose stat comm is not java is never read as a daemon.
+test_steward_gradle_daemon_with_a_kotlin_daemon_child_is_idle() {
+  _bd_fixture
+  _bd_gradle 4900 1 100
+  _bd_env 4900 CEL_INBOX_ME=bundle-orch
+  _bd_kotlin 4901 4900 100
+  BD_COMM=bash _bd_kotlin 4902 1 100
+  _bd_env 4902 CEL_INBOX_ME=bundle-orch
+  _bd_tick; _bd_uptime 10300; _bd_tick
+  assert_contains "$(cat "$T/sent")" "idle Gradle daemon pid 4900" || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(cat "$T/sent")" "idle Kotlin daemon pid 4901" || { cat "$T/sent"; _bd_done; return 1; }
+  case "$(cat "$T/sent")" in *"pid 4902"*) echo "a non-java comm was read as a daemon"; _bd_done; return 1 ;; esac
+  _bd_done
+}
+
+# An owner mailbox that refuses: root is told once, and never again.
+test_steward_idle_build_daemon_for_a_missing_mailbox_goes_to_root_once() {
+  _bd_fixture; _bd_fp_inbox
+  printf 'ghost-orch\n' > "$T/missing"
+  _bd_kotlin 5000 1 100
+  _bd_env 5000 CEL_INBOX_ME=ghost-orch
+  _bd_tick
+  _bd_uptime 10300; _bd_tick
+  _bd_uptime 10600; _bd_tick
+  _bd_uptime 10900; _bd_tick
+  assert_eq "$(_ul_sent_to ghost-orch)" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_contains "$(grep '^root ' "$T/sent")" "Not delivered to ghost-orch, so sent to root." || { _bd_done; return 1; }
+  _bd_done
+}
