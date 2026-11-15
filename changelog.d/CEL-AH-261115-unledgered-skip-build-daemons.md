@@ -1,0 +1,2 @@
+### Fixed
+- The steward's "unledgered preview/dev servers" report, `cel serve adopt` and the dashboard no longer list build-tool daemons as new servers (then Gone minutes later): a process whose argv names the main class `org.gradle.launcher.daemon.bootstrap.GradleDaemon`, Gradle's `GradleWorkerMain`, `org.jetbrains.kotlin.daemon.KotlinCompileDaemon` or Metals (`scala.meta.metals.Main`) is excluded. Matched by exact main class, not by the `java` binary: a Spring Boot app or a plain `java -jar app.jar` server is still reported.

@@ -327,6 +327,29 @@ test_serve_agent_harness_browsers_are_not_unledgered_servers() {
   rm -rf "$t"
 }
 
+# A BUILD TOOL'S DAEMON IS NOT A PREVIEW. Every Gradle build leaves a
+# GradleDaemon (and a KotlinCompileDaemon, and worker processes) listening on
+# a random loopback port; it used to be reported as a new unledgered server and
+# then Gone minutes later. Judged by main class, never by the java binary: a
+# plain `java -jar app.jar` server is still reported.
+test_serve_build_tool_daemons_are_not_unledgered_servers() {
+  local t out; t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_PROC_ROOT="$t/proc" CEL_SERVE_SYSTEMCTL="$t/systemctl"
+  export CEL_CONFIG_FILE="$t/config.yaml" CEL_SERVE_ADOPT_DATA='[]' CEL_SERVE_PROC_DATA=''
+  mkdir -p "$CEL_SERVE_STATE" "$CEL_SERVE_PROC_ROOT"
+  printf '{}\n' > "$CEL_CONFIG_FILE"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
+  local java=/usr/lib/jvm/java-21-openjdk-amd64/bin/java
+  CEL_SERVE_PROC_DATA+=$'3001\t38211\t4096\t60\t/w/app\t'"$java -Xmx2g -cp /home/u/.gradle/wrapper/dists/gradle-8.10/lib/gradle-daemon-main-8.10.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10"$'\n'
+  CEL_SERVE_PROC_DATA+=$'3002\t40117\t4096\t60\t/w/app\t'"$java -cp /home/u/.gradle/caches/kotlin-compiler-embeddable.jar -Djava.awt.headless=true org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon-runFilesPath /home/u/.local/share/kotlin/daemon"$'\n'
+  CEL_SERVE_PROC_DATA+=$'3003\t40555\t4096\t60\t/w/app\t'"$java -cp /home/u/.gradle/caches/8.10/workerMain/gradle-worker.jar worker.org.gradle.process.internal.worker.GradleWorkerMain Gradle Test Executor 1"$'\n'
+  CEL_SERVE_PROC_DATA+=$'3004\t8080\t4096\t60\t/w/app\t'"$java -jar app.jar --server.port=8080"$'\n'
+  out="$(serve_adopt_json)"
+  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[3004]'
+  unset CEL_SERVE_STATE CEL_SERVE_PROC_ROOT CEL_SERVE_SYSTEMCTL CEL_CONFIG_FILE CEL_SERVE_ADOPT_DATA CEL_SERVE_PROC_DATA
+  rm -rf "$t"
+}
+
 test_serve_records_request_activity_for_idle_deadline() {
   local t
   t="$(mktemp -d)"

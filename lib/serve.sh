@@ -390,6 +390,8 @@ _serve_pid_unit() { # <pid> -> unit name, or status 1
 # adopting puts a thing on a TTL that stops it. Refused here:
 #   - coding-agent runtimes (omp, pi, claude, codex, opencode, by argv[0], or
 #     argv[1] for a node/bun script);
+#   - build-tool daemons (Gradle daemon and workers, Kotlin compile daemon,
+#     Metals), by exact main class (_serve_build_daemon);
 #   - a process inside a running user SERVICE whose name the unit pass below
 #     would not offer (hermes-gateway, cel-dash, ...): services are judged as
 #     units, by name, never as loose pids;
@@ -452,9 +454,30 @@ _serve_agent_browser() { # <pid> <command> <port>
   done
   return 1
 }
+# A BUILD TOOL'S DAEMON. Gradle's daemon, its worker processes and the Kotlin
+# compile daemon listen on random loopback ports for as long as a build keeps
+# them warm; they are build machinery, not previews. Judged by the exact main
+# class in argv, never by the java binary: a Spring Boot app or a plain
+# `java -jar app.jar` is still a server. Metals is the Scala language server.
+_serve_build_daemon() { # <command>
+  local arg
+  local -a argv
+  read -r -a argv <<<"$1"
+  for arg in "${argv[@]}"; do
+    case "$arg" in
+      org.gradle.launcher.daemon.bootstrap.GradleDaemon|\
+      worker.org.gradle.process.internal.worker.GradleWorkerMain|\
+      org.gradle.process.internal.worker.GradleWorkerMain|\
+      org.jetbrains.kotlin.daemon.KotlinCompileDaemon|\
+      scala.meta.metals.Main) return 0 ;;
+    esac
+  done
+  return 1
+}
 _serve_not_a_preview() { # <pid> <command> [port]
   local pid="$1" cmd="$2" cg unit exe proc="${CEL_SERVE_PROC_ROOT:-/proc}"
   _serve_agent_argv "$cmd" && return 0
+  _serve_build_daemon "$cmd" && return 0
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
     _serve_agent_browser "$pid" "$cmd" "${3:-0}" && return 0
     exe="$(readlink "$proc/$pid/exe" 2>/dev/null || true)"
