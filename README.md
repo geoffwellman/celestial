@@ -1561,8 +1561,9 @@ answering, so it is safe on a loop.
 Agents' own servers go in the `cel serve` ledger. `cel serve start <name>
 --owner <alias> --workspace <ws> [--ttl 8h] [--port N] -- <command>` runs one
 as a memory-accounted `cel-serve-<name>` user unit; `cel serve adopt` lists
-the unledgered preview/dev servers (the steward reports them to each
-product's agent once a day) and `cel serve adopt <unit|pid> --owner <alias>
+the unledgered preview/dev servers (the steward tells root only when that set
+changes - what is new, what is gone, and the whole list - and tells the agent
+whose directory a new server runs in about it) and `cel serve adopt <unit|pid> --owner <alias>
 --workspace <ws> [--ttl 8h]` takes one into the ledger. A ledgered server is
 stopped by the steward when its TTL runs out, after `serve.idle_hours`
 (default 6; `serve.pressure_idle_hours`, default 1, under memory pressure)

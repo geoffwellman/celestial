@@ -2771,56 +2771,157 @@ test_red_pr_is_nudged_when_only_prose_or_another_workspace_names_it() {
   rm -rf "$T"
 }
 
-test_steward_reports_unledgered_servers_to_product_once_a_day() {
-  local T; T="$(mktemp -d)"
-  export CEL_SERVE_STATE="$T/state" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_PROC_DATA=''
-  mkdir -p "$CEL_SERVE_STATE" "$T/alpha"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"
-  chmod +x "$CEL_SERVE_SYSTEMCTL"
-  CEL_SERVE_ADOPT_DATA='[{"pid":1234,"memory_mb":240,"age_seconds":4000,"worktree":"/tmp/demo","managed":false}]'
-  export CEL_SERVE_ADOPT_DATA
-  registry_names() { printf 'alpha\n'; }
-  registry_path() { printf '%s/alpha' "$T"; }
-  ws_product_names() { printf 'widget\n'; }
-  cmd_inbox() { printf '%s\n' "$*" >> "$T/sent"; }
-  date() { [ "$*" = '-u +%F' ] && printf '2026-10-15\n' || command date "$@"; }
-  _serve_unledgered_report
-  _serve_unledgered_report
-  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" "1"
-  assert_contains "$(cat "$T/sent")" "widget-orch"
-  assert_contains "$(cat "$T/sent")" "240MB"
-  assert_contains "$(cat "$T/sent")" "nothing unledgered was stopped"
-  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
+# --- unledgered preview/dev servers: reported once per change of the SET ------
+# A server is known by its unit, or a bare pid by its directory and command
+# name - never the pid, memory or age - so a restarted dev server in the same
+# directory is the same server. The summary goes to root (the first workspace's,
+# as the orphan line does); each new server's line also goes to the agent whose
+# directory it runs in.
+_ul_fixture() {
+  T="$(mktemp -d)"
+  export CEL_SERVE_STATE="$T/state" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_PROC_DATA='' \
+    CEL_SERVE_PROC_ROOT="$T/proc" CEL_CONFIG_FILE="$T/config.yaml" CEL_REGISTRY="$T/registry.yaml"
+  mkdir -p "$CEL_SERVE_STATE" "$T/proc" "$T/alpha/repos/widget/web" "$T/alpha/repos/slots/.git/worktrees/CEL-x" \
+    "$T/alpha/products/bundle" "$T/alpha/.cel/solo/bundle/CEL-x/app"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nrepos: [{name: widget}, {name: slots, lane: builder}]\nproducts:\n  - {name: bundle, repos: [widget, slots]}\n' \
+    > "$T/alpha/workspace.yaml"
+  # a solo worktree of the lane-owned repo
+  printf 'gitdir: %s/alpha/repos/slots/.git/worktrees/CEL-x\n' "$T" > "$T/alpha/.cel/solo/bundle/CEL-x/.git"
+  : > "$T/sent"
+  # one line per send: "<to> <workspace>\t<message>"; $T/inbox-down fails it
+  cmd_inbox() {
+    local to="$2" msg="$3" ws=""; shift 3
+    while [ $# -gt 0 ]; do [ "$1" = --workspace ] && ws="$2"; shift; done
+    printf '%s %s\t%s\n' "$to" "$ws" "$msg" >> "$T/sent"; [ ! -e "$T/inbox-down" ]
+  }
+}
+_ul_down() {
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_PROC_ROOT CEL_CONFIG_FILE CEL_REGISTRY CEL_SERVE_ADOPT_DATA
   rm -rf "$T"
 }
+_ul_pid() { # <pid> <dir> [mb] [age] -> one bare-pid row
+  printf '{"pid":%s,"port":5173,"memory_mb":%s,"age_seconds":%s,"worktree":"%s","command":"/usr/bin/node /x/vite --port 5173"}' \
+    "$1" "${3:-240}" "${4:-4000}" "$2"
+}
+_ul_tick() { # <row,...> - the servers this tick sees, then the report
+  export CEL_SERVE_ADOPT_DATA="[$1]"
+  _serve_unledgered_report >/dev/null 2>&1
+}
+_ul_sent_to() { grep -c "^$1 " "$T/sent"; }
 
-# A delivery that fails is not stamped: that product is tried again on the
-# next tick, while the one that did get it is not mailed twice.
-test_steward_unledgered_report_retries_only_the_product_it_failed_to_reach() {
-  local T; T="$(mktemp -d)"
-  export CEL_SERVE_STATE="$T/state" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_PROC_DATA=''
-  mkdir -p "$CEL_SERVE_STATE" "$T/alpha"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"
-  chmod +x "$CEL_SERVE_SYSTEMCTL"
-  CEL_SERVE_ADOPT_DATA='[{"pid":1234,"memory_mb":240,"age_seconds":4000,"worktree":"/tmp/demo","managed":false}]'
-  export CEL_SERVE_ADOPT_DATA
-  registry_names() { printf 'alpha\n'; }
-  registry_path() { printf '%s/alpha' "$T"; }
-  ws_product_names() { printf 'widget\ngadget\n'; }
-  cmd_inbox() { printf '%s\n' "$2" >> "$T/sent"; [ "$2" != gadget-orch ] || [ -e "$T/inbox-up" ]; }
-  date() { [ "$*" = '-u +%F' ] && printf '2026-10-15\n' || command date "$@"; }
-  _serve_unledgered_report >/dev/null 2>&1
-  _serve_unledgered_report >/dev/null 2>&1
-  assert_eq "$(grep -cx widget-orch "$T/sent")" 1 || { rm -rf "$T"; return 1; }
-  assert_eq "$(grep -cx gadget-orch "$T/sent")" 2 || { rm -rf "$T"; return 1; }
-  # once it is delivered, it is stamped like any other
-  touch "$T/inbox-up"
-  _serve_unledgered_report >/dev/null 2>&1
-  _serve_unledgered_report >/dev/null 2>&1
-  assert_eq "$(grep -cx gadget-orch "$T/sent")" 3
-  assert_eq "$(grep -cx widget-orch "$T/sent")" 1
-  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
-  rm -rf "$T"
+test_steward_unledgered_report_is_sent_once_while_the_set_is_unchanged() {
+  _ul_fixture
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 4000)"
+  # memory and age drift every tick; the set does not
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 251 4300)"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 262 4600)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to root)" 1 || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "root alpha" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "New: node in /srv/demo (pid 3900001, 240MB, 4000s)" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "Now 1, biggest first:" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "nothing unledgered was stopped"
+  _ul_down
+}
+
+test_steward_unledgered_new_server_line_goes_to_the_agent_whose_directory_it_runs_in() {
+  _ul_fixture
+  _ul_tick "$(_ul_pid 3900001 /srv/demo)"
+  : > "$T/sent"
+  # a repo checkout's server is its product agent's; a solo worktree of a repo
+  # a lane owns is the lane's (ws_repo_pr_owner)
+  _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900002 "$T/alpha/repos/widget/web" 300),$(_ul_pid 3900003 "$T/alpha/.cel/solo/bundle/CEL-x/app" 100)"
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to bundle-orch)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to bundle-builder)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  local orch lane root
+  orch="$(grep '^bundle-orch ' "$T/sent")"; lane="$(grep '^bundle-builder ' "$T/sent")"; root="$(grep '^root ' "$T/sent")"
+  assert_contains "$orch" "bundle-orch alpha" || { _ul_down; return 1; }
+  assert_contains "$orch" "node in $T/alpha/repos/widget/web (pid 3900002, 300MB" || { _ul_down; return 1; }
+  # its own line only: not the lane's, not the one root already knew
+  case "$orch" in *CEL-x*|*/srv/demo*) echo "owner got another's line: $orch"; _ul_down; return 1 ;; esac
+  assert_contains "$lane" "node in $T/alpha/.cel/solo/bundle/CEL-x/app" || { _ul_down; return 1; }
+  case "$lane" in *repos/widget*) echo "lane got another's line: $lane"; _ul_down; return 1 ;; esac
+  # root: what is new, and the whole list
+  assert_contains "$root" "New: node in $T/alpha/repos/widget/web" || { _ul_down; return 1; }
+  case "$root" in *"New: "*"/srv/demo"*"Now"*) echo "root was told an old server is new: $root"; _ul_down; return 1 ;; esac
+  assert_contains "$root" "Now 3, biggest first: node in $T/alpha/repos/widget/web" || { _ul_down; return 1; }
+  assert_contains "$root" "node in /srv/demo (pid 3900001" || { _ul_down; return 1; }
+  # and nobody hears of them again
+  _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900002 "$T/alpha/repos/widget/web" 310),$(_ul_pid 3900003 "$T/alpha/.cel/solo/bundle/CEL-x/app" 90)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 3
+  _ul_down
+}
+
+test_steward_unledgered_gone_server_is_reported_once_and_counts_as_new_when_back() {
+  _ul_fixture
+  _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900002 /srv/shop 120)"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo)"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo)"
+  assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  local gone; gone="$(sed -n 2p "$T/sent")"
+  assert_contains "$gone" "Gone: node in /srv/shop." || { _ul_down; return 1; }
+  case "$gone" in *"New:"*) echo "a gone-only change listed something new: $gone"; _ul_down; return 1 ;; esac
+  assert_contains "$gone" "Now 1, biggest first: node in /srv/demo" || { _ul_down; return 1; }
+  # back again: new, once
+  _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900007 /srv/shop 120)"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900007 /srv/shop 125)"
+  assert_eq "$(_ul_sent_to root)" 3 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 3p "$T/sent")" "New: node in /srv/shop (pid 3900007" || { _ul_down; return 1; }
+  # and everything gone is said once too
+  _ul_tick ""
+  _ul_tick ""
+  assert_eq "$(_ul_sent_to root)" 4 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 4p "$T/sent")" "Now 0."
+  _ul_down
+}
+
+test_steward_unledgered_same_directory_with_a_new_pid_is_not_new() {
+  _ul_fixture
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 4000)"
+  # the dev server restarted: a new pid, a fresh age, another size
+  _ul_tick "$(_ul_pid 3900042 /srv/demo 90 20)"
+  _ul_tick "$(_ul_pid 3900042 /srv/demo 95 320)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  # another command in that directory is another server
+  _ul_tick "$(_ul_pid 3900042 /srv/demo 95 320),$(printf '{"pid":3900050,"memory_mb":60,"age_seconds":5,"worktree":"/srv/demo","command":"python3 -m http.server 8000"}')"
+  assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 2p "$T/sent")" "New: python3 in /srv/demo (pid 3900050"
+  _ul_down
+}
+
+# A send that failed was not a report: the change is offered again on the next
+# tick, and once it is delivered it is not repeated. A unit is known by name.
+test_steward_unledgered_change_root_did_not_get_is_retried() {
+  _ul_fixture
+  touch "$T/inbox-down"
+  _ul_tick '{"unit":"vite-old","pid":3900001,"memory_mb":240,"age_seconds":4000,"worktree":"/srv/old","command":"vite"}'
+  rm -f "$T/inbox-down"
+  _ul_tick '{"unit":"vite-old","pid":3900002,"memory_mb":200,"age_seconds":40,"worktree":"/srv/old","command":"vite"}'
+  _ul_tick '{"unit":"vite-old","pid":3900003,"memory_mb":210,"age_seconds":340,"worktree":"/srv/old","command":"vite"}'
+  assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 2p "$T/sent")" "New: vite-old in /srv/old (pid 3900002, 200MB, 40s)"
+  _ul_down
+}
+
+# An owner that could not be told is tried again; root is not re-sent.
+test_steward_unledgered_owner_note_not_delivered_is_retried_alone() {
+  _ul_fixture
+  cmd_inbox() {
+    local to="$2" msg="$3" ws=""; shift 3
+    while [ $# -gt 0 ]; do [ "$1" = --workspace ] && ws="$2"; shift; done
+    printf '%s %s\t%s\n' "$to" "$ws" "$msg" >> "$T/sent"; [ "$to" = root ] || [ ! -e "$T/inbox-down" ]
+  }
+  touch "$T/inbox-down"
+  _ul_tick "$(_ul_pid 3900002 "$T/alpha/products/bundle")"
+  rm -f "$T/inbox-down"
+  _ul_tick "$(_ul_pid 3900002 "$T/alpha/products/bundle")"
+  _ul_tick "$(_ul_pid 3900002 "$T/alpha/products/bundle")"
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to bundle-orch)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  _ul_down
 }
 
 # --- a solo PR sent back: the recorded `changes` verdict -------------------------
