@@ -1,0 +1,2 @@
+### Changed
+- The steward's unledgered preview/dev server report no longer mentions short-lived servers. A server counts as New only once it has been up `CEL_UNLEDGERED_MIN_AGE_MIN` minutes (default 15), and Gone is said only of servers once said New, so a worker's dev server restarting every few minutes or a test server sends nothing. A reported server restarted under the same identity (new pid, age reset) stays the one server; one that went and comes back counts from its new age. `cel serve adopt`, the fleet and the dashboard still list young servers.

@@ -834,7 +834,10 @@ _SERVE_UNLEDGERED_JQ='
          | {key: ("dir:" + $d + " " + $c + $x.id), name: ($c + $x.shown + " in " + (if $d == "" then "?" else $d end))} end)
     | . + {dir: $d, line: (.name + " (" + (if ($r.pid // 0) > 0 then "pid \($r.pid), " else "" end)
                            + "\($r.memory_mb // 0)MB, \($r.age_seconds // 0)s)")};
-  ($rows | map(ident)) as $cur
+  # Only a server up $min seconds counts, or one already reported (its key is
+  # in $prev - a restart under that key resets its age but not its identity).
+  ($rows | map(ident + {age: (.age_seconds // 0)})) as $seen
+  | ($seen | map(select(.age >= $min or $prev[.key] != null))) as $cur
   | (reduce $cur[] as $s ({}; if has($s.key) then . else . + {($s.key): $s} end)) as $now
   | {n: ($cur | length), all: ($cur | map(.line)), now: $now,
      new: (reduce $cur[] as $s ([]; if $prev[$s.key] != null or any(.[]; .key == $s.key) then . else . + [$s] end)),
@@ -842,21 +845,26 @@ _SERVE_UNLEDGERED_JQ='
 
 # ONCE PER CHANGE OF THE SET. Memory and age differ every tick, so a report of
 # them is a report every tick; what root needs is which servers came and went.
+# A server counts only once it has been up CEL_UNLEDGERED_MIN_AGE_MIN minutes
+# (default 15): a worker's dev server restarting every few minutes, a test
+# server, is never New, and so never Gone - Gone is said only of servers once
+# said New. The adopt, fleet and dashboard views still list young servers.
 # The state file holds the set last reported (key -> name, and the owner still
 # owed its new line). A change - a server new since then, or one gone - is one
 # message to the first workspace's root, as the orphan line goes: what is new,
 # what is gone, and the full current list. An unchanged set says nothing, and
-# a server that goes and comes back is new again. Each new server's line also
+# a server that goes and comes back is new again, from its new age. Each new server's line also
 # goes to the agent whose directory it runs in (_serve_dir_owner), one message
 # per agent; when that is root, the summary already told it. A send that fails
 # is not a report: root's leaves the state as it was, so the change is offered
 # again next tick, and an owner's stays owed until it arrives.
 _serve_unledgered_report() {
-  local rows state_file prev plan n new gone all root_ws msg owners='{}' next key dir name owner item mbox tmp outside='' nws
+  local rows state_file prev plan n new gone all root_ws msg owners='{}' next key dir name owner item mbox tmp outside='' nws min
   rows="$(serve_adopt_json 2>/dev/null)" || return 0
+  min="${CEL_UNLEDGERED_MIN_AGE_MIN:-15}"; [[ "$min" =~ ^[0-9]+$ ]] || min=15
   state_file="$(_serve_state)/unledgered-reported.json"
   prev="$(jq -ce 'objects' "$state_file" 2>/dev/null)" || prev='{}'
-  plan="$(jq -cn --argjson rows "$rows" --argjson prev "$prev" "$_SERVE_UNLEDGERED_JQ")" || return 0
+  plan="$(jq -cn --argjson rows "$rows" --argjson prev "$prev" --argjson min "$(( 10#$min * 60 ))" "$_SERVE_UNLEDGERED_JQ")" || return 0
   new="$(jq -r '.new | map(.line) | join("; ")' <<<"$plan")"
   gone="$(jq -r '.gone | map(.name) | join("; ")' <<<"$plan")"
   next="$prev"
