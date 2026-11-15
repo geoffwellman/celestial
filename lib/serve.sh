@@ -695,49 +695,81 @@ serve_sweep() {
     c_warn "$msg"
   done
 }
-# WHO IS TOLD ABOUT A SERVER: the agent whose directory it runs in. A repo's
-# checkout, or a solo worktree of it (its .git file names the repo), is the
-# repo's PR owner (ws_repo_pr_owner: the lane a repo declares, else its
-# product's agent); a product's own directory is its agent's; a lane's
-# directory is the lane's. Anything else inside a workspace is that
-# workspace's root, and anything outside every workspace is the first one's.
-_serve_dir_owner() { # <dir> -> "<ws> <mailbox>"
-  local dir="$1" ws wsdir rel first="" p rest repo gitdir
+# WHO IS TOLD ABOUT A SERVER: the agent whose directory it runs in. A
+# product's own directory is its agent's; a lane's directory is the lane's.
+# Any other directory inside a git work tree is known by the repository it is
+# a checkout of, not by its path - a repo symlinked into <ws>/repos/<repo>
+# (its checkout lives elsewhere), a solo worktree, a review checkout beside
+# it: when its common git dir is that of a registered workspace's
+# repos/<repo>, it is the repo's PR owner (ws_repo_pr_owner: the lane a repo
+# declares, else its product's agent). Outside git, path rules: repos/<repo>
+# is the repo's owner, .cel/solo/<product>/... the product's agent, anything
+# else inside a workspace that workspace's root. Anything outside every
+# workspace is the first one's root, said with a third word, "outside".
+_serve_git_common() { # <dir> -> the resolved common git dir of the work tree <dir> is in
+  local c
+  c="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [ -n "$c" ] || return 1
+  readlink -f "$c" 2>/dev/null || printf '%s\n' "$c"
+}
+_serve_dir_owner() { # <dir> -> "<ws> <mailbox>" | "<first-ws> root outside"
+  local dir="$1" ws wsdir rel p rest repo common i
+  local -a names=() dirs=()
   for ws in $(registry_names 2>/dev/null); do
-    [ -n "$first" ] || first="$ws"
     wsdir="$(registry_path "$ws")" && [ -n "$wsdir" ] || continue
-    wsdir="$(readlink -f "$wsdir" 2>/dev/null || printf '%s' "$wsdir")"
-    case "$dir" in "$wsdir"|"$wsdir"/*) ;; *) continue ;; esac
-    rel="${dir#"$wsdir"}"; rel="${rel#/}"; repo=""; gitdir=""
+    names+=("$ws"); dirs+=("$(readlink -f "$wsdir" 2>/dev/null || printf '%s' "$wsdir")")
+  done
+  [ "${#names[@]}" -gt 0 ] || return 0
+  for i in "${!names[@]}"; do
+    ws="${names[$i]}"; wsdir="${dirs[$i]}"
+    case "$dir" in "$wsdir"/*) ;; *) continue ;; esac
+    rel="${dir#"$wsdir"/}"
     case "$rel" in
-      repos/*) repo="${rel#repos/}"; repo="${repo%%/*}" ;;
       products/*) p="${rel#products/}"; p="${p%%/*}"
         ws_product_names "$wsdir" 2>/dev/null | grep -qxF -- "$p" && { printf '%s %s-orch\n' "$ws" "$p"; return 0; } ;;
-      .cel/solo/?*) p="${rel#.cel/solo/}"; rest=""
-        case "$p" in */*) rest="${p#*/}"; rest="${rest%%/*}"; p="${p%%/*}" ;; esac
-        if ws_product_names "$wsdir" 2>/dev/null | grep -qxF -- "$p"; then
-          case "$rest" in lane-?*) printf '%s %s\n' "$ws" "$(cel_alias_norm "$p/${rest#lane-}")"; return 0 ;; esac
-          [ -z "$rest" ] || gitdir="$(sed -n 's/^gitdir: //p' "$wsdir/.cel/solo/$p/$rest/.git" 2>/dev/null)"
-          case "$gitdir" in "$wsdir"/repos/*/.git/worktrees/*) repo="${gitdir#"$wsdir"/repos/}"; repo="${repo%%/*}" ;; esac
-          ws_repo_names "$wsdir" 2>/dev/null | grep -qxF -- "${repo:-/}" || { printf '%s %s-orch\n' "$ws" "$p"; return 0; }
-        fi ;;
+      .cel/solo/?*/lane-?*) p="${rel#.cel/solo/}"; rest="${p#*/}"; rest="${rest%%/*}"; p="${p%%/*}"
+        ws_product_names "$wsdir" 2>/dev/null | grep -qxF -- "$p" && { printf '%s %s\n' "$ws" "$(cel_alias_norm "$p/${rest#lane-}")"; return 0; } ;;
     esac
-    if [ -n "$repo" ] && ws_repo_names "$wsdir" 2>/dev/null | grep -qxF -- "$repo"; then
-      printf '%s %s\n' "$ws" "$(ws_repo_pr_owner "$wsdir" "$repo")"; return 0
-    fi
+  done
+  if common="$(_serve_git_common "$dir")"; then
+    for i in "${!names[@]}"; do
+      while IFS= read -r repo; do
+        [ -n "$repo" ] && [ "$(_serve_git_common "${dirs[$i]}/repos/$repo")" = "$common" ] || continue
+        printf '%s %s\n' "${names[$i]}" "$(ws_repo_pr_owner "${dirs[$i]}" "$repo")"; return 0
+      done < <(ws_repo_names "${dirs[$i]}" 2>/dev/null)
+    done
+  fi
+  for i in "${!names[@]}"; do
+    ws="${names[$i]}"; wsdir="${dirs[$i]}"
+    case "$dir" in "$wsdir"|"$wsdir"/*) ;; *) continue ;; esac
+    rel="${dir#"$wsdir"}"; rel="${rel#/}"
+    case "$rel" in
+      repos/?*) repo="${rel#repos/}"; repo="${repo%%/*}"
+        ws_repo_names "$wsdir" 2>/dev/null | grep -qxF -- "$repo" && { printf '%s %s\n' "$ws" "$(ws_repo_pr_owner "$wsdir" "$repo")"; return 0; } ;;
+      .cel/solo/?*) p="${rel#.cel/solo/}"; p="${p%%/*}"
+        ws_product_names "$wsdir" 2>/dev/null | grep -qxF -- "$p" && { printf '%s %s-orch\n' "$ws" "$p"; return 0; } ;;
+    esac
     printf '%s root\n' "$ws"; return 0
   done
-  [ -z "$first" ] || printf '%s root\n' "$first"
+  printf '%s root outside\n' "${names[0]}"
 }
 
 # A server's identity, which drifts with nothing a tick sees: a unit by its
-# name; a bare pid by its directory and command name - never the pid, so a dev
-# server restarted in the same directory is the same server.
+# name; a bare pid by its directory, command name and what tells two servers
+# of one interpreter apart - the port it listens on, else its script (the first
+# non-flag argument after the interpreter) - never the pid, so a dev server
+# restarted in the same directory on the same port is the same server, and
+# vite and next (both node) in one directory are two.
 _SERVE_UNLEDGERED_JQ='
-  def comm: [(.command // "") | splits(" +") | select(. != "")] | (.[0] // "?") | split("/") | last;
+  def words: [(.command // "") | splits(" +") | select(. != "")];
+  def comm: (words | .[0] // "?") | split("/") | last;
+  def script: words | .[1:] | map(select(startswith("-") | not)) | (.[0] // "");
   def ident: . as $r | ($r.worktree // "") as $d
     | (if ($r.unit // "") != "" then {key: ("unit:" + $r.unit), name: ($r.unit + (if $d != "" then " in " + $d else "" end))}
-       else ($r | comm) as $c | {key: ("dir:" + $d + " " + $c), name: ($c + " in " + (if $d == "" then "?" else $d end))} end)
+       else ($r | comm) as $c | ($r.port // 0) as $p | ($r | script) as $s
+         | (if $p > 0 then {id: " port \($p)", shown: " on port \($p)"}
+            elif $s != "" then {id: (" " + $s), shown: (" " + ($s | split("/") | last))}
+            else {id: "", shown: ""} end) as $x
+         | {key: ("dir:" + $d + " " + $c + $x.id), name: ($c + $x.shown + " in " + (if $d == "" then "?" else $d end))} end)
     | . + {dir: $d, line: (.name + " (" + (if ($r.pid // 0) > 0 then "pid \($r.pid), " else "" end)
                            + "\($r.memory_mb // 0)MB, \($r.age_seconds // 0)s)")};
   ($rows | map(ident)) as $cur
@@ -758,7 +790,7 @@ _SERVE_UNLEDGERED_JQ='
 # is not a report: root's leaves the state as it was, so the change is offered
 # again next tick, and an owner's stays owed until it arrives.
 _serve_unledgered_report() {
-  local rows state_file prev plan n new gone all root_ws msg owners='{}' next key dir owner item mbox tmp
+  local rows state_file prev plan n new gone all root_ws msg owners='{}' next key dir name owner item mbox tmp outside='' nws
   rows="$(serve_adopt_json 2>/dev/null)" || return 0
   state_file="$(_serve_state)/unledgered-reported.json"
   prev="$(jq -ce 'objects' "$state_file" 2>/dev/null)" || prev='{}'
@@ -769,19 +801,24 @@ _serve_unledgered_report() {
   if [ -n "$new$gone" ]; then
     root_ws="$(registry_names 2>/dev/null | head -n1)"
     [ -n "$root_ws" ] || return 0
+    while IFS=$'\t' read -r key dir name; do
+      [ -n "$key" ] || continue
+      owner="$(_serve_dir_owner "$dir")"
+      case "$owner" in *" outside") outside="${outside:+$outside; }$name"; continue ;; esac
+      [ -n "$owner" ] && [ "$owner" != "$root_ws root" ] || continue
+      owners="$(jq -c --arg k "$key" --arg o "$owner" '. + {($k): $o}' <<<"$owners")"
+    done < <(jq -r '.new[] | [.key, .dir, .name] | @tsv' <<<"$plan")
+    # with one workspace, its root is plainly the one to tell; with several,
+    # root of the first is told of servers in none, and says so
+    nws="$(registry_names 2>/dev/null | grep -c . || true)"
+    [ "${nws:-0}" -gt 1 ] && [ -n "$outside" ] && outside=" Outside every workspace, so reported to workspace $root_ws's root (the first registered): $outside." || outside=''
     n="$(jq -r '.n' <<<"$plan")"; all="$(jq -r '.all | join("; ")' <<<"$plan")"
-    msg="steward: unledgered preview/dev servers changed.${new:+ New: $new.}${gone:+ Gone: $gone.} Now $n${all:+, biggest first: $all}. Review with 'cel serve adopt'; nothing unledgered was stopped."
+    msg="steward: unledgered preview/dev servers changed.${new:+ New: $new.}${gone:+ Gone: $gone.} Now $n${all:+, biggest first: $all}.$outside Review with 'cel serve adopt'; nothing unledgered was stopped."
     c_warn "$msg"
     if ! cmd_inbox send root "$msg" --from steward --workspace "$root_ws" --kind status --fp unledgered-servers >/dev/null 2>&1; then
       c_warn "unledgered-server change not delivered to root ($root_ws) - retried next tick"
       return 0
     fi
-    while IFS=$'\t' read -r key dir; do
-      [ -n "$key" ] || continue
-      owner="$(_serve_dir_owner "$dir")"
-      [ -n "$owner" ] && [ "$owner" != "$root_ws root" ] || continue
-      owners="$(jq -c --arg k "$key" --arg o "$owner" '. + {($k): $o}' <<<"$owners")"
-    done < <(jq -r '.new[] | [.key, .dir] | @tsv' <<<"$plan")
     next="$(jq -c --argjson plan "$plan" --argjson owners "$owners" '
       with_entries(select($plan.now[.key] != null))
       + ($plan.new | map({(.key): ({name} + (if $owners[.key] then {owed: $owners[.key]} else {} end))}) | add // {})' <<<"$prev")"

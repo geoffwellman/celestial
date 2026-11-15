@@ -1,0 +1,4 @@
+### Fixed
+
+- The steward's unledgered-server report now tells two servers of one interpreter apart in one directory: a bare pid is known by its directory, command name and listening port (else its script), so vite and next (both `node`) are two servers, each reported new and gone on its own, while a restart on the same port is still the same server.
+- A server's owner is found by git identity: a directory in any git work tree whose common git dir is that of a registered workspace's `repos/<repo>` (symlinks resolved) goes to the repo's PR owner, including its declared lane - so a repo symlinked into `repos/` from a checkout elsewhere, and review worktrees beside it, no longer fall to root. With several workspaces, a server outside all of them is still reported to the first one's root, and the message says so.
