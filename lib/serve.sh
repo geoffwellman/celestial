@@ -390,6 +390,8 @@ _serve_pid_unit() { # <pid> -> unit name, or status 1
 # adopting puts a thing on a TTL that stops it. Refused here:
 #   - coding-agent runtimes (omp, pi, claude, codex, opencode, by argv[0], or
 #     argv[1] for a node/bun script);
+#   - build-tool daemons (Gradle daemon and workers, Kotlin compile daemon,
+#     Metals), by exact main class (_serve_build_daemon);
 #   - a process inside a running user SERVICE whose name the unit pass below
 #     would not offer (hermes-gateway, cel-dash, ...): services are judged as
 #     units, by name, never as loose pids;
@@ -452,9 +454,50 @@ _serve_agent_browser() { # <pid> <command> <port>
   done
   return 1
 }
+# A BUILD TOOL'S DAEMON. Gradle's daemon, its worker processes and the Kotlin
+# compile daemon listen on random loopback ports for as long as a build keeps
+# them warm; they are build machinery, not previews. Judged by the MAIN CLASS
+# of a `java` process - the first argument after the JVM options and their
+# values (`-m mod/cls` names it too) - never by the java binary alone, and
+# never by a class name appearing later as a program argument: a Spring Boot
+# app or any `java -jar app.jar` is still a server. argv comes NUL-split from
+# /proc/<pid>/cmdline so quoted arguments stay whole; the space-joined command
+# is the fallback only when that is unreadable. Metals is the Scala language
+# server.
+_serve_build_daemon() { # <pid> <command>
+  local arg cls='' i=1 f="${CEL_SERVE_PROC_ROOT:-/proc}/$1/cmdline"
+  local -a argv=()
+  if [[ "$1" =~ ^[1-9][0-9]*$ ]] && [ -r "$f" ]; then
+    mapfile -d '' -t argv < "$f" 2>/dev/null
+  fi
+  [ "${#argv[@]}" -gt 0 ] || read -r -a argv <<<"$2"
+  [ "${argv[0]##*/}" = java ] || return 1
+  while [ "$i" -lt "${#argv[@]}" ]; do
+    arg="${argv[$i]}"; i=$((i + 1))
+    case "$arg" in
+      -jar|--jar) return 1 ;;
+      -m|--module) cls="${argv[$i]:-}"; cls="${cls#*/}"; break ;;
+      --module=*) cls="${arg#*=}"; cls="${cls#*/}"; break ;;
+      -cp|-classpath|--class-path|-p|--module-path|--upgrade-module-path|--add-modules|\
+      --add-opens|--add-exports|--add-reads|--patch-module|--limit-modules|--source)
+        i=$((i + 1)) ;;
+      -*|@*) ;;
+      *) cls="$arg"; break ;;
+    esac
+  done
+  case "$cls" in
+    org.gradle.launcher.daemon.bootstrap.GradleDaemon|\
+    worker.org.gradle.process.internal.worker.GradleWorkerMain|\
+    org.gradle.process.internal.worker.GradleWorkerMain|\
+    org.jetbrains.kotlin.daemon.KotlinCompileDaemon|\
+    scala.meta.metals.Main) return 0 ;;
+  esac
+  return 1
+}
 _serve_not_a_preview() { # <pid> <command> [port]
   local pid="$1" cmd="$2" cg unit exe proc="${CEL_SERVE_PROC_ROOT:-/proc}"
   _serve_agent_argv "$cmd" && return 0
+  _serve_build_daemon "$pid" "$cmd" && return 0
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
     _serve_agent_browser "$pid" "$cmd" "${3:-0}" && return 0
     exe="$(readlink "$proc/$pid/exe" 2>/dev/null || true)"
