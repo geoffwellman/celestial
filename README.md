@@ -1570,6 +1570,20 @@ stopped by the steward when its TTL runs out, after `serve.idle_hours`
 without a request, or when its checkout is gone, and its owner is mailed the
 restart command.
 
+Build-tool daemons (Gradle daemons and their workers, the Kotlin compile
+daemon, Metals) are never listed as servers. Instead the steward tells the
+owner of an **idle** Gradle or Kotlin compile daemon about it, once per
+pid and start time: idle means no live child process, CPU time grown less than
+`CEL_BUILD_DAEMON_IDLE_CPU_SECONDS` (default 2) since the previous tick, and
+alive more than `CEL_BUILD_DAEMON_IDLE_MIN` minutes (default 30). The owner is
+the `CEL_INBOX_ME` of the nearest ancestor process carrying it (else the
+daemon's own, inherited from what started the build), else the agent whose
+directory it runs in, else root. The note gives pid, RSS, idle minutes and cwd,
+and how to stop it (`./gradlew --stop` in the project found from a `gradlew`
+ancestor, or `kill <pid>`); the steward itself never stops or signals one. A
+daemon that goes busy and idle again is not reported again; a reused pid with a
+new start is a new daemon.
+
 A **permanent** server is an agent's standing box service - a product's live
 local app in a persistent user unit that its own follow-main unit recreates,
 or a preview its owner said to keep:

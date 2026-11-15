@@ -463,8 +463,10 @@ _serve_agent_browser() { # <pid> <command> <port>
 # app or any `java -jar app.jar` is still a server. argv comes NUL-split from
 # /proc/<pid>/cmdline so quoted arguments stay whole; the space-joined command
 # is the fallback only when that is unreadable. Metals is the Scala language
-# server.
-_serve_build_daemon() { # <pid> <command>
+# server. _serve_build_daemon_class prints the main class it matched (the
+# steward's idle-daemon check tells Gradle from Kotlin by it).
+_serve_build_daemon() { _serve_build_daemon_class "$@" >/dev/null; }
+_serve_build_daemon_class() { # <pid> <command> -> the daemon's main class
   local arg cls='' i=1 f="${CEL_SERVE_PROC_ROOT:-/proc}/$1/cmdline"
   local -a argv=()
   if [[ "$1" =~ ^[1-9][0-9]*$ ]] && [ -r "$f" ]; then
@@ -490,7 +492,7 @@ _serve_build_daemon() { # <pid> <command>
     worker.org.gradle.process.internal.worker.GradleWorkerMain|\
     org.gradle.process.internal.worker.GradleWorkerMain|\
     org.jetbrains.kotlin.daemon.KotlinCompileDaemon|\
-    scala.meta.metals.Main) return 0 ;;
+    scala.meta.metals.Main) printf '%s\n' "$cls"; return 0 ;;
   esac
   return 1
 }
