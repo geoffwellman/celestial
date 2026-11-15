@@ -1469,6 +1469,57 @@ test_reviewer_brief_names_the_head_sha_and_the_base() {
   rm -rf "$T"
 }
 
+# REVIEW EVIDENCE IS PRIVATE WHATEVER THE UMASK. retire.mjs refuses a reviewer
+# whose evidence a group could write (unsafe_evidence_permissions); a box with
+# umask 002 made every .cel/reviews/pr-<n>, QA shots directory and the runtime's
+# own native session group-writable, so no Rex reviewer could be retired. The
+# launch makes them 0700/0600, and the runtime itself starts under umask 077.
+test_reviewer_evidence_is_private_under_a_group_writable_umask() {
+  _ws_pr_fixture
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start") bash -c "$typed_prefix sh -c umask" > "$T/runtime-umask" ;;
+      *) : ;;
+    esac
+  }
+  ( umask 002; cd "$T" && cmd_run reviewer --repo widget --pr 12 && cmd_run reviewer --repo widget --pr 12 --qa browser ) >/dev/null 2>&1
+  assert_eq "$(stat -c %a "$T/.cel/reviews")" 700 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/.cel/reviews/pr-12")" 700 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/.cel/reviews/pr-12/role-reviewer.md")" 600 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/.cel/reviews/pr-12/qa-browser.role-reviewer.md")" 600 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/.cel/reviews/pr-12/qa-browser.shots")" 700 || { rm -rf "$T"; return 1; }
+  # what the runtime creates (Pi's session, its task metadata, screenshots)
+  assert_eq "$(cat "$T/runtime-umask")" 0077 || { echo "the reviewer runtime does not start under umask 077"; rm -rf "$T"; return 1; }
+  reviewer_checkout_release widget 12; reviewer_checkout_release widget 12 "" browser qa
+  rm -rf "$T"
+}
+# A directory an earlier launch left group-writable is tightened by the next
+# launch - when it is this user's, not a symlink, and under the workspace's
+# .cel/reviews - and the launch says so. A symlinked one is left alone.
+test_reviewer_launch_tightens_its_existing_evidence_and_says_so() {
+  _ws_pr_fixture
+  mkdir -p "$T/.cel/reviews/pr-12" "$T/elsewhere"
+  chmod 775 "$T/.cel/reviews" "$T/.cel/reviews/pr-12" "$T/elsewhere"
+  printf 'old role\n' > "$T/.cel/reviews/pr-12/security.role-reviewer.md"; chmod 664 "$T/.cel/reviews/pr-12/security.role-reviewer.md"
+  ln -s "$T/elsewhere" "$T/.cel/reviews/pr-12/linked.shots"
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)" || { echo "launch failed: $out"; rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/.cel/reviews")" 700 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/.cel/reviews/pr-12")" 700 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/.cel/reviews/pr-12/security.role-reviewer.md")" 600 || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/elsewhere")" 775 || { echo "a symlink's target was changed"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "tightened review evidence $T/.cel/reviews/pr-12 from 0775 to 0700" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "left $T/.cel/reviews/pr-12/linked.shots as it is" || { rm -rf "$T"; return 1; }
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
 # A reviewer's pane closes when its PR closes; a checkout that outlives the
 # pane is the same litter in a new form.
 test_reviewer_checkout_is_removed_when_the_reviewer_is_released() {

@@ -759,6 +759,55 @@ test_gc_rex_malformed_native_missing_round_and_pid_reuse_keep_registry() {
   done
 }
 
+# A REVIEWER LAUNCHED UNDER UMASK 002 left its evidence group-writable: its
+# .cel/reviews/pr-<n> directory, and the native session Pi created (0664),
+# which retire.mjs refuses (unsafe_evidence_permissions) - every sweep, for
+# good. gc tightens them first - each one this user's, no symlink in its path,
+# under the workspace's .cel/reviews or the launch's own Pi sessions - says
+# so, and the unchanged check then retires the reviewer.
+test_gc_rex_group_writable_evidence_is_tightened_then_retired() {
+  _rr_fixture
+  chmod 775 "$RR_WS/.cel/reviews" "$RR_WS/.cel/reviews/pr-71" "$(dirname "$RR_NATIVE")"
+  chmod 664 "$RR_WS/.cel/reviews/pr-71/role-reviewer.md" "$RR_NATIVE"
+  _rr_gc 1
+  assert_contains "$(cat "$RR_T/gc.out")" unsafe_evidence_permissions || return
+  assert_eq "$(stat -c %a "$RR_NATIVE")" 664 || { echo "a dry run changed a mode"; return 1; }
+  _rr_gc
+  _rr_exited || return
+  [ ! -e "$RR_RECEIPT" ] || return 1
+  assert_eq "$(reviewers_rows | jq length)" 0 || return
+  assert_eq "$(stat -c %a "$RR_WS/.cel/reviews")" 700 || return
+  assert_eq "$(stat -c %a "$RR_WS/.cel/reviews/pr-71")" 700 || return
+  assert_eq "$(stat -c %a "$RR_WS/.cel/reviews/pr-71/role-reviewer.md")" 600 || return
+  assert_eq "$(stat -c %a "$(dirname "$RR_NATIVE")")" 700 || return
+  assert_eq "$(stat -c %a "$RR_NATIVE")" 600 || return
+  assert_contains "$(cat "$RR_T/gc.out")" "tightened review evidence $RR_WS/.cel/reviews/pr-71 from 0775 to 0700" || return
+  assert_contains "$(cat "$RR_T/gc.out")" "tightened review evidence $RR_NATIVE from 0664 to 0600" || return
+  assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
+  _rr_preserved
+}
+# ...but never through a symlink: a symlinked native session (or one in a
+# symlinked session directory) keeps its mode and the reviewer still refuses.
+test_gc_rex_symlinked_group_writable_evidence_is_left_and_still_refuses() {
+  local condition kept
+  for condition in file directory; do
+    _rr_fixture
+    mkdir -p "$RR_T/elsewhere"
+    if [ "$condition" = file ]; then
+      mv "$RR_NATIVE" "$RR_T/elsewhere/native.jsonl"; ln -s "$RR_T/elsewhere/native.jsonl" "$RR_NATIVE"
+      kept="$RR_T/elsewhere/native.jsonl"
+    else
+      mv "$(dirname "$RR_NATIVE")" "$RR_T/elsewhere/widget"; ln -s "$RR_T/elsewhere/widget" "$(dirname "$RR_NATIVE")"
+      kept="$RR_T/elsewhere/widget/native.jsonl"
+    fi
+    chmod 664 "$kept"
+    _rr_gc; _rr_kept || return
+    assert_eq "$(stat -c %a "$kept")" 664 || { echo "$condition: a symlinked native session was changed"; return 1; }
+    assert_contains "$(cat "$RR_T/gc.out")" symlinked_evidence_path || return
+    _rr_cleanup
+  done
+}
+
 test_gc_rex_real_descendant_job_vetoes_close() {
   export RR_JOB=1
   _rr_fixture

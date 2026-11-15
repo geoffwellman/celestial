@@ -191,6 +191,20 @@ also names the reviewer's checkout (`CEL_REVIEW_CHECKOUT`), the one directory
 its `git -C` may name. The guard refuses a reviewer setting, exporting or
 unsetting any `GIT_*` or `PAGER` variable, so its persistent shell keeps them.
 
+A reviewer's runtime also starts under `umask 077` (the scrub's `--private`),
+so what it creates - Pi's native session and task metadata, a QA agent's
+screenshots - is 0600/0700 whatever the box's umask. Its launch creates
+`<ws>/.cel/reviews/pr-<n>` (and a QA agent's `qa-<focus>.shots`) 0700, and
+`cel solo review --qa ... --evidence` copies into `.cel/qa-evidence/` 0700/0600.
+Retirement (`tools/reviewers/retire.mjs`) refuses evidence a group or other
+user can write (`unsafe_evidence_permissions`) and stays that strict; what an
+earlier launch under umask 002 left group-writable is tightened by the next
+launch (`.cel/reviews`) or just before a real retirement attempt (`.cel/reviews`
+and the reviewer's own native session) by `tools/reviewers/private-evidence.mjs`,
+only when the path is this user's, no component of it is a symlink, and it is
+under the workspace's `.cel/reviews` or the launch's own Pi `sessions/`. Each
+change is logged on stderr; anything else is left for the check to refuse.
+
 Product agents (`solo`, `orchestrator`, lanes, `root`, a role-less `direct`
 agent) and core are NOT scrubbed. Today they inherit the whole pane
 environment above - every owner credential the launching shell, the Herdr or

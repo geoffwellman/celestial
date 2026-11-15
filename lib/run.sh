@@ -200,15 +200,21 @@ _run_inbox_hook_args() { # <runtime>  (mutates caller's AGENT_ARGS)
 # Product agents and core are not scrubbed (docs/architecture.md, "Launch
 # environment by role").
 _RUN_SECRET_NAMES='*_TOKEN|*_TOKENS|*_API_KEY|*_KEY|*_KEYS|*_SECRET|*_SECRETS|*_PASSWORD|*_PASSWD|*_PASS|*_CREDENTIAL|*_CREDENTIALS|*_PAT|*_DSN|DATABASE_URL|*_DATABASE_URL|AWS_*|CLOUDFLARE_*|CF_API_*|OPENROUTER_*'
-_run_launch_scrub() { # <keep-name...> -> ` bash -c '<scrub>' cel-launch-clean '<keep>'` for the end of an env prefix
-  local n keep=""
+#
+# --private (a reviewer's): the runtime also starts under umask 077, so what
+# it creates - Pi's native session and task metadata, a QA agent's
+# screenshots - is 0600/0700 whatever the box's umask. retire.mjs refuses
+# group-writable evidence; under umask 002 every Pi session was 0664.
+_run_launch_scrub() { # [--private] <keep-name...> -> ` bash -c '<scrub>' cel-launch-clean '<keep>'` for the end of an env prefix
+  local n keep="" private=""
+  [ "${1:-}" != --private ] || { private='umask 077; '; shift; }
   for n in "$@"; do
     [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && keep="$keep $n"
   done
   # No single quote inside: the whole program is one single-quoted word in the
   # pane, whatever its shell.
-  printf "bash -c 'k=\" \$1 \"; shift; for n in \$(compgen -e); do case \$k in *\" \$n \"*) continue ;; esac; shopt -s nocasematch; case \$n in %s) unset \"\$n\" ;; esac; shopt -u nocasematch; done; exec \"\$@\"' cel-launch-clean '%s'" \
-    "$_RUN_SECRET_NAMES" "${keep# }"
+  printf "bash -c '%sk=\" \$1 \"; shift; for n in \$(compgen -e); do case \$k in *\" \$n \"*) continue ;; esac; shopt -s nocasematch; case \$n in %s) unset \"\$n\" ;; esac; shopt -u nocasematch; done; exec \"\$@\"' cel-launch-clean '%s'" \
+    "$private" "$_RUN_SECRET_NAMES" "${keep# }"
 }
 
 # A REVIEWER'S GIT IS PINNED AT LAUNCH. The guard (lib/guard.sh
@@ -284,7 +290,10 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
     [ "${session_backend:-herdr}" = rex ] || oc_cmd="$(opencode_launch_command)"
   fi
   case "$role" in
-    reviewer|member)
+    reviewer)
+      # shellcheck disable=SC2086  # $sets is a word list on purpose
+      out="$out $(_run_launch_scrub --private $sets ${LAUNCH_ENV_KEEP[@]+"${LAUNCH_ENV_KEEP[@]}"})" ;;
+    member)
       # shellcheck disable=SC2086  # $sets is a word list on purpose
       out="$out $(_run_launch_scrub $sets ${LAUNCH_ENV_KEEP[@]+"${LAUNCH_ENV_KEEP[@]}"})" ;;
   esac
@@ -497,6 +506,17 @@ _run_tab_pane() { # <tab-label> <cwd> <who: reviewer|member> -> pane id
 # worktree of the orchestrator's clone costs a fetch, not a clone; detached, it
 # has no branch to push.
 _run_review_dir() { printf '%s' "${CEL_REVIEW_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/reviews}"; }
+
+# <ws>/.cel/reviews/pr-<n>: created 0700 (and .cel/reviews with it) whatever the
+# umask; what an earlier launch left group-writable there is tightened when it
+# is this user's and not a symlink (tools/reviewers/private-evidence.mjs, which
+# says what it changed on stderr). The role files in it are mktemp's, 0600.
+_run_review_evidence_dir() { # <wsdir> <pr>
+  mkdir -p -- "$1/.cel" && (umask 077 && mkdir -p -- "$1/.cel/reviews/pr-$2") \
+    || die "cel run reviewer: could not create $1/.cel/reviews/pr-$2"
+  node "$CEL_ROOT/tools/reviewers/private-evidence.mjs" launch "$1" "$2" \
+    || c_warn "could not check the permissions of $1/.cel/reviews/pr-$2 - a reviewer whose evidence a group can write cannot be retired"
+}
 
 # An extra agent (--focus, --qa) has a checkout of its own beside the plain
 # reviewer's: <repo>-pr-<n>-<kind>-<focus>, the slot its alias ends in.
@@ -2857,8 +2877,12 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
         review_path="$(reviewer_checkout_make "$repodir" "$repo" "$pr" "$review_head" "$review_focus" "$review_kind")" \
           || die "cel run reviewer: could not check out $repo#$pr at $review_head (is $repodir a clone of $repo?)"
         cwd="$review_path"
-        # where a QA agent saves the evidence it then records (_run_qa_brief)
-        [ "$review_kind" != qa ] || mkdir -p "$wsdir/.cel/reviews/pr-$pr/qa-$review_focus.shots"
+        # The PR's evidence directory (its role files; a QA agent's shots,
+        # where it saves the evidence it then records - _run_qa_brief) is
+        # private whatever the umask: retire.mjs refuses a reviewer whose
+        # evidence a group could write.
+        _run_review_evidence_dir "$wsdir" "$pr"
+        [ "$review_kind" != qa ] || (umask 077 && mkdir -p -- "$wsdir/.cel/reviews/pr-$pr/qa-$review_focus.shots")
       fi
       ;;
     member)

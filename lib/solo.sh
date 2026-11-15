@@ -384,16 +384,18 @@ cmd_solo_review() { # <ref> <approved|changes|blocked> --head <sha> --by <alias>
 
   # The evidence is copied beside the verdict - the bytes, never a link - with
   # its sha256 and size: the QA agent's checkout and preview go when it is
-  # retired, its evidence does not.
+  # retired, its evidence does not. Directories 0700 and files 0600, whatever
+  # the umask, like the review evidence it came from.
   local evjson='[]'
   if [ "${#evidence[@]}" -gt 0 ]; then
     local evdir="$SOLO_WSDIR/.cel/qa-evidence/$SOLO_REPO-pr-$SOLO_PR/$slot" dest sum size
-    mkdir -p "$evdir" || die "cel solo review: could not create $evdir - nothing recorded"
+    mkdir -p -- "$SOLO_WSDIR/.cel" && (umask 077 && mkdir -p -- "$evdir") || die "cel solo review: could not create $evdir - nothing recorded"
     for e in "${evidence[@]}"; do
       dest="$evdir/${e##*/}"
       if [ "$(readlink -f -- "$e")" != "$(readlink -f -- "$dest" 2>/dev/null)" ]; then
         rm -f -- "$dest"
-        cp --no-dereference -- "$e" "$dest" || die "cel solo review: could not copy $e to $evdir - nothing recorded"
+        (umask 077 && cp --no-dereference -- "$e" "$dest") && chmod 600 -- "$dest" \
+          || die "cel solo review: could not copy $e to $evdir - nothing recorded"
       fi
       sum="$(sha256sum -- "$dest" | cut -d' ' -f1)" size="$(stat -c %s -- "$dest")"
       evjson="$(jq -c --arg p "$dest" --arg s "$sum" --argjson n "$size" '. + [{path:$p, sha256:$s, size:$n}]' <<<"$evjson")"
