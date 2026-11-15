@@ -1618,14 +1618,14 @@ test_launch_env_without_github_block_is_unchanged() {
 # a systemd unit that never read the owner's rc, resumed agents with no
 # $CEL_ROOT/bin and `cel` was not found). The launch line a Herdr pane types,
 # run by a shell whose PATH lacks the plane's directories and repeats others:
-# the runtime starts with $CEL_ROOT/bin first, every directory `cel shellenv`
-# adds, the caller's own after them in order, and each once.
+# $CEL_ROOT/bin and its Linear bin lead, the caller's own follow in order,
+# every directory `cel shellenv` adds is there, and each appears once.
 test_launch_line_puts_the_plane_on_path_first_whatever_the_callers_path() {
   _ws
   mkdir -p "$T/a" "$T/b"
   local got want d dup
   got="$(PATH="$T/a:/usr/bin:$T/b:/bin:$T/a" /bin/bash -c "$(_run_launch_env solo "$T" /r.md)"' /bin/bash -c '"'"'printf %s "$PATH"'"'")"
-  assert_eq "${got%%:*}" "$CEL_ROOT/bin"
+  assert_eq "$(cut -d: -f1-2 <<<"$got")" "$CEL_ROOT/bin:$CEL_ROOT/core/skills/linear/bin"
   # every directory a login shell's `cel shellenv` puts on PATH (from /, in no
   # workspace, so its `cel ws env` hook adds nothing)
   want="$(cd / && PATH=/usr/bin:/bin /bin/bash -c 'eval "$1"; printf %s "$PATH"' _ "$("$CEL_ROOT/bin/cel" shellenv)")"
@@ -1636,6 +1636,33 @@ test_launch_line_puts_the_plane_on_path_first_whatever_the_callers_path() {
   dup="$(tr : '\n' <<<"$got" | sort | uniq -d)"
   [ -z "$dup" ] || { echo "duplicated on the agent's PATH: $dup"; rm -rf "$T"; return 1; }
   rm -rf "$T"
+}
+# THE CALLER'S PRECEDENCE STANDS: a directory ahead of ~/.local/bin (a pinned
+# toolchain, a workspace PATH, a fake) stays ahead of it, so a runtime the line
+# names bare is still the caller's; ~/.local/bin and mise shims are appended
+# only when the caller's PATH lacks them, and never moved when it has them.
+test_launch_line_keeps_a_callers_directory_ahead_of_local_bin() {
+  _ws
+  mkdir -p "$T/pinned"
+  local got
+  got="$(PATH="$T/pinned:$HOME/.local/bin:/usr/bin:/bin" /bin/bash -c "$(_run_launch_env solo "$T" /r.md)"' /bin/bash -c '"'"'printf %s "$PATH"'"'")"
+  assert_contains ":$got:" ":$T/pinned:$HOME/.local/bin:/usr/bin:/bin:" || { rm -rf "$T"; return 1; }
+  got="$(PATH="$T/pinned:/usr/bin:/bin" /bin/bash -c "$(_run_launch_env solo "$T" /r.md)"' /bin/bash -c '"'"'printf %s "$PATH"'"'")"
+  assert_eq "${got##*:}" "$HOME/.local/bin" || { rm -rf "$T"; return 1; }
+  assert_contains ":$got:" ":$T/pinned:/usr/bin:/bin:" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A CEL_ROOT or HOME with a space in it is one directory, quoted through the
+# typed line and the step's own splitting (on ':' only).
+test_launch_line_handles_a_cel_root_and_home_with_spaces() {
+  local d; d="$(mktemp -d)"
+  mkdir -p "$d/plane root/bin" "$d/my home/.local/share/mise/shims"
+  local line got
+  line="$(CEL_ROOT="$d/plane root" HOME="$d/my home" _run_launch_path)"
+  got="$(PATH="/usr/bin:/bin" /bin/bash -c "env $line"' /bin/bash -c '"'"'printf %s "$PATH"'"'")"
+  assert_eq "$got" "$d/plane root/bin:$d/plane root/core/skills/linear/bin:/usr/bin:/bin:$d/my home/.local/share/mise/shims:$d/my home/.local/bin" \
+    || { rm -rf "$d"; return 1; }
+  rm -rf "$d"
 }
 test_every_role_launch_carries_the_token_substitution_not_the_token() {
   _reviewer_gateway_fixture
@@ -2502,11 +2529,9 @@ done
 SH
   chmod +x "$T/bin/claude"
   _run_mark_launch() { printf '%s' "$2" > "$T/prefix"; }
-  # The fake by its path: the launch line puts ~/.local/bin ahead of this
-  # test's PATH, where the box's real claude would answer to the bare name.
   _run_agent_start() {
     shift 3
-    ( cd "$T/.cel/solo/bundle/lane-ui" && eval "$(cat "$T/prefix") \"\$T/bin/claude\" \"\$@\"" )
+    ( cd "$T/.cel/solo/bundle/lane-ui" && eval "$(cat "$T/prefix") claude \"\$@\"" )
   }
   (cd "$T" && cmd_run solo --product bundle --lane ui) >/dev/null 2>&1
   local out; out="$(cat "$FAKE_CLAUDE_OUT" 2>/dev/null)"

@@ -244,19 +244,25 @@ _run_reviewer_git_env() { # -> `env -u ... K=V ...` for the end of a reviewer's 
 # 2026-11-16 it resumed every Rex agent after the managed upgrade without
 # $CEL_ROOT/bin: `cel: command not found` in all of them. So every launch line
 # (_run_launch_env) runs this step after its K=V words: in the pane or the Rex
-# script, where the runtime starts, it puts the directories `cel shellenv`
-# adds first - $CEL_ROOT/bin leading - then the PATH the runtime would
-# otherwise have had, in order, each directory once, and execs the rest of the
-# line under it. Nothing else of the caller's environment is taken or dropped.
-# No single quote inside: the program is one single-quoted word in the pane.
-_run_launch_path_dirs() { # -> the directories, colon-separated, first first
-  local dirs="$CEL_ROOT/bin:$CEL_ROOT/core/skills/linear/bin"
-  [ ! -d "$HOME/.local/share/mise/shims" ] || dirs="$dirs:$HOME/.local/share/mise/shims"
-  printf '%s:%s/.local/bin' "$dirs" "$HOME"
+# script, where the runtime starts, it builds the PATH as
+#   $CEL_ROOT/bin, its Linear skill bin   leading: `cel` must be the plane's
+#   the PATH the runtime would otherwise have had, in its own order
+#   mise shims, ~/.local/bin              appended, only when absent
+# each directory once (its first place), and execs the rest of the line under
+# it. The caller's own directories keep their precedence: a pinned toolchain,
+# a workspace's PATH or a test's fake stays ahead of ~/.local/bin, which holds
+# runtimes (claude, omp, herdr) the line names bare. Nothing else of the
+# caller's environment is taken or dropped. No single quote inside: the
+# program is one single-quoted word in the pane. A CEL_ROOT or HOME holding a
+# ':' is not supported (PATH cannot hold one either); spaces are.
+_run_launch_path_lead() { printf '%s/bin:%s/core/skills/linear/bin' "$CEL_ROOT" "$CEL_ROOT"; }
+_run_launch_path_tail() {
+  [ ! -d "$HOME/.local/share/mise/shims" ] || printf '%s/.local/share/mise/shims:' "$HOME"
+  printf '%s/.local/bin' "$HOME"
 }
-_run_launch_path() { # -> `/bin/bash -c '<prepend>' cel-launch-path <dirs>` for an env prefix
-  printf "/bin/bash -c 'set -f; IFS=:; p=; for d in \$1 \$PATH; do [ -n \"\$d\" ] || continue; case :\$p: in *:\"\$d\":*) ;; *) p=\$p\${p:+:}\$d ;; esac; done; export PATH=\"\$p\"; shift; exec \"\$@\"' cel-launch-path %q" \
-    "$(_run_launch_path_dirs)"
+_run_launch_path() { # -> `/bin/bash -c '<build>' cel-launch-path <lead> <tail>` for an env prefix
+  printf "/bin/bash -c 'set -f; IFS=:; p=; for d in \$1 \$PATH \$2; do [ -n \"\$d\" ] || continue; case :\$p: in *:\"\$d\":*) ;; *) p=\$p\${p:+:}\$d ;; esac; done; export PATH=\"\$p\"; shift 2; exec \"\$@\"' cel-launch-path %q %q" \
+    "$(_run_launch_path_lead)" "$(_run_launch_path_tail)"
 }
 
 # The one credential a direct (non-gateway) profile authenticates with: its

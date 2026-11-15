@@ -110,10 +110,12 @@ processes, which belong to the retained-runtime lifecycle.
 
 The agent's PATH does not depend on who launched it. After its `K=V` words the
 prefix runs one `/bin/bash -c` step (`_run_launch_path`) where the runtime
-starts - the Herdr pane or the Rex launch script - that puts the directories
-`cel shellenv` adds (`$CEL_ROOT/bin` first, its Linear skill, mise shims when
-present, `~/.local/bin`) ahead of the PATH the runtime would otherwise get,
-each directory once, and execs the rest of the line. A `cel run` from a login
+starts - the Herdr pane or the Rex launch script - that builds it as
+`$CEL_ROOT/bin` and its Linear skill bin, then the PATH the runtime would
+otherwise get in its own order, then mise shims (when present) and
+`~/.local/bin` only if that PATH lacks them; each directory once. A caller's
+directory ahead of `~/.local/bin` stays ahead. It then execs the rest of the
+line. A `cel run` from a login
 shell, a `--restart`, and the steward's resume after a Rex restart or managed
 upgrade (which re-runs the receipt's recorded `cel run` line from a systemd
 unit that never read the owner's rc) all build the same line.
