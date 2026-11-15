@@ -2772,23 +2772,27 @@ test_red_pr_is_nudged_when_only_prose_or_another_workspace_names_it() {
 }
 
 # --- unledgered preview/dev servers: reported once per change of the SET ------
-# A server is known by its unit, or a bare pid by its directory and command
-# name - never the pid, memory or age - so a restarted dev server in the same
-# directory is the same server. The summary goes to root (the first workspace's,
-# as the orphan line does); each new server's line also goes to the agent whose
-# directory it runs in.
+# A server is known by its unit, or a bare pid by its directory, command name
+# and port (else script) - never the pid, memory or age - so a restarted dev
+# server in the same directory on the same port is the same server. The
+# summary goes to root (the first workspace's, as the orphan line does); each
+# new server's line also goes to the agent whose directory it runs in.
 _ul_fixture() {
   T="$(mktemp -d)"
   export CEL_SERVE_STATE="$T/state" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_PROC_DATA='' \
     CEL_SERVE_PROC_ROOT="$T/proc" CEL_CONFIG_FILE="$T/config.yaml" CEL_REGISTRY="$T/registry.yaml"
-  mkdir -p "$CEL_SERVE_STATE" "$T/proc" "$T/alpha/repos/widget/web" "$T/alpha/repos/slots/.git/worktrees/CEL-x" \
-    "$T/alpha/products/bundle" "$T/alpha/.cel/solo/bundle/CEL-x/app"
+  mkdir -p "$CEL_SERVE_STATE" "$T/proc" "$T/alpha/repos/widget/web" "$T/alpha/products/bundle" "$T/alpha/.cel/solo/bundle" "$T/elsewhere"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
   printf 'name: alpha\nrepos: [{name: widget}, {name: slots, lane: builder}]\nproducts:\n  - {name: bundle, repos: [widget, slots]}\n' \
     > "$T/alpha/workspace.yaml"
-  # a solo worktree of the lane-owned repo
-  printf 'gitdir: %s/alpha/repos/slots/.git/worktrees/CEL-x\n' "$T" > "$T/alpha/.cel/solo/bundle/CEL-x/.git"
+  # the lane-owned repo is a checkout elsewhere, symlinked into repos/, with a
+  # solo worktree of it and a review checkout beside it
+  git init -q "$T/elsewhere/slots" && git -C "$T/elsewhere/slots" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+  ln -s "$T/elsewhere/slots" "$T/alpha/repos/slots"
+  git -C "$T/alpha/repos/slots" worktree add -q -b solo-x "$T/alpha/.cel/solo/bundle/CEL-x" 2>/dev/null
+  git -C "$T/alpha/repos/slots" worktree add -q -b review-x "$T/elsewhere/slots-worktrees/review" 2>/dev/null
+  mkdir -p "$T/alpha/.cel/solo/bundle/CEL-x/app" "$T/elsewhere/slots/web" "$T/elsewhere/slots-worktrees/review/web"
   : > "$T/sent"
   # one line per send: "<to> <workspace>\t<message>"; $T/inbox-down fails it
   cmd_inbox() {
@@ -2820,7 +2824,7 @@ test_steward_unledgered_report_is_sent_once_while_the_set_is_unchanged() {
   assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _ul_down; return 1; }
   assert_eq "$(_ul_sent_to root)" 1 || { _ul_down; return 1; }
   assert_contains "$(cat "$T/sent")" "root alpha" || { _ul_down; return 1; }
-  assert_contains "$(cat "$T/sent")" "New: node in /srv/demo (pid 3900001, 240MB, 4000s)" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "New: node on port 5173 in /srv/demo (pid 3900001, 240MB, 4000s)" || { _ul_down; return 1; }
   assert_contains "$(cat "$T/sent")" "Now 1, biggest first:" || { _ul_down; return 1; }
   assert_contains "$(cat "$T/sent")" "nothing unledgered was stopped"
   _ul_down
@@ -2839,16 +2843,16 @@ test_steward_unledgered_new_server_line_goes_to_the_agent_whose_directory_it_run
   local orch lane root
   orch="$(grep '^bundle-orch ' "$T/sent")"; lane="$(grep '^bundle-builder ' "$T/sent")"; root="$(grep '^root ' "$T/sent")"
   assert_contains "$orch" "bundle-orch alpha" || { _ul_down; return 1; }
-  assert_contains "$orch" "node in $T/alpha/repos/widget/web (pid 3900002, 300MB" || { _ul_down; return 1; }
+  assert_contains "$orch" "node on port 5173 in $T/alpha/repos/widget/web (pid 3900002, 300MB" || { _ul_down; return 1; }
   # its own line only: not the lane's, not the one root already knew
   case "$orch" in *CEL-x*|*/srv/demo*) echo "owner got another's line: $orch"; _ul_down; return 1 ;; esac
-  assert_contains "$lane" "node in $T/alpha/.cel/solo/bundle/CEL-x/app" || { _ul_down; return 1; }
+  assert_contains "$lane" "node on port 5173 in $T/alpha/.cel/solo/bundle/CEL-x/app" || { _ul_down; return 1; }
   case "$lane" in *repos/widget*) echo "lane got another's line: $lane"; _ul_down; return 1 ;; esac
   # root: what is new, and the whole list
-  assert_contains "$root" "New: node in $T/alpha/repos/widget/web" || { _ul_down; return 1; }
+  assert_contains "$root" "New: node on port 5173 in $T/alpha/repos/widget/web" || { _ul_down; return 1; }
   case "$root" in *"New: "*"/srv/demo"*"Now"*) echo "root was told an old server is new: $root"; _ul_down; return 1 ;; esac
-  assert_contains "$root" "Now 3, biggest first: node in $T/alpha/repos/widget/web" || { _ul_down; return 1; }
-  assert_contains "$root" "node in /srv/demo (pid 3900001" || { _ul_down; return 1; }
+  assert_contains "$root" "Now 3, biggest first: node on port 5173 in $T/alpha/repos/widget/web" || { _ul_down; return 1; }
+  assert_contains "$root" "node on port 5173 in /srv/demo (pid 3900001" || { _ul_down; return 1; }
   # and nobody hears of them again
   _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900002 "$T/alpha/repos/widget/web" 310),$(_ul_pid 3900003 "$T/alpha/.cel/solo/bundle/CEL-x/app" 90)"
   assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 3
@@ -2862,14 +2866,14 @@ test_steward_unledgered_gone_server_is_reported_once_and_counts_as_new_when_back
   _ul_tick "$(_ul_pid 3900001 /srv/demo)"
   assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
   local gone; gone="$(sed -n 2p "$T/sent")"
-  assert_contains "$gone" "Gone: node in /srv/shop." || { _ul_down; return 1; }
+  assert_contains "$gone" "Gone: node on port 5173 in /srv/shop." || { _ul_down; return 1; }
   case "$gone" in *"New:"*) echo "a gone-only change listed something new: $gone"; _ul_down; return 1 ;; esac
-  assert_contains "$gone" "Now 1, biggest first: node in /srv/demo" || { _ul_down; return 1; }
+  assert_contains "$gone" "Now 1, biggest first: node on port 5173 in /srv/demo" || { _ul_down; return 1; }
   # back again: new, once
   _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900007 /srv/shop 120)"
   _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900007 /srv/shop 125)"
   assert_eq "$(_ul_sent_to root)" 3 || { cat "$T/sent"; _ul_down; return 1; }
-  assert_contains "$(sed -n 3p "$T/sent")" "New: node in /srv/shop (pid 3900007" || { _ul_down; return 1; }
+  assert_contains "$(sed -n 3p "$T/sent")" "New: node on port 5173 in /srv/shop (pid 3900007" || { _ul_down; return 1; }
   # and everything gone is said once too
   _ul_tick ""
   _ul_tick ""
@@ -2888,7 +2892,118 @@ test_steward_unledgered_same_directory_with_a_new_pid_is_not_new() {
   # another command in that directory is another server
   _ul_tick "$(_ul_pid 3900042 /srv/demo 95 320),$(printf '{"pid":3900050,"memory_mb":60,"age_seconds":5,"worktree":"/srv/demo","command":"python3 -m http.server 8000"}')"
   assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
-  assert_contains "$(sed -n 2p "$T/sent")" "New: python3 in /srv/demo (pid 3900050"
+  assert_contains "$(sed -n 2p "$T/sent")" "New: python3 http.server in /srv/demo (pid 3900050"
+  _ul_down
+}
+
+# vite and next are both node: in one directory, on different ports, they are
+# two servers - each new on its own, and one leaving is reported. With no port
+# known the script tells them apart.
+test_steward_unledgered_two_node_servers_in_one_directory_are_two() {
+  _ul_fixture
+  local vite next
+  vite='{"pid":3900001,"port":5173,"memory_mb":240,"age_seconds":400,"worktree":"/srv/app","command":"node /srv/app/node_modules/.bin/vite --port 5173"}'
+  next='{"pid":3900002,"port":3000,"memory_mb":500,"age_seconds":300,"worktree":"/srv/app","command":"node /srv/app/node_modules/.bin/next dev -p 3000"}'
+  _ul_tick "$vite"
+  _ul_tick "$vite,$next"
+  assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 2p "$T/sent")" "New: node on port 3000 in /srv/app (pid 3900002" || { _ul_down; return 1; }
+  assert_contains "$(sed -n 2p "$T/sent")" "Now 2" || { _ul_down; return 1; }
+  # next restarts on its port: the same server
+  _ul_tick "$vite,${next/3900002/3900099}"
+  assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  # vite leaves: said
+  _ul_tick "${next/3900002/3900099}"
+  assert_eq "$(_ul_sent_to root)" 3 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 3p "$T/sent")" "Gone: node on port 5173 in /srv/app." || { _ul_down; return 1; }
+  # no port: told apart by script, kept across a restart
+  : > "$T/sent"; _ul_tick ""; : > "$T/sent"
+  _ul_tick '{"pid":3900010,"memory_mb":90,"age_seconds":9,"worktree":"/srv/app","command":"node --inspect a.js"},{"pid":3900011,"memory_mb":80,"age_seconds":9,"worktree":"/srv/app","command":"node b.js"}'
+  _ul_tick '{"pid":3900020,"memory_mb":90,"age_seconds":2,"worktree":"/srv/app","command":"node --inspect a.js"},{"pid":3900011,"memory_mb":80,"age_seconds":19,"worktree":"/srv/app","command":"node b.js"}'
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "New: node a.js in /srv/app (pid 3900010, 90MB, 9s); node b.js in /srv/app"
+  _ul_down
+}
+
+# Owner by git identity: a repo symlinked into repos/ from a checkout elsewhere
+# (the server's cwd is resolved, so it is outside the workspace) and a review
+# worktree beside that checkout are both the repo's - here its declared lane.
+test_steward_unledgered_symlinked_repo_and_sibling_worktree_route_to_the_repo_owner() {
+  _ul_fixture
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/web")" "alpha bundle-builder" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-worktrees/review/web")" "alpha bundle-builder" || { _ul_down; return 1; }
+  _ul_tick "$(_ul_pid 3900001 "$T/elsewhere/slots/web" 300),$(_ul_pid 3900002 "$T/elsewhere/slots-worktrees/review/web" 200)"
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to bundle-builder)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  local lane; lane="$(grep '^bundle-builder ' "$T/sent")"
+  assert_contains "$lane" "bundle-builder alpha" || { _ul_down; return 1; }
+  assert_contains "$lane" "node on port 5173 in $T/elsewhere/slots/web (pid 3900001" || { _ul_down; return 1; }
+  assert_contains "$lane" "in $T/elsewhere/slots-worktrees/review/web (pid 3900002" || { _ul_down; return 1; }
+  # a non-git directory outside every workspace is still root's
+  assert_eq "$(_serve_dir_owner /srv/demo)" "alpha root outside"
+  _ul_down
+}
+
+# No git identity - an empty path (git -C '' would answer for the steward's
+# own cwd), a bare repo or .git dir, an unreadable dir - is the path rules'.
+test_steward_unledgered_owner_without_git_identity_falls_back_to_path_rules() {
+  _ul_fixture
+  ( cd "$T/elsewhere/slots" && assert_eq "$(_serve_dir_owner '')" "alpha root outside" ) || { _ul_down; return 1; }
+  git init -q --bare "$T/alpha/repos/widget/bare.git"
+  assert_eq "$(_serve_dir_owner "$T/alpha/repos/widget/bare.git")" "alpha bundle-orch" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/.git")" "alpha root outside" || { _ul_down; return 1; }
+  mkdir -p "$T/elsewhere/slots/locked/web"; chmod 000 "$T/elsewhere/slots/locked"
+  if [ ! -r "$T/elsewhere/slots/locked" ]; then
+    assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/locked/web")" "alpha root outside" || { chmod 755 "$T/elsewhere/slots/locked"; _ul_down; return 1; }
+  fi
+  chmod 755 "$T/elsewhere/slots/locked"
+  # and a report with an empty path goes to root alone
+  ( cd "$T/elsewhere/slots" && _ul_tick '{"pid":3900001,"port":5173,"memory_mb":9,"age_seconds":9,"worktree":"","command":"node x"}' )
+  assert_eq "$(_ul_sent_to bundle-builder)" 0 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to root)" 1
+  _ul_down
+}
+
+# Each repo's common dir is asked of git once per tick, however many servers.
+test_steward_unledgered_repo_common_dirs_are_read_once_per_tick() {
+  _ul_fixture
+  mkdir -p "$T/bin"; : > "$T/git.log"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/git.log"\nexec %s "$@"\n' "$T" "$(command -v git)" > "$T/bin/git"; chmod +x "$T/bin/git"
+  PATH="$T/bin:$PATH" _ul_tick "$(_ul_pid 3900001 "$T/elsewhere/slots/web"),$(_ul_pid 3900002 "$T/elsewhere/slots-worktrees/review/web" 100 50),$(_ul_pid 3900003 "$T/alpha/.cel/solo/bundle/CEL-x/app" 100 60)"
+  assert_eq "$(grep -c "$T/alpha/repos/slots " "$T/git.log")" 1 || { cat "$T/git.log"; _ul_down; return 1; }
+  assert_eq "$(_ul_sent_to bundle-builder)" 1
+  _ul_down
+}
+
+# The one-time re-key: state written under the old dir+command keys gives one
+# message - those keys gone, the same servers new - and an owner line still
+# owed under an old key is dropped (intended: the new key's owner is owed it).
+test_steward_unledgered_old_keys_rekey_in_one_message() {
+  _ul_fixture
+  printf '{"dir:/srv/app node":{"name":"node in /srv/app"},"dir:%s/alpha/products/bundle node":{"name":"node in %s/alpha/products/bundle","owed":"alpha bundle-orch"}}\n' "$T" "$T" \
+    > "$CEL_SERVE_STATE/unledgered-reported.json"
+  _ul_tick "$(_ul_pid 3900001 /srv/app)"
+  _ul_tick "$(_ul_pid 3900001 /srv/app)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "New: node on port 5173 in /srv/app (pid 3900001" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "Gone: node in /srv/app; node in $T/alpha/products/bundle." || { _ul_down; return 1; }
+  assert_eq "$(jq -c 'keys' "$CEL_SERVE_STATE/unledgered-reported.json")" '["dir:/srv/app node port 5173"]'
+  _ul_down
+}
+
+# With several workspaces, a server in none goes to the first one's root, and
+# the message says which; with one, nothing extra is said.
+test_steward_unledgered_server_outside_every_workspace_names_the_root_told() {
+  _ul_fixture
+  _ul_tick "$(_ul_pid 3900001 /srv/demo)"
+  case "$(cat "$T/sent")" in *"Outside every workspace"*) echo "one workspace, said outside: $(cat "$T/sent")"; _ul_down; return 1 ;; esac
+  mkdir -p "$T/beta"; printf 'name: beta\nrepos: []\n' > "$T/beta/workspace.yaml"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
+  : > "$T/sent"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900002 /srv/shop 100)"
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "root alpha" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "Outside every workspace, so reported to workspace alpha's root (the first registered): node on port 5173 in /srv/shop."
   _ul_down
 }
 
