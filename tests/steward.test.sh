@@ -2779,8 +2779,9 @@ test_red_pr_is_nudged_when_only_prose_or_another_workspace_names_it() {
 # new server's line also goes to the agent whose directory it runs in.
 _ul_fixture() {
   T="$(mktemp -d)"
+  # the age floor is its own tests' (below); these are about identity and routing
   export CEL_SERVE_STATE="$T/state" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_PROC_DATA='' \
-    CEL_SERVE_PROC_ROOT="$T/proc" CEL_CONFIG_FILE="$T/config.yaml" CEL_REGISTRY="$T/registry.yaml"
+    CEL_SERVE_PROC_ROOT="$T/proc" CEL_CONFIG_FILE="$T/config.yaml" CEL_REGISTRY="$T/registry.yaml" CEL_UNLEDGERED_MIN_AGE_MIN=0
   mkdir -p "$CEL_SERVE_STATE" "$T/proc" "$T/alpha/repos/widget/web" "$T/alpha/products/bundle" "$T/alpha/.cel/solo/bundle" "$T/elsewhere"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
@@ -2802,7 +2803,7 @@ _ul_fixture() {
   }
 }
 _ul_down() {
-  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_PROC_ROOT CEL_CONFIG_FILE CEL_REGISTRY CEL_SERVE_ADOPT_DATA
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_PROC_ROOT CEL_CONFIG_FILE CEL_REGISTRY CEL_SERVE_ADOPT_DATA CEL_UNLEDGERED_MIN_AGE_MIN
   rm -rf "$T"
 }
 _ul_pid() { # <pid> <dir> [mb] [age] -> one bare-pid row
@@ -3036,6 +3037,66 @@ test_steward_unledgered_owner_note_not_delivered_is_retried_alone() {
   _ul_tick "$(_ul_pid 3900002 "$T/alpha/products/bundle")"
   assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
   assert_eq "$(_ul_sent_to bundle-orch)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  _ul_down
+}
+
+# --- the age floor: a server is New only once up 15 min (CEL_UNLEDGERED_MIN_AGE_MIN)
+# A worker's dev server restarting every few minutes, a test server: never
+# reported, and so never Gone either.
+test_steward_unledgered_server_gone_before_15_minutes_sends_nothing() {
+  _ul_fixture; unset CEL_UNLEDGERED_MIN_AGE_MIN
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 30)"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 600)"
+  _ul_tick ""
+  _ul_tick ""
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 0 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(jq -c . "$CEL_SERVE_STATE/unledgered-reported.json" 2>/dev/null || printf '{}')" '{}'
+  _ul_down
+}
+
+test_steward_unledgered_server_reaching_15_minutes_is_new_once_then_gone_once() {
+  _ul_fixture; unset CEL_UNLEDGERED_MIN_AGE_MIN
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 600)"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 899)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 0 || { cat "$T/sent"; _ul_down; return 1; }
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 900)"
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 250 1200)"
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 1p "$T/sent")" "New: node on port 5173 in /srv/demo (pid 3900001, 240MB, 900s)" || { _ul_down; return 1; }
+  # a young server beside it is neither new nor in the list
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 250 1500),$(_ul_pid 3900002 /srv/shop 99 60)"
+  _ul_tick ""
+  _ul_tick ""
+  assert_eq "$(_ul_sent_to root)" 2 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_contains "$(sed -n 2p "$T/sent")" "Gone: node on port 5173 in /srv/demo." || { _ul_down; return 1; }
+  case "$(cat "$T/sent")" in *"/srv/shop"*) echo "a young server was reported: $(cat "$T/sent")"; _ul_down; return 1 ;; esac
+  _ul_down
+}
+
+# Identity is the key, as before: a reported server restarted under its key
+# (new pid, age reset) is still the one server - not Gone, not New again.
+test_steward_unledgered_reported_server_restarted_young_is_not_reported_again() {
+  _ul_fixture; unset CEL_UNLEDGERED_MIN_AGE_MIN
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 1000)"
+  _ul_tick "$(_ul_pid 3900042 /srv/demo 90 5)"
+  _ul_tick "$(_ul_pid 3900042 /srv/demo 95 1000)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  assert_eq "$(jq -c 'keys' "$CEL_SERVE_STATE/unledgered-reported.json")" '["dir:/srv/demo node port 5173"]'
+  _ul_down
+}
+
+test_steward_unledgered_min_age_env_override() {
+  _ul_fixture; export CEL_UNLEDGERED_MIN_AGE_MIN=2
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 119)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 0 || { cat "$T/sent"; _ul_down; return 1; }
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 120)"
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  # junk falls back to the default 15
+  : > "$T/sent"; _ul_tick ""; : > "$T/sent"; export CEL_UNLEDGERED_MIN_AGE_MIN=abc
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 600)"
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" 0 || { cat "$T/sent"; _ul_down; return 1; }
+  _ul_tick "$(_ul_pid 3900001 /srv/demo 240 900)"
+  assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
   _ul_down
 }
 
