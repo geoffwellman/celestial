@@ -46,6 +46,7 @@ SH
 printf '%s\n' "$CEL_ROLE" "$CEL_INBOX_ME" "$CEL_SESSION_BACKEND" "$PWD" > "$CEL_REX_STATE/observed"
 printf '%s\n' "$@" > "$CEL_REX_STATE/args"
 printf '%s\n' "$REX_FIXTURE_SETTING" "$REX_LOCAL_SETTING" > "$CEL_REX_STATE/workspace-env"
+printf '%s' "$PATH" > "$CEL_REX_STATE/path.tmp" && mv "$CEL_REX_STATE/path.tmp" "$CEL_REX_STATE/path"
 exec sleep 300
 SH
   cat > "$RT/bin/herdr" <<'SH'
@@ -275,5 +276,55 @@ YAML
   rex_agent_stop rex/session:test/block:test
   _rex_launch widget-orch claude "$RT/ws/repos/widget" widget 'env CEL_ROLE=orchestrator' >/dev/null
   assert_eq "$(jq 'has("agent_session")' "$CEL_REX_STATE/widget-orch.json")" false
+  _rext_down
+}
+
+# THE AGENT'S PATH IS THE PLANE'S, whoever launches it. The steward is a
+# systemd user unit: its PATH is a login shell's plus mise and ~/.local/bin,
+# never the owner's rc and its `cel shellenv`, so $CEL_ROOT/bin is not on it.
+_rext_steward_path() { printf '%s' "$RT/bin:$HOME/.local/bin:/usr/bin:/bin"; }
+_rext_path_of_runtime() { # -> the launched runtime's PATH, once it has started
+  local i
+  for ((i=0;i<50;i++)); do [ -f "$CEL_REX_STATE/path" ] && break; sleep 0.1; done
+  cat "$CEL_REX_STATE/path" 2>/dev/null
+}
+_rext_assert_plane_path() { # <runtime PATH>
+  assert_eq "${1%%:*}" "$CEL_ROOT/bin" || return 1
+  assert_contains ":$1:" ":$HOME/.local/bin:" || return 1
+  assert_contains ":$1:" ":$RT/bin:" || return 1
+  local dup; dup="$(tr : '\n' <<<"$1" | sort | uniq -d)"
+  [ -z "$dup" ] || { echo "duplicated on the agent's PATH: $dup"; return 1; }
+}
+
+test_rex_launch_from_a_caller_without_the_plane_on_path_puts_it_first() {
+  _rext_setup
+  local out rc=0
+  out="$(cd "$RT/ws" && PATH="$(_rext_steward_path)" cmd_run orchestrator --repo widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; _rext_down; return 1; }
+  _rext_assert_plane_path "$(_rext_path_of_runtime)" || { _rext_down; return 1; }
+  _rext_down
+}
+
+# A RESUME IS A LAUNCH: after a Rex restart or the managed upgrade the steward
+# runs the receipt's recorded line (_rex_relaunch, the real `cel`), and the
+# agent it brings back gets its PATH from the same builder as any `cel run`.
+test_rex_resume_by_the_steward_puts_the_plane_on_path_first() {
+  _rext_setup
+  export CEL_REGISTRY="$RT/registry.yaml"
+  printf 'workspaces:\n  alpha: {path: "%s/ws"}\n' "$RT" > "$CEL_REGISTRY"
+  local out rc=0 f="$CEL_REX_STATE/widget-orch.json" old i
+  out="$(cd "$RT/ws" && cmd_run orchestrator --repo widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; unset CEL_REGISTRY; _rext_down; return 1; }
+  _rext_path_of_runtime >/dev/null
+  assert_eq "$(jq -r '.relaunch | length > 1' "$f")" true || { unset CEL_REGISTRY; _rext_down; return 1; }
+  # The server went away and took the runtime with it.
+  old="$(jq -r .pid "$f")"; kill "$old"
+  for ((i=0;i<50;i++)); do _rex_live "$f" || break; sleep 0.1; done
+  rm -f "$CEL_REX_STATE/path"
+  out="$(cd / && PATH="$(_rext_steward_path)" _rex_relaunch "$f" 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; unset CEL_REGISTRY; _rext_down; return 1; }
+  _rext_assert_plane_path "$(_rext_path_of_runtime)" || { unset CEL_REGISTRY; _rext_down; return 1; }
+  [ "$(jq -r .pid "$f")" != "$old" ] || { echo 'the resume did not relaunch the agent'; unset CEL_REGISTRY; _rext_down; return 1; }
+  unset CEL_REGISTRY
   _rext_down
 }
