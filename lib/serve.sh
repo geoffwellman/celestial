@@ -695,38 +695,111 @@ serve_sweep() {
     c_warn "$msg"
   done
 }
-# ONCE A DAY PER PRODUCT, AND ONLY WHEN IT ARRIVED. The stamp file holds one
-# "<day> <ws> <product>" line per delivered message; a send that fails leaves
-# its product unstamped, so the next tick tries it again instead of the day
-# passing in silence. Lines from an earlier day are dropped.
-_serve_unledgered_report() {
-  local rows n state_file today ws wsdir product msg sent delivered="" failed="" tmp
-  rows="$(serve_adopt_json 2>/dev/null || printf '[]')"
-  n="$(printf '%s' "$rows" | jq 'length')"
-  [ "$n" -gt 0 ] || return 0
-  today="$(date -u +%F)"; state_file="$(_serve_state)/unledgered-reported"
-  mkdir -p "$(_serve_state)" || return 0
-  sent="$(awk -v d="$today" '$1 == d && NF == 3 { print $2, $3 }' "$state_file" 2>/dev/null || true)"
-  msg="steward: $n unledgered preview/dev server(s), biggest first: $(printf '%s' "$rows" | jq -r '.[0:10][] | "\(.unit // ("pid:"+(.pid|tostring))) \(.memory_mb)MB \(.age_seconds)s \(.worktree)"' | paste -sd';' -). Review with 'cel serve adopt'; nothing unledgered was stopped."
-  for ws in $(registry_names); do
-    wsdir="$(registry_path "$ws")" || continue
-    for product in $(ws_product_names "$wsdir" 2>/dev/null); do
-      case $'\n'"$sent"$'\n' in *$'\n'"$ws $product"$'\n'*) continue ;; esac
-      if cmd_inbox send "$product-orch" "$msg" --from steward --workspace "$ws" --kind status --fp unledgered-servers >/dev/null 2>&1; then
-        delivered="$delivered$ws $product"$'\n'
-      else
-        failed="$failed $ws/$product-orch"
-      fi
-    done
+# WHO IS TOLD ABOUT A SERVER: the agent whose directory it runs in. A repo's
+# checkout, or a solo worktree of it (its .git file names the repo), is the
+# repo's PR owner (ws_repo_pr_owner: the lane a repo declares, else its
+# product's agent); a product's own directory is its agent's; a lane's
+# directory is the lane's. Anything else inside a workspace is that
+# workspace's root, and anything outside every workspace is the first one's.
+_serve_dir_owner() { # <dir> -> "<ws> <mailbox>"
+  local dir="$1" ws wsdir rel first="" p rest repo gitdir
+  for ws in $(registry_names 2>/dev/null); do
+    [ -n "$first" ] || first="$ws"
+    wsdir="$(registry_path "$ws")" && [ -n "$wsdir" ] || continue
+    wsdir="$(readlink -f "$wsdir" 2>/dev/null || printf '%s' "$wsdir")"
+    case "$dir" in "$wsdir"|"$wsdir"/*) ;; *) continue ;; esac
+    rel="${dir#"$wsdir"}"; rel="${rel#/}"; repo=""; gitdir=""
+    case "$rel" in
+      repos/*) repo="${rel#repos/}"; repo="${repo%%/*}" ;;
+      products/*) p="${rel#products/}"; p="${p%%/*}"
+        ws_product_names "$wsdir" 2>/dev/null | grep -qxF -- "$p" && { printf '%s %s-orch\n' "$ws" "$p"; return 0; } ;;
+      .cel/solo/?*) p="${rel#.cel/solo/}"; rest=""
+        case "$p" in */*) rest="${p#*/}"; rest="${rest%%/*}"; p="${p%%/*}" ;; esac
+        if ws_product_names "$wsdir" 2>/dev/null | grep -qxF -- "$p"; then
+          case "$rest" in lane-?*) printf '%s %s\n' "$ws" "$(cel_alias_norm "$p/${rest#lane-}")"; return 0 ;; esac
+          [ -z "$rest" ] || gitdir="$(sed -n 's/^gitdir: //p' "$wsdir/.cel/solo/$p/$rest/.git" 2>/dev/null)"
+          case "$gitdir" in "$wsdir"/repos/*/.git/worktrees/*) repo="${gitdir#"$wsdir"/repos/}"; repo="${repo%%/*}" ;; esac
+          ws_repo_names "$wsdir" 2>/dev/null | grep -qxF -- "${repo:-/}" || { printf '%s %s-orch\n' "$ws" "$p"; return 0; }
+        fi ;;
+    esac
+    if [ -n "$repo" ] && ws_repo_names "$wsdir" 2>/dev/null | grep -qxF -- "$repo"; then
+      printf '%s %s\n' "$ws" "$(ws_repo_pr_owner "$wsdir" "$repo")"; return 0
+    fi
+    printf '%s root\n' "$ws"; return 0
   done
-  [ -n "$delivered$failed" ] || return 0
-  if [ -n "$delivered" ]; then
-    tmp="$(mktemp "$state_file.XXXXXX")" || return 0
-    { [ -z "$sent" ] || printf '%s\n' "$sent"; printf '%s' "$delivered"; } | sed "s/^/$today /" > "$tmp" \
-      && mv -f "$tmp" "$state_file" || rm -f "$tmp"
+  [ -z "$first" ] || printf '%s root\n' "$first"
+}
+
+# A server's identity, which drifts with nothing a tick sees: a unit by its
+# name; a bare pid by its directory and command name - never the pid, so a dev
+# server restarted in the same directory is the same server.
+_SERVE_UNLEDGERED_JQ='
+  def comm: [(.command // "") | splits(" +") | select(. != "")] | (.[0] // "?") | split("/") | last;
+  def ident: . as $r | ($r.worktree // "") as $d
+    | (if ($r.unit // "") != "" then {key: ("unit:" + $r.unit), name: ($r.unit + (if $d != "" then " in " + $d else "" end))}
+       else ($r | comm) as $c | {key: ("dir:" + $d + " " + $c), name: ($c + " in " + (if $d == "" then "?" else $d end))} end)
+    | . + {dir: $d, line: (.name + " (" + (if ($r.pid // 0) > 0 then "pid \($r.pid), " else "" end)
+                           + "\($r.memory_mb // 0)MB, \($r.age_seconds // 0)s)")};
+  ($rows | map(ident)) as $cur
+  | (reduce $cur[] as $s ({}; if has($s.key) then . else . + {($s.key): $s} end)) as $now
+  | {n: ($cur | length), all: ($cur | map(.line)), now: $now,
+     new: (reduce $cur[] as $s ([]; if $prev[$s.key] != null or any(.[]; .key == $s.key) then . else . + [$s] end)),
+     gone: [$prev | to_entries[] | select($now[.key] == null) | {key, name: .value.name}]}'
+
+# ONCE PER CHANGE OF THE SET. Memory and age differ every tick, so a report of
+# them is a report every tick; what root needs is which servers came and went.
+# The state file holds the set last reported (key -> name, and the owner still
+# owed its new line). A change - a server new since then, or one gone - is one
+# message to the first workspace's root, as the orphan line goes: what is new,
+# what is gone, and the full current list. An unchanged set says nothing, and
+# a server that goes and comes back is new again. Each new server's line also
+# goes to the agent whose directory it runs in (_serve_dir_owner), one message
+# per agent; when that is root, the summary already told it. A send that fails
+# is not a report: root's leaves the state as it was, so the change is offered
+# again next tick, and an owner's stays owed until it arrives.
+_serve_unledgered_report() {
+  local rows state_file prev plan n new gone all root_ws msg owners='{}' next key dir owner item mbox tmp
+  rows="$(serve_adopt_json 2>/dev/null)" || return 0
+  state_file="$(_serve_state)/unledgered-reported.json"
+  prev="$(jq -ce 'objects' "$state_file" 2>/dev/null)" || prev='{}'
+  plan="$(jq -cn --argjson rows "$rows" --argjson prev "$prev" "$_SERVE_UNLEDGERED_JQ")" || return 0
+  new="$(jq -r '.new | map(.line) | join("; ")' <<<"$plan")"
+  gone="$(jq -r '.gone | map(.name) | join("; ")' <<<"$plan")"
+  next="$prev"
+  if [ -n "$new$gone" ]; then
+    root_ws="$(registry_names 2>/dev/null | head -n1)"
+    [ -n "$root_ws" ] || return 0
+    n="$(jq -r '.n' <<<"$plan")"; all="$(jq -r '.all | join("; ")' <<<"$plan")"
+    msg="steward: unledgered preview/dev servers changed.${new:+ New: $new.}${gone:+ Gone: $gone.} Now $n${all:+, biggest first: $all}. Review with 'cel serve adopt'; nothing unledgered was stopped."
+    c_warn "$msg"
+    if ! cmd_inbox send root "$msg" --from steward --workspace "$root_ws" --kind status --fp unledgered-servers >/dev/null 2>&1; then
+      c_warn "unledgered-server change not delivered to root ($root_ws) - retried next tick"
+      return 0
+    fi
+    while IFS=$'\t' read -r key dir; do
+      [ -n "$key" ] || continue
+      owner="$(_serve_dir_owner "$dir")"
+      [ -n "$owner" ] && [ "$owner" != "$root_ws root" ] || continue
+      owners="$(jq -c --arg k "$key" --arg o "$owner" '. + {($k): $o}' <<<"$owners")"
+    done < <(jq -r '.new[] | [.key, .dir] | @tsv' <<<"$plan")
+    next="$(jq -c --argjson plan "$plan" --argjson owners "$owners" '
+      with_entries(select($plan.now[.key] != null))
+      + ($plan.new | map({(.key): ({name} + (if $owners[.key] then {owed: $owners[.key]} else {} end))}) | add // {})' <<<"$prev")"
   fi
-  c_warn "$msg"
-  [ -z "$failed" ] || c_warn "unledgered-server report not delivered to:$failed - retried next tick"
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    owner="$(jq -r '.owner' <<<"$item")"; mbox="${owner#* }"
+    msg="steward: new unledgered preview/dev server(s) in your directory: $(jq -r '.lines' <<<"$item"). Review with 'cel serve adopt'; nothing unledgered was stopped."
+    if cmd_inbox send "$mbox" "$msg" --from steward --workspace "${owner%% *}" --kind status --fp unledgered-servers >/dev/null 2>&1; then
+      next="$(jq -c --argjson ks "$(jq -c '.keys' <<<"$item")" 'reduce $ks[] as $k (.; .[$k] |= del(.owed))' <<<"$next")"
+    else
+      c_warn "unledgered-server note not delivered to $mbox (${owner%% *}) - retried next tick"
+    fi
+  done < <(jq -c --argjson plan "$plan" '[to_entries[] | select(.value.owed and $plan.now[.key]) | {owner: .value.owed, key, line: $plan.now[.key].line}]
+    | group_by(.owner)[] | {owner: .[0].owner, keys: map(.key), lines: (map(.line) | join("; "))}' <<<"$next")
+  [ "$next" != "$prev" ] || return 0
+  mkdir -p "$(_serve_state)" && tmp="$(mktemp "$state_file.XXXXXX")" || return 0
+  printf '%s\n' "$next" > "$tmp" && mv -f "$tmp" "$state_file" || rm -f "$tmp"
 }
 
 
