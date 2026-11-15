@@ -1611,7 +1611,30 @@ _ws_gh_acct() { # <user>
 }
 test_launch_env_without_github_block_is_unchanged() {
   _ws
-  assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env solo "$T" /r.md)" "env CEL_ROLE=solo CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md "
+  assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env solo "$T" /r.md)" "env CEL_ROLE=solo CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md $(_run_launch_path) "
+  rm -rf "$T"
+}
+# THE AGENT'S PATH IS THE PLANE'S WHOEVER LAUNCHES IT (2026-11-16: the steward,
+# a systemd unit that never read the owner's rc, resumed agents with no
+# $CEL_ROOT/bin and `cel` was not found). The launch line a Herdr pane types,
+# run by a shell whose PATH lacks the plane's directories and repeats others:
+# the runtime starts with $CEL_ROOT/bin first, every directory `cel shellenv`
+# adds, the caller's own after them in order, and each once.
+test_launch_line_puts_the_plane_on_path_first_whatever_the_callers_path() {
+  _ws
+  mkdir -p "$T/a" "$T/b"
+  local got want d dup
+  got="$(PATH="$T/a:/usr/bin:$T/b:/bin:$T/a" /bin/bash -c "$(_run_launch_env solo "$T" /r.md)"' /bin/bash -c '"'"'printf %s "$PATH"'"'")"
+  assert_eq "${got%%:*}" "$CEL_ROOT/bin"
+  # every directory a login shell's `cel shellenv` puts on PATH (from /, in no
+  # workspace, so its `cel ws env` hook adds nothing)
+  want="$(cd / && PATH=/usr/bin:/bin /bin/bash -c 'eval "$1"; printf %s "$PATH"' _ "$("$CEL_ROOT/bin/cel" shellenv)")"
+  for d in ${want//:/ } "$HOME/.local/bin"; do
+    case ":$got:" in *":$d:"*) ;; *) echo "missing $d from the agent's PATH: $got"; rm -rf "$T"; return 1 ;; esac
+  done
+  assert_contains ":$got:" ":$T/a:/usr/bin:$T/b:/bin:"
+  dup="$(tr : '\n' <<<"$got" | sort | uniq -d)"
+  [ -z "$dup" ] || { echo "duplicated on the agent's PATH: $dup"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 test_every_role_launch_carries_the_token_substitution_not_the_token() {
@@ -2479,9 +2502,11 @@ done
 SH
   chmod +x "$T/bin/claude"
   _run_mark_launch() { printf '%s' "$2" > "$T/prefix"; }
+  # The fake by its path: the launch line puts ~/.local/bin ahead of this
+  # test's PATH, where the box's real claude would answer to the bare name.
   _run_agent_start() {
     shift 3
-    ( cd "$T/.cel/solo/bundle/lane-ui" && eval "$(cat "$T/prefix") claude \"\$@\"" )
+    ( cd "$T/.cel/solo/bundle/lane-ui" && eval "$(cat "$T/prefix") \"\$T/bin/claude\" \"\$@\"" )
   }
   (cd "$T" && cmd_run solo --product bundle --lane ui) >/dev/null 2>&1
   local out; out="$(cat "$FAKE_CLAUDE_OUT" 2>/dev/null)"

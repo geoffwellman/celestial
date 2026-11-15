@@ -236,6 +236,29 @@ _run_reviewer_git_env() { # -> `env -u ... K=V ...` for the end of a reviewer's 
   printf '%s GIT_PAGER=cat PAGER=cat GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=explicit GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false GIT_CONFIG_KEY_2=core.pager GIT_CONFIG_VALUE_2=cat' "$out"
 }
 
+# THE AGENT'S PATH IS THE PLANE'S, whoever launched it. An agent runs `cel`
+# and the tools in ~/.local/bin by bare name. A login shell finds them because
+# the owner's rc evaluates `cel shellenv`; a launch gets its caller's PATH
+# instead (a Rex launch script exports it, a Herdr pane has its own shell's),
+# and the steward is a systemd user unit whose shell never reads that rc. On
+# 2026-11-16 it resumed every Rex agent after the managed upgrade without
+# $CEL_ROOT/bin: `cel: command not found` in all of them. So every launch line
+# (_run_launch_env) runs this step after its K=V words: in the pane or the Rex
+# script, where the runtime starts, it puts the directories `cel shellenv`
+# adds first - $CEL_ROOT/bin leading - then the PATH the runtime would
+# otherwise have had, in order, each directory once, and execs the rest of the
+# line under it. Nothing else of the caller's environment is taken or dropped.
+# No single quote inside: the program is one single-quoted word in the pane.
+_run_launch_path_dirs() { # -> the directories, colon-separated, first first
+  local dirs="$CEL_ROOT/bin:$CEL_ROOT/core/skills/linear/bin"
+  [ ! -d "$HOME/.local/share/mise/shims" ] || dirs="$dirs:$HOME/.local/share/mise/shims"
+  printf '%s:%s/.local/bin' "$dirs" "$HOME"
+}
+_run_launch_path() { # -> `/bin/bash -c '<prepend>' cel-launch-path <dirs>` for an env prefix
+  printf "/bin/bash -c 'set -f; IFS=:; p=; for d in \$1 \$PATH; do [ -n \"\$d\" ] || continue; case :\$p: in *:\"\$d\":*) ;; *) p=\$p\${p:+:}\$d ;; esac; done; export PATH=\"\$p\"; shift; exec \"\$@\"' cel-launch-path %q" \
+    "$(_run_launch_path_dirs)"
+}
+
 # The one credential a direct (non-gateway) profile authenticates with: its
 # model's provider `key_env` (agents.yaml providers). Nothing for a gateway
 # route, a provider signed in through its CLI, or a model naming no provider
@@ -289,6 +312,7 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
     out="$(opencode_launch_guard "$CEL_OPENCODE_CONFIG_FILE")$out $(opencode_launch_env)"
     [ "${session_backend:-herdr}" = rex ] || oc_cmd="$(opencode_launch_command)"
   fi
+  out="$out $(_run_launch_path)"
   case "$role" in
     reviewer)
       # shellcheck disable=SC2086  # $sets is a word list on purpose
