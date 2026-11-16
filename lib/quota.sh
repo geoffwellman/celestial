@@ -182,6 +182,69 @@ _sub_cache_locked() { # <cmd...>
   return "$rc"
 }
 
+# A WINDOW WHOSE RESET HAS PASSED HAS NO NUMBER (AH-261116). A reading is
+# about one window, and once that window's `resets_at` is behind us the
+# reading describes a window that is over: the new one started at nothing and
+# nobody has read it. So the window keeps its name and scope, loses its number
+# and its reset, and carries `reset: true` - "reset, no fresh reading" - until
+# a fresh read replaces it. For anything that alerts it is 0%: never over a
+# threshold, never at risk, never a veto. For anything that draws it, it is
+# unknown, never the old number.
+#
+# THIS IS THE ONE RULE. `cel quota`, `cel fleet`, the steward and the
+# dashboard's feed all read subscription rows through `sub_row_now`, and the
+# pace projection reads resets through `sub_epoch`. The steward once quoted
+# "97% now, ~97% at reset 02:09:59Z" four hours after that reset because its
+# own copy of the check could read `...T02:09:59Z` and not Anthropic's
+# `...T02:09:59.995970+00:00`; one reader of the timestamp means one answer.
+#
+# `sub_epoch`: an ISO-8601 time - fraction and offset optional, `Z` or
+# `+hh:mm` - or epoch seconds or milliseconds, as epoch seconds; null when it
+# is none of those (no reset known, which is not a reset).
+_SUB_RESET_JQ='
+def sub_epoch:
+  if type == "number" then (if . > 100000000000 then . / 1000 else . end)
+  elif type == "string" then
+    ((capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?$")
+      | (.d + "Z" | fromdateiso8601)
+        - (if (.z // "Z") == "Z" then 0
+           else (.z | capture("^(?<s>[+-])(?<h>[0-9]{2}):?(?<m>[0-9]{2})$")
+                 | ((.h | tonumber) * 3600 + (.m | tonumber) * 60) * (if .s == "-" then -1 else 1 end)) end))? // null)
+  else null end;
+def sub_window_now:
+  if type == "object" and .reset != true
+     and (((.resets_at // null) | sub_epoch) as $r | $r != null and $r <= now)
+  then . + {used_pct: null, resets_at: null, reset: true} else . end;
+def sub_row_now:
+  if type == "object" and ((.windows // null) | type) == "array"
+  then .windows |= map(sub_window_now) else . end;
+'
+
+# A FAILED READ DOES NOT ERASE A RESET. When a fresh read answers nothing - the
+# provider is down, rate-limited, the token stale - the row it writes has no
+# windows, and the reading it replaces is the only record that a window was
+# running at all. Every window of that reading which has reset since stays on
+# the row as reset, so the row says "5h reset, no fresh reading" beside its
+# fault rather than nothing. A window still running is NOT carried: its last
+# number is not a reading of now. Reads the new row on stdin.
+_sub_carry_resets() { # <cache-file>
+  local doc; doc="$(cat)"
+  if [ -f "$1" ]; then
+    jq -c --slurpfile o "$1" "$_SUB_RESET_JQ"'
+      if type == "object" and ((.windows // []) | length) == 0
+      then .windows = [($o[0].windows // [])[]? | sub_window_now | select(type == "object" and .reset == true)]
+      else . end' <<< "$doc" 2>/dev/null && return 0
+  fi
+  printf '%s\n' "$doc"
+}
+
+# One row as it stands now (see _SUB_RESET_JQ); a document jq cannot read is
+# passed through untouched, as the cache always handed it on.
+sub_row_now() {
+  local doc; doc="$(cat)"
+  jq -c "$_SUB_RESET_JQ"'sub_row_now' <<< "$doc" 2>/dev/null || printf '%s\n' "$doc"
+}
+
 # pi's stored OAuth token answers Anthropic's usage endpoint with both windows.
 _SUB_ANTHROPIC_URL="${CEL_SUB_ANTHROPIC_URL:-https://api.anthropic.com/api/oauth/usage}"
 # Read out of the Codex binary (0.153.2) rather than guessed: the CLI's own
@@ -673,7 +736,9 @@ _subscription_accounts() {
 }
 
 # {provider, account, label, source, windows: [{name, used_pct, resets_at}],
-#  extra: {state, reason}} for one account, cached 60 s.
+#  extra: {state, reason}} for one account, cached 60 s, and read as it stands
+#  now: a window whose reset has passed is `reset: true` with no number
+#  (_SUB_RESET_JQ), whether it came out of the cache or a read.
 #
 # A FAILURE TO ASK IS A ROW, NOT A SILENCE. An account missing from the cache
 # is missing from `cel fleet` and the console while the dashboard may still
@@ -687,7 +752,7 @@ subscription_usage() { # <provider> <token> [account] [label]
   local cache; cache="$(_sub_cache_file "$p" "$acct")"
   if [ -f "$cache" ]; then
     local age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
-    if [ "$age" -lt "$_SUB_TTL" ]; then cat "$cache"; return 0; fi
+    if [ "$age" -lt "$_SUB_TTL" ]; then sub_row_now < "$cache"; return 0; fi
   fi
 
   local resp="" doc=""
@@ -750,7 +815,8 @@ subscription_usage() { # <provider> <token> [account] [label]
     doc="$(jq -nc --arg p "$p" --arg a "$acct" --arg l "$label" \
       '{provider: $p, account: $a, label: $l, source: "direct", windows: [],
         extra: {state: "unreadable",
-                reason: "the usage endpoint could not be read - not signed in here, or it is down"}}')"
+                reason: "the usage endpoint could not be read - not signed in here, or it is down"}}' \
+      | _sub_carry_resets "$cache")"
   fi
   # 0700 ON THE DIRECTORY, 0600 ON THE FILE. These answers are derived from a
   # credentialed request against the owner's own accounts: they carry no token,
@@ -759,7 +825,7 @@ subscription_usage() { # <provider> <token> [account] [label]
   # A normal umask of 022 would leave them world-readable, so the mode is set
   # (by _sub_cache_put) rather than inherited.
   _sub_cache_locked _sub_cache_put "$cache" "$doc" || true
-  printf '%s' "$doc"
+  printf '%s' "$doc" | sub_row_now
 }
 
 # THE LIST. One JSON array of subscription rows, and the only answer anything
@@ -825,6 +891,8 @@ subscription_list() { # [--cached]
     omp_keys="$omp_keys$vk "
     oa="$(printf '%s' "$orow" | jq -r '.account')"
     f="$(_sub_cache_file "$op" "$oa")"
+    # a row with nothing read keeps the windows that reset since the last one
+    case "$orow" in *'"windows":[]'*) orow="$(printf '%s' "$orow" | _sub_carry_resets "$f")" ;; esac
     pub_f+=("$f"); pub_d+=("$orow")
     rows="$rows$orow
 "
@@ -867,6 +935,7 @@ subscription_list() { # [--cached]
     vp="$(printf '%s' "$vrow" | jq -r '.provider')"
     va="$(printf '%s' "$vrow" | jq -r '.account')"
     f="$(_sub_cache_file "$vp" "$va")"
+    case "$vrow" in *'"windows":[]'*) vrow="$(printf '%s' "$vrow" | _sub_carry_resets "$f")" ;; esac
     pub_f+=("$f"); pub_d+=("$vrow")
     rows="$rows$vrow
 "
@@ -903,7 +972,9 @@ _sub_publish_set() { # <dir> <keep>
 # two logins, and stay two rows.
 #
 # Reads JSON objects on stdin, one per line; prints the array, ordered direct
-# before gateway so the cached path and the live path draw the same list.
+# before gateway so the cached path and the live path draw the same list, and
+# every row as it stands now (_SUB_RESET_JQ) - the list is the one door every
+# surface reads rows through.
 # provider|email - the identity both readers share. omp names a Claude
 # account by its uuid and the vault (whose files carry no uuid on this box)
 # by its email, so the email is the only field both have. No spaces, so the
@@ -913,8 +984,8 @@ _sub_key() { # <row-json>
 }
 
 _sub_fold() {
-  jq -sc '
-    [.[] | select(type == "object")]
+  jq -sc "$_SUB_RESET_JQ"'
+    [.[] | select(type == "object") | sub_row_now]
     | sort_by((if .source == "gateway" then 1 else 0 end), .provider, .account)
     | (map(select(.source != "gateway" and .provider == "claude"
                   and (.account == "pi" or .account == "claude-code")))) as $c
@@ -1026,19 +1097,28 @@ sub_bar() { # <pct> <width>
     printf "%s", s }'
 }
 
-# `5h 16% (resets 19:00)   7d 41% (resets Sat 05:00)   7d Fable 75%`
+# `5h 16% (resets 19:00)   7d 41% (resets Sat 05:00)   7d Fable 75%`, and a
+# window whose reset has passed with no reading since: `5h reset, no fresh
+# reading` - never its old number.
 _sub_line() { # <usage-json> [bar-width]
   local out="" n p r s bw="${2:-0}"
+  # `-` for an empty field: a tab is IFS whitespace, so two in a row would
+  # collapse and shift the scope into the reset's place
   while IFS=$'\t' read -r n p r s; do
     [ -n "$n" ] || continue
+    [ "$r" = - ] && r=""
+    [ "$s" = - ] && s=""
     # A SCOPE IS PART OF THE WINDOW'S NAME, not a footnote: two 7d windows on
     # one account are told apart by the model they are scoped to.
     [ -n "$s" ] && n="$n $s"
+    if [ "$p" = reset ]; then out="$out$n reset, no fresh reading   "; continue; fi
     out="$out$(printf '%s%s %s%%%s   ' "$n" \
       "$([ "$bw" -ge 6 ] 2>/dev/null && printf ' %s' "$(sub_bar "$p" "$bw")" || true)" \
       "$(printf '%.0f' "$p")" \
       "$([ -n "$r" ] && printf ' (resets %s)' "$(sub_reset_human "$r")" || true)")"
-  done < <(printf '%s' "$1" | jq -r '.windows[]? | [.name, (.used_pct // 0), (.resets_at // ""), (.scope // "")] | @tsv')
+  done < <(printf '%s' "$1" | sub_row_now | jq -r '.windows[]?
+    | [.name, (if .reset == true then "reset" else (.used_pct // 0) end),
+       ((.resets_at // "") | if . == "" then "-" else tostring end), ((.scope // "") | if . == "" then "-" else . end)] | @tsv')
   local state reason
   IFS=$'\t' read -r state reason <<< "$(printf '%s' "$1" | jq -r '[(.extra.state // ""), (.extra.reason // "")] | @tsv')"
   [ "$state" = disabled ] && out="${out}extra: ${reason//_/ }"
@@ -1148,25 +1228,25 @@ quota_orch_pool() {
 # A WINDOW WHOSE RESET HAS PASSED IS NOT AT RISK. The list is usually the
 # cached one, and a cache file is only rewritten when someone asks the
 # providers again, so its number can describe a window that is already over.
-# It is skipped, so a past reset is never quoted and the item comes down
-# until a fresh read.
+# Every row goes through sub_row_now first (the one rule, _SUB_RESET_JQ), so
+# such a window has no number and is never quoted, and the reset each entry
+# names comes with its epoch (`reset_epoch`) for the steward to keep.
 quota_at_risk() {
-  jq -c '
+  jq -c "$_SUB_RESET_JQ"'
     def len: if . == "5h" then 18000 elif . == "1d" or . == "daily" then 86400
              elif . == "7d" or . == "weekly" then 604800 elif . == "monthly" or . == "30d" then 2592000
              else (capture("^(?<n>[0-9]+)(?<u>[hd])$") | (.n | tonumber) * (if .u == "h" then 3600 else 86400 end))? // null end;
     now as $now
-    | [ .[]? | select(type == "object") | . as $s
-        | (.windows // [])[] | select(type == "object")
+    | [ .[]? | select(type == "object") | sub_row_now | . as $s
+        | (.windows // [])[] | select(type == "object" and .reset != true)
         | (.used_pct // 0) as $u
         | ((.name // "") | len) as $l
-        | ((.resets_at // null) | if . == null then null else (sub("\\.[0-9]+"; "") | fromdateiso8601? // null) end) as $r
-        | select($r == null or $r > $now)
+        | ((.resets_at // null) | sub_epoch) as $r
         | (if $l != null and $r != null then (($l - ($r - $now)) / $l) else null end) as $f
         | (if $f != null and $f > 0.05 and $f <= 1 then ([999, ($u / $f)] | min | round) else ($u | round) end) as $p
         | select($p >= 100 or $u >= 95)
         | {provider: $s.provider, who: ($s.label // $s.account), window: .name, scope: .scope,
-           used_pct: ($u | round), projected_pct: $p, resets: .resets_at} ]' 2>/dev/null || printf '[]'
+           used_pct: ($u | round), projected_pct: $p, resets: .resets_at, reset_epoch: ($r | if . == null then null else floor end)} ]' 2>/dev/null || printf '[]'
 }
 
 # The providers `cel quota` reports a balance for: one named, or every

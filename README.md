@@ -2004,12 +2004,16 @@ balances: one row per signed-in account, each window with its percentage and
 the local time it resets, and whether extra usage is still a path. A token is
 stable id. The readings are cached for 60 seconds, so `cel fleet --json` and
 the dashboard's Subscriptions card read the cache rather than calling a
-provider on every draw.
+provider on every draw. A window whose reset time has passed shows as
+`reset, no fresh reading` until a fresh read — never its old percentage —
+everywhere these numbers appear, including after a read that failed.
 
 The steward checks the windows once a tick and raises **one rolled-up item per
 account** — a status over `CEL_SUB_WARN_PCT` (80), a blocker at 100 — and
-takes it down again when the window drops. A profile routed at a spent 5h
-window is vetoed before its pane spawns, the same way a dry balance is.
+takes it down again when the window drops, or once the reset it quoted has
+passed; a fresh reading of the new window over the line raises it again at
+once. A profile routed at a spent 5h window is vetoed before its pane spawns,
+the same way a dry balance is.
 
 ## Gateway — several subscriptions behind one door
 

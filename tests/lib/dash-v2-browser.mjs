@@ -292,6 +292,8 @@ const main = async () => {
       out.bars = await evaluate(`document.querySelectorAll('${q('.ubar:not(.ulg)')}').length`);
       out.ticks = await evaluate(`document.querySelectorAll('${q('.ubar s')}').length`);
       out.amber = await evaluate(`document.querySelectorAll('${q('.ubar i.warn')}').length`);
+      // a window whose reset passed: its label says so, its bar has no fill
+      out.resetWins = await evaluate(`[].slice.call(document.querySelectorAll('${q('.uwin')}')).filter(function(e){return /reset, no fresh reading/.test(e.textContent)}).map(function(e){return e.querySelectorAll('.ubar i').length}).join(',')`);
       out.tags = await evaluate(`[].slice.call(document.querySelectorAll('${q('.uacct .utag')}')).map(function(e){return e.textContent}).join(',')`);
       out.money = await evaluate(`[].slice.call(document.querySelectorAll('${q('.umoney b')}')).map(function(e){return e.textContent}).join('|')`);
       await evaluate(`document.querySelector('#grid .w[data-id=usage] .ex').click()`);

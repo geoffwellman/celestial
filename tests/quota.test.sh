@@ -106,11 +106,13 @@ _quota_stub_stop() {
   trap - EXIT INT TERM
 }
 
-# The Anthropic OAuth usage shape, as the endpoint answers it.
+# The Anthropic OAuth usage shape, as the endpoint answers it. Its resets -
+# and every fixture reading's here - are far ahead: a reading whose reset has
+# passed is a window that is over, and reads as reset with no number.
 _claude_body() { # [five-hour-pct] [seven-day-pct]
   jq -nc --argjson a "${1:-16.0}" --argjson b "${2:-41.0}" \
-    '{five_hour: {utilization: $a, resets_at: "2026-09-18T09:00:00Z"},
-      seven_day: {utilization: $b, resets_at: "2026-09-19T19:00:00Z"},
+    '{five_hour: {utilization: $a, resets_at: "2099-09-18T09:00:00Z"},
+      seven_day: {utilization: $b, resets_at: "2099-09-19T19:00:00Z"},
       extra_usage: {disabled_reason: "out_of_credits"},
       limits: []}'
 }
@@ -264,6 +266,104 @@ test_subscription_usage_caches_so_two_calls_ask_once() {
   _quota_teardown
 }
 
+# --- a window whose reset has passed (AH-261116) ----------------------------
+# The steward said "claude 5h: 97% now, ~97% at reset 2026-11-16T02:09:59Z"
+# four hours after that reset. Anthropic spells a reset
+# `2026-11-16T02:09:59.995970+00:00`; the past-reset check stripped the
+# fraction and gave jq's fromdateiso8601 an offset it cannot read, so every
+# such reading was "no reset known" - never past, and never projected either.
+# A window whose reset has passed has NO NUMBER: the reading describes a
+# window that is over. Every surface reads it through one rule.
+_reset_iso() { # <seconds-from-now> -> the provider's own spelling
+  date -u -d "@$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%S.995970+00:00
+}
+
+test_a_window_whose_reset_passed_reads_as_reset_with_no_number() {
+  _quota_setup
+  . "$CEL_ROOT/lib/quota.sh"
+  local f n; f="$(_sub_cache_file claude pi)"; n="$(_reset_iso 7200)"; mkdir -p "$CEL_CACHE"
+  jq -nc --arg p "$(_reset_iso -3600)" --arg q "$(_reset_iso -60)" --arg n "$n" \
+    '{provider: "claude", account: "pi", label: "pi", source: "direct",
+      windows: [{name: "5h", scope: null, used_pct: 97, resets_at: $p},
+                {name: "7d", scope: null, used_pct: 96, resets_at: $q},
+                {name: "7d", scope: "Fable", used_pct: 40, resets_at: $n}],
+      extra: {state: "enabled", reason: ""}}' > "$f"
+  # inside the cache's sixty seconds nothing is read, and still no old number
+  local row; row="$(subscription_usage claude "$PI_TOKEN" pi)"
+  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, (.reset // false), .used_pct]]')" \
+    '[["5h",true,null],["7d",true,null],["7d",false,40]]'
+  # the cached list - the steward's and `cel fleet`'s path - reads it the same
+  assert_eq "$(subscription_list --cached | jq -c '[.[0].windows[] | [.name, (.reset // false), .used_pct]]')" \
+    '[["5h",true,null],["7d",true,null],["7d",false,40]]'
+  assert_eq "$(_sub_line "$row")" "5h reset, no fresh reading   7d reset, no fresh reading   7d Fable 40% (resets $(sub_reset_human "$n"))   "
+  _quota_teardown
+}
+
+# THE FRESH READ FAILS - the provider is down or rate-limited. The reading it
+# replaces is not quoted for a window that has reset since: that window is
+# still listed, as reset with no fresh reading, so the row says what changed.
+# A window still running is not carried: no reading is no number.
+test_a_failed_read_after_the_reset_says_reset_no_fresh_reading() {
+  _quota_setup
+  _quota_manifest_stub
+  mkdir -p "$T/bin"; printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/omp"; chmod +x "$T/bin/omp"
+  export PATH="$T/bin:$PATH" CEL_CPA_AUTH_DIR="$T/no-vault"
+  export CEL_SUB_ANTHROPIC_URL="http://127.0.0.1:1/api/oauth/usage"
+  export CEL_SUB_CODEX_URL="http://127.0.0.1:1/backend-api/codex-wham/usage"
+  . "$CEL_ROOT/lib/quota.sh"
+  local f; f="$(_sub_cache_file claude pi)"; mkdir -p "$CEL_CACHE"
+  jq -nc --arg p "$(_reset_iso -3600)" --arg n "$(_reset_iso 86400)" \
+    '{provider: "claude", account: "pi", label: "pi", source: "direct",
+      windows: [{name: "5h", scope: null, used_pct: 97, resets_at: $p},
+                {name: "7d", scope: null, used_pct: 48, resets_at: $n}],
+      extra: {state: "enabled", reason: ""}}' > "$f"
+  touch -d '-5 minutes' "$f"
+  local row; row="$(subscription_usage claude "$PI_TOKEN" pi)"
+  assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" unreadable
+  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, .reset, .used_pct]]')" '[["5h",true,null]]'
+  # cached that way, so the next read and the fleet path see the same row
+  assert_eq "$(jq -c '[.windows[] | [.name, .reset]]' "$f")" '[["5h",true]]'
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" '5h reset, no fresh reading'
+  case "$out" in *97%*) printf 'cel quota showed a reset window with its old number:\n%s\n' "$out" >&2; return 1;; esac
+  _quota_teardown
+}
+
+# The gateway's accounts take the same path: the incident's reading was one.
+test_a_gateway_account_that_cannot_be_read_still_says_its_window_reset() {
+  _quota_setup
+  _cpa_vault
+  mkdir -p "$T/empty"; export PATH="$T/empty:/usr/bin:/bin"
+  export CEL_SUB_ANTHROPIC_URL="http://127.0.0.1:1/api/oauth/usage"
+  export CEL_SUB_CODEX_URL="http://127.0.0.1:1/backend-api/codex-wham/usage"
+  . "$CEL_ROOT/lib/quota.sh"
+  mkdir -p "$CEL_CACHE"
+  jq -nc --arg p "$(_reset_iso -3600)" --arg n "$(_reset_iso 86400)" \
+    '{provider: "claude", account: "ant-one", label: "one@example.invalid", source: "cliproxy",
+      windows: [{name: "5h", scope: null, used_pct: 97, resets_at: $p},
+                {name: "7d", scope: null, used_pct: 48, resets_at: $n}],
+      extra: {state: "enabled", reason: ""}}' > "$(_sub_cache_file claude ant-one)"
+  local row; row="$(subscription_list | jq -c '.[] | select(.account == "ant-one")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" unreadable
+  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, .reset, .used_pct]]')" '[["5h",true,null]]'
+  assert_eq "$(subscription_list --cached | jq -c '.[] | select(.account == "ant-one") | [.windows[] | [.name, .reset]]')" '[["5h",true]]'
+  _quota_teardown
+}
+
+# The projection reads the same spelling: 85% with an hour of five left is on
+# pace for ~106% - and was reported as 85%, "no reset known", not at risk.
+test_quota_at_risk_reads_the_providers_reset_spelling() {
+  . "$CEL_ROOT/lib/quota.sh"
+  local subs
+  subs="$(jq -nc --arg r "$(_reset_iso 3600)" \
+    '[{provider: "claude", label: "ana", windows: [{name: "5h", used_pct: 85, resets_at: $r}]}]')"
+  assert_eq "$(printf '%s' "$subs" | quota_at_risk | jq -c '[.[] | .projected_pct >= 100]')" '[true]'
+  subs="$(jq -nc --arg r "$(_reset_iso -3600)" \
+    '[{provider: "claude", label: "ana", windows: [{name: "5h", used_pct: 97, resets_at: $r},
+                                                   {name: "7d", used_pct: 99, resets_at: $r}]}]')"
+  assert_eq "$(printf '%s' "$subs" | quota_at_risk | jq length)" 0
+}
+
 # The cached answer carries no token, but it does say when each account is
 # spent - which is precisely what you would want to know before deciding a box
 # was worth attacking. A normal umask leaves a new file world-readable, so the
@@ -362,7 +462,8 @@ test_the_cached_list_is_the_same_list_as_the_live_one() {
 # three Anthropic accounts (each carrying a Fable-scoped weekly window), two
 # ChatGPT accounts and opencode-go - plus one `null` limit added to the first
 # Anthropic report, because a window that answers null must be skipped rather
-# than drawn at 0%.
+# than drawn at 0%. Its `resetsAt` values are moved ahead by one offset (order
+# kept): a reset already past reads as reset with no number.
 _omp_stub() {
   mkdir -p "$T/bin"
   cp "$(fixture omp-usage.json)" "$T/omp-usage.json"
@@ -681,18 +782,18 @@ EOF
 # account-wide one. Fable is not named anywhere in the reader: the scope is
 # read off the key, so the next scoped window appears without a code change.
 _cpa_claude_body() {
-  jq -nc '{five_hour: {utilization: 16, resets_at: "2026-09-18T09:00:00Z"},
-           seven_day: {utilization: 41, resets_at: "2026-09-19T19:00:00Z"},
-           seven_day_fable: {utilization: 31, resets_at: "2026-09-19T19:00:00Z"}}'
+  jq -nc '{five_hour: {utilization: 16, resets_at: "2099-09-18T09:00:00Z"},
+           seven_day: {utilization: 41, resets_at: "2099-09-19T19:00:00Z"},
+           seven_day_fable: {utilization: 31, resets_at: "2099-09-19T19:00:00Z"}}'
 }
 
 _cpa_opencode_body() {
   jq -nc '{limits: [
-    {label: "5 hours", window: {id: "5h", durationMs: 18000000, resetsAt: "2026-09-18T09:00:00Z"},
+    {label: "5 hours", window: {id: "5h", durationMs: 18000000, resetsAt: "2099-09-18T09:00:00Z"},
      amount: {used: 1, limit: 10, usedFraction: 0.1}},
-    {label: "7 days", window: {id: "7d", durationMs: 604800000, resetsAt: "2026-09-19T19:00:00Z"},
+    {label: "7 days", window: {id: "7d", durationMs: 604800000, resetsAt: "2099-09-19T19:00:00Z"},
      amount: {used: 5, limit: 10, usedFraction: 0.5}},
-    {label: "7 days (gadget)", window: {id: "7d", durationMs: 604800000, resetsAt: "2026-09-19T19:00:00Z"},
+    {label: "7 days (gadget)", window: {id: "7d", durationMs: 604800000, resetsAt: "2099-09-19T19:00:00Z"},
      amount: {used: 2, limit: 10, usedFraction: 0.2}}]}'
 }
 
@@ -1138,7 +1239,7 @@ test_the_claude_reader_maps_limits_and_ignores_codename_keys() {
 test_opencode_reads_its_real_auth_and_usage_shapes_beside_the_vault() {
   _quota_setup
   _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" \
-    '{"usage":{"rolling":{"status":"ok","percent":4,"resetsAt":"2026-09-18T09:00:40.089Z"},"weekly":{"status":"ok","percent":17,"resetsAt":"2026-09-21T00:00:00.000Z"},"monthly":{"status":"ok","percent":97,"resetsAt":"2026-09-30T04:41:25.000Z"}}}'
+    '{"usage":{"rolling":{"status":"ok","percent":4,"resetsAt":"2099-09-18T09:00:40.089Z"},"weekly":{"status":"ok","percent":17,"resetsAt":"2099-09-21T00:00:00.000Z"},"monthly":{"status":"ok","percent":97,"resetsAt":"2099-09-30T04:41:25.000Z"}}}'
   _cpa_vault_claude_only
   mkdir -p "$HOME/.local/share/opencode"
   jq -nc '{"opencode-go": {type: "api", key: "fixture-opencode-go-key"}}' > "$HOME/.local/share/opencode/auth.json"
