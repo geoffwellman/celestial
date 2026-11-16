@@ -1,0 +1,3 @@
+### Fixed
+- `cel serve stop <name>` clears a registration whose server is already gone instead of failing and leaving it forever: a pid that exited or whose number was reused (start time no longer matches), or a unit that no longer exists (or is inactive with no main pid), is removed without signalling anything, and the command says so. The owner-or-person check still runs first; a live matching pid or active unit is stopped as before.
+- The steward's serve sweep drops a non-permanent pid registration whose pid exited or was reused on its next tick, with one note to the owner, as it already did for permanent ones.
