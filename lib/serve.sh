@@ -516,16 +516,56 @@ _serve_not_a_preview() { # <pid> <command> [port]
   _serve_ignored "$cmd"
 }
 
+# A REGISTERED SERVER COVERS ITS DESCENDANTS. A server registered by pid (a
+# bun API that starts Vite, say) has children listening on their own ports;
+# they are that server's, not new unledgered ones. A candidate is covered when
+# its ancestor chain (ppid from /proc/<pid>/stat, at most 32 levels) reaches a
+# registered pid whose start time is the one its record holds - a pid number
+# reused by another process covers nothing. One pass over every candidate:
+# each process's verdict is remembered, so a shared ancestor is read once, and
+# all of it with builtins. (A registered unit covers whatever runs in its
+# cgroup: _serve_pid_in_ledgered_unit.) Prints the covered candidates' pids.
+_serve_ledgered_descendants() { # <pid:start...> ; candidate pids on stdin
+  local proc="${CEL_SERVE_PROC_ROOT:-/proc}" pid p line rest depth v
+  local -A start=() verdict=()
+  local -a f chain
+  for v in "$@"; do start["${v%%:*}"]="${v#*:}"; done
+  [ "${#start[@]}" -gt 0 ] || return 0
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    chain=(); v=0; depth=0
+    { IFS= read -r line < "$proc/$pid/stat"; } 2>/dev/null || line=''
+    rest="${line##*)}"; read -ra f <<<"$rest"; p="${f[1]:-}"
+    while [[ "$p" =~ ^[1-9][0-9]*$ ]] && [ "$p" != 1 ] && [ "$depth" -lt 32 ]; do
+      depth=$((depth + 1))
+      if [ -n "${verdict[$p]:-}" ]; then v="${verdict[$p]}"; break; fi
+      chain+=("$p")
+      line=''; { IFS= read -r line < "$proc/$p/stat"; } 2>/dev/null || true
+      [ -n "$line" ] || break
+      rest="${line##*)}"; read -ra f <<<"$rest"
+      if [ -n "${start[$p]:-}" ] && [ "${f[19]:-}" = "${start[$p]}" ]; then v=1; break; fi
+      p="${f[1]:-}"
+    done
+    for p in "${chain[@]}"; do verdict["$p"]="$v"; done
+    [ "$v" = 1 ] && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
 serve_adopt_json() {
-  local rows row pid unit id f kind
-  local -a ledger_units=()
-  local -A ledger_pids=() ledger_names=()
+  local rows row pid unit id f kind pstart
+  local -a ledger_units=() ledger_starts=()
+  local -A ledger_pids=() ledger_names=() covered=()
   for f in "$(_serve_state)"/*.json; do
     [ -f "$f" ] || continue
     kind="$(jq -r '.kind // "unit"' "$f" 2>/dev/null)"
     if [ "$kind" = pid ]; then
       pid="$(jq -r '.pid // 0' "$f" 2>/dev/null)"
-      [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ledger_pids["$pid"]=1
+      pstart="$(jq -r '.pid_start // ""' "$f" 2>/dev/null)"
+      if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        ledger_pids["$pid"]=1
+        [[ "$pstart" =~ ^[0-9]+$ ]] && ledger_starts+=("$pid:$pstart")
+      fi
     else
       unit="$(jq -r '.unit // ""' "$f" 2>/dev/null)"
       if [ -n "$unit" ]; then
@@ -536,10 +576,15 @@ serve_adopt_json() {
     fi
   done
   rows="$(_serve_adopt_rows | jq -s 'reverse | unique_by(if (.pid // 0) > 0 then "pid:\(.pid)" else "unit:\(.unit)" end)')"
+  if [ "${#ledger_starts[@]}" -gt 0 ]; then
+    while IFS= read -r pid; do covered["$pid"]=1; done \
+      < <(printf '%s' "$rows" | jq -r '.[] | .pid // empty' | _serve_ledgered_descendants "${ledger_starts[@]}")
+  fi
   while IFS= read -r row; do
     pid="$(jq -r '.pid // 0' <<<"$row")"
     if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
       [[ -n "${ledger_pids[$pid]:-}" ]] && continue
+      [[ -n "${covered[$pid]:-}" ]] && continue
       if [ "${#ledger_units[@]}" -gt 0 ] && _serve_pid_in_ledgered_unit "$pid" "${ledger_units[@]}"; then continue; fi
     fi
     # a unit row is already judged by its name (and the ignore list); a loose

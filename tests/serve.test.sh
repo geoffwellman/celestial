@@ -327,6 +327,52 @@ test_serve_agent_harness_browsers_are_not_unledgered_servers() {
   rm -rf "$t"
 }
 
+# A REGISTERED SERVER'S OWN CHILDREN ARE COVERED. A bun API registered by pid
+# (`cel serve adopt <pid>`) that starts Vite has a node child listening on its
+# own port; that child is the registered server's, not a new unledgered one.
+# Coverage is by the ancestor chain (/proc/<pid>/stat ppid) reaching the
+# registered pid with the start time the record holds: a pid number reused by
+# an unrelated process covers nothing. A process inside a registered unit's
+# cgroup is covered by the unit. An unrelated node server is still reported.
+test_serve_registered_servers_cover_their_descendants() {
+  local t out; t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_PROC_ROOT="$t/proc" CEL_SERVE_SYSTEMCTL="$t/systemctl"
+  export CEL_CONFIG_FILE="$t/config.yaml" CEL_SERVE_ADOPT_DATA='[]' CEL_SERVE_PROC_DATA=''
+  mkdir -p "$CEL_SERVE_STATE" "$CEL_SERVE_PROC_ROOT"
+  printf '{}\n' > "$CEL_CONFIG_FILE"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
+  local scope="/user.slice/user-1000.slice/user@1000.service/app.slice/app-term-%s.scope"
+  _serve_desc_proc() { # <pid> <ppid> <start> <port|-> <argv...> [cgroup via SERVE_CG]
+    local pid="$1" ppid="$2" start="$3" port="$4" d; shift 4; d="$CEL_SERVE_PROC_ROOT/$pid"
+    mkdir -p "$d"
+    printf '%s (x) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s 0 0\n' "$pid" "$ppid" "$start" > "$d/stat"
+    printf '%s\0' "$@" > "$d/cmdline"
+    # shellcheck disable=SC2059
+    if [ -n "${SERVE_CG:-}" ]; then printf '0::%s\n' "$SERVE_CG" > "$d/cgroup"; else printf "0::$scope\n" "$pid" > "$d/cgroup"; fi
+    [ "$port" = - ] || CEL_SERVE_PROC_DATA+="$pid"$'\t'"$port"$'\t4096\t60\t/w/app\t'"$*"$'\n'
+  }
+  _serve_desc_proc 4000 1 111 - bash
+  # the registered bun API, its Vite child on another port, and a grandchild
+  _serve_desc_proc 4001 4000 500 3000 bun run api.ts
+  _serve_desc_proc 4002 4001 510 5173 node node_modules/.bin/vite --port 5173
+  _serve_desc_proc 4003 4002 520 5174 node worker.js --port 5174
+  printf '{"name":"pid-4001","kind":"pid","pid":4001,"pid_start":"500","owner":"o","workspace":"w"}\n' > "$CEL_SERVE_STATE/pid-4001.json"
+  # a record whose pid was reused (start 600, now 700) covers nothing
+  _serve_desc_proc 4010 4000 700 - bun run old.ts
+  _serve_desc_proc 4011 4010 710 5180 node node_modules/.bin/vite --port 5180
+  printf '{"name":"pid-4010","kind":"pid","pid":4010,"pid_start":"600","owner":"o","workspace":"w"}\n' > "$CEL_SERVE_STATE/pid-4010.json"
+  # a child inside a registered unit's cgroup
+  printf '{"name":"cel-serve-web","kind":"unit","unit":"cel-serve-web","owner":"o","workspace":"w"}\n' > "$CEL_SERVE_STATE/cel-serve-web.json"
+  SERVE_CG="/user.slice/user-1000.slice/user@1000.service/app.slice/cel-serve-web.service" \
+    _serve_desc_proc 4020 1 800 5190 node node_modules/.bin/vite --port 5190
+  # an unrelated node server
+  _serve_desc_proc 4030 4000 900 8080 node server.js --port 8080
+  out="$(serve_adopt_json)"
+  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[4011,4030]'
+  unset CEL_SERVE_STATE CEL_SERVE_PROC_ROOT CEL_SERVE_SYSTEMCTL CEL_CONFIG_FILE CEL_SERVE_ADOPT_DATA CEL_SERVE_PROC_DATA
+  rm -rf "$t"
+}
+
 # A BUILD TOOL'S DAEMON IS NOT A PREVIEW. Every Gradle build leaves a
 # GradleDaemon (and a KotlinCompileDaemon, and worker processes) listening on
 # a random loopback port; it used to be reported as a new unledgered server and
