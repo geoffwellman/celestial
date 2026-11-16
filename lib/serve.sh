@@ -198,6 +198,25 @@ _serve_unit_state() { # <unit> -> present | gone | unknown
     *) printf unknown ;;
   esac
 }
+# Whether a unit is dead for good: not loaded at all, or loaded but inactive
+# (or failed) with no main pid. A user manager that cannot answer is not dead.
+_serve_unit_dead() { # <unit>
+  local id="${1%.service}.service" out line load='' active='' main=''
+  out="$(_serve_systemctl show "$id" -p LoadState -p ActiveState -p MainPID 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    case "$line" in LoadState=*) load="${line#*=}" ;; ActiveState=*) active="${line#*=}" ;; MainPID=*) main="${line#*=}" ;; esac
+  done <<<"$out"
+  [ "$load" = not-found ] && return 0
+  case "$active" in inactive|failed) [ -z "$main" ] || [ "$main" = 0 ] ;; *) return 1 ;; esac
+}
+# Whether a pid record's process is still the one registered: same pid, same
+# start time. A pid that exited, or whose number another process now holds,
+# is not.
+_serve_pid_live() { # <row>
+  local pid start
+  pid="$(jq -r '.pid // 0' <<<"$1")"; start="$(jq -r '.pid_start // ""' <<<"$1")"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$start" ] && [ "$(_serve_pid_start "$pid")" = "$start" ]
+}
 # Who a server is registered to: the owner of the record naming this unit (by
 # its unit, whatever the record is called) or this pid. Status 1: nobody's.
 _serve_registered_owner() { # <unit|pid> -> owner
@@ -265,14 +284,25 @@ serve_stop() { # <name|unit|pid>
   [ -f "$f" ] || die 'cel serve stop: server is not ledgered'
   row="$(jq -c . "$f")"; kind="$(jq -r '.kind // "unit"' <<<"$row")"
   _serve_stop_authorised "$row"
+  # A server already gone leaves only its registration: clear that and signal
+  # nothing - a reused pid belongs to some other process now.
   if [ "$kind" = pid ]; then
     pid="$(jq -r '.pid' <<<"$row")"
-    [ "$(_serve_pid_start "$pid")" = "$(jq -r '.pid_start // ""' <<<"$row")" ] || return 1
+    if ! _serve_pid_live "$row"; then
+      rm -f "$f"
+      printf 'pid-%s was already gone (or its pid was reused); registration removed, nothing was stopped\n' "$pid"
+      return 0
+    fi
     kill -TERM "$pid" || return $?
     rm -f "$f"
     return 0
   else
     unit="$(jq -r '.unit' <<<"$row")"
+    if _serve_unit_dead "$unit"; then
+      rm -f "$f"
+      printf '%s (unit %s) was already gone; registration removed, nothing was stopped\n' "$(jq -r '.name // ""' <<<"$row")" "$unit"
+      return 0
+    fi
     serve_unit_stop "$unit" || return $?
     rm -f "$f"
   fi
@@ -764,11 +794,7 @@ _serve_sweep_permanent() { # <file> <row> <now>
   kind="$(jq -r '.kind // "unit"' <<<"$row")"; unit="$(jq -r '.unit // ""' <<<"$row")"
   if [ "$kind" = pid ]; then
     pid="$(jq -r '.pid // 0' <<<"$row")"
-    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ "$(_serve_pid_start "$pid")" = "$(jq -r '.pid_start // ""' <<<"$row")" ]; then
-      state=present
-    else
-      state=gone
-    fi
+    if _serve_pid_live "$row"; then state=present; else state=gone; fi
   else
     state="$(_serve_unit_state "$unit")"
   fi
@@ -806,6 +832,17 @@ serve_sweep() {
     [ -f "$f" ] || continue
     row="$(jq -c . "$f" 2>/dev/null)" || continue
     if [ "$(jq -r '.permanent // false' <<<"$row")" = true ]; then _serve_sweep_permanent "$f" "$row" "$now"; continue; fi
+    local kind pid
+    kind="$(jq -r '.kind // "unit"' <<<"$row")"
+    # a pid that exited or was reused is gone at once, whatever its clock
+    if [ "$kind" = pid ] && ! _serve_pid_live "$row"; then
+      rm -f "$f"
+      name="$(jq -r '.name' <<<"$row")"; owner="$(jq -r '.owner' <<<"$row")"; ws="$(jq -r '.workspace' <<<"$row")"
+      msg="steward: your registered server $name is gone (pid $(jq -r '.pid' <<<"$row") exited, or its pid was reused) - its registration is dropped and nothing was stopped."
+      cmd_inbox send "$owner" "$msg" --from steward --workspace "$ws" --kind status --fp "serve-gone-$name" >/dev/null 2>&1 || true
+      c_warn "$msg"
+      continue
+    fi
     name="$(jq -r '.name' <<<"$row")"; unit="$(jq -r '.unit' <<<"$row")"
     owner="$(jq -r '.owner' <<<"$row")"; ws="$(jq -r '.workspace' <<<"$row")"
     worktree="$(jq -r '.worktree' <<<"$row")"; started="$(jq -r '.started_at' <<<"$row")"
@@ -815,11 +852,9 @@ serve_sweep() {
     elif [ "$((now-last))" -ge "$idle" ]; then reason="no request for $((idle/3600)) hours"
     else continue
     fi
-    local kind pid
-    kind="$(jq -r '.kind // "unit"' <<<"$row")"
     if [ "$kind" = pid ]; then
       pid="$(jq -r '.pid' <<<"$row")"
-      [ "$(_serve_pid_start "$pid")" = "$(jq -r '.pid_start // ""' <<<"$row")" ] || { rm -f "$f"; continue; }
+      _serve_pid_live "$row" || continue
       kill -TERM "$pid" 2>/dev/null || continue
     else
       serve_unit_stop "$unit" || continue

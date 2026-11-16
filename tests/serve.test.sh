@@ -760,3 +760,88 @@ test_serve_a_person_registers_a_permanent_server_for_anyone_and_sees_what_it_run
   assert_contains "$out" "/opt/shop/run" || { _sp_down; return 1; }
   _sp_down
 }
+
+# A REGISTRATION WHOSE SERVER IS ALREADY GONE: `cel serve stop` clears it and
+# signals nothing - a pid that exited, a pid number reused by another process
+# (its start time no longer matches), a unit that no longer exists. A live
+# matching pid is still sent TERM.
+_sd_pid_record() { # <pid> <pid_start> [permanent] [owner]
+  jq -cn --argjson pid "$1" --arg s "$2" --argjson perm "${3:-false}" --arg owner "${4:-worker}" \
+    '{name:"pid-\($pid)",kind:"pid",pid:$pid,pid_start:$s,owner:$owner,workspace:"alpha",worktree:"",started_at:1000,ttl_seconds:3600,last_request_at:1000,port:0,permanent:$perm,command:"sleep"}' \
+    > "$CEL_SERVE_STATE/pid-$1.json"
+}
+test_serve_stop_clears_a_gone_or_reused_pid_and_kills_nothing() {
+  _sp_setup
+  local gone reused live out
+  sleep 60 & gone=$!; local gone_start; gone_start="$(_serve_pid_start "$gone")"
+  kill "$gone"; wait "$gone" 2>/dev/null || true
+  _sd_pid_record "$gone" "$gone_start"
+  out="$(serve_stop "$gone" 2>&1)" || { echo "a gone pid's stop failed: $out"; _sp_down; return 1; }
+  [ ! -f "$CEL_SERVE_STATE/pid-$gone.json" ] || { echo "a gone pid stayed registered"; _sp_down; return 1; }
+  assert_contains "$out" "pid-$gone was already gone (or its pid was reused); registration removed, nothing was stopped" || { _sp_down; return 1; }
+  # the number now belongs to another process: it is not the registered server
+  sleep 60 & reused=$!
+  _sd_pid_record "$reused" 1
+  out="$(serve_stop "$reused" 2>&1)" || { echo "a reused pid's stop failed: $out"; kill "$reused"; _sp_down; return 1; }
+  kill -0 "$reused" 2>/dev/null || { echo "the process now holding a reused pid was killed"; _sp_down; return 1; }
+  kill "$reused"; wait "$reused" 2>/dev/null || true
+  [ ! -f "$CEL_SERVE_STATE/pid-$reused.json" ] || { echo "a reused pid stayed registered"; _sp_down; return 1; }
+  assert_contains "$out" "nothing was stopped" || { _sp_down; return 1; }
+  # a live matching pid is still stopped
+  sleep 60 & live=$!
+  _sd_pid_record "$live" "$(_serve_pid_start "$live")"
+  serve_stop "$live" >/dev/null 2>&1 || { echo "a live pid's stop failed"; kill "$live"; _sp_down; return 1; }
+  local rc=0; wait "$live" 2>/dev/null || rc=$?
+  assert_eq "$rc" 143 || { _sp_down; return 1; }
+  [ ! -f "$CEL_SERVE_STATE/pid-$live.json" ] || { echo "a stopped pid stayed registered"; _sp_down; return 1; }
+  _sp_down
+}
+test_serve_stop_clears_a_unit_that_no_longer_exists_without_stopping_it() {
+  _sp_setup
+  serve_adopt shop-server shop-orch alpha 3600 0 "" || { _sp_down; return 1; }
+  _sp_unit gone; : > "$SP_CALLS"
+  local out; out="$(serve_stop shop-server 2>&1)" || { echo "a gone unit's stop failed: $out"; _sp_down; return 1; }
+  [ ! -f "$CEL_SERVE_STATE/shop-server.json" ] || { echo "a gone unit stayed registered"; _sp_down; return 1; }
+  assert_contains "$out" "already gone" || { _sp_down; return 1; }
+  assert_contains "$out" "nothing was stopped" || { _sp_down; return 1; }
+  _sp_acted && { echo "a gone unit was acted on: $(cat "$SP_CALLS")"; _sp_down; return 1; }
+  _sp_down
+}
+# Authority comes first: a foreign agent is refused before anything is removed,
+# even when the server is already gone.
+test_serve_stop_of_a_gone_permanent_pid_still_refuses_a_foreign_agent() {
+  _sp_setup
+  local P="$SP/launch" gone gone_start out
+  sleep 60 & gone=$!; gone_start="$(_serve_pid_start "$gone")"
+  kill "$gone"; wait "$gone" 2>/dev/null || true
+  _sd_pid_record "$gone" "$gone_start" true shop-orch
+  mkdir -p "$P/$PPID"; printf '%s\0' CEL_ROLE=solo CEL_INBOX_ME=tools-orch > "$P/$PPID/environ"; printf '%s (bash) S 1 1 1' "$PPID" > "$P/$PPID/stat"
+  out="$(CEL_PROC_DIR="$P" CEL_ROLE=solo CEL_INBOX_ME=tools-orch serve_stop "$gone" 2>&1)" \
+    && { echo "another agent cleared it"; _sp_down; return 1; }
+  assert_contains "$out" "only its owner or a person" || { _sp_down; return 1; }
+  [ -f "$CEL_SERVE_STATE/pid-$gone.json" ] || { echo "a refused stop removed the record"; _sp_down; return 1; }
+  _sp_down
+}
+# The steward drops a non-permanent pid registration whose pid is gone or
+# reused on its next tick - TTL and idleness not reached - with one note to
+# the owner, and kills nothing.
+test_serve_sweep_drops_a_gone_or_reused_pid_with_one_note() {
+  _sp_setup
+  local gone gone_start reused
+  sleep 60 & gone=$!; gone_start="$(_serve_pid_start "$gone")"
+  kill "$gone"; wait "$gone" 2>/dev/null || true
+  _sd_pid_record "$gone" "$gone_start"
+  sleep 60 & reused=$!
+  _sd_pid_record "$reused" 1
+  serve_sweep >/dev/null 2>&1
+  kill -0 "$reused" 2>/dev/null || { echo "the sweep killed a reused pid's process"; _sp_down; return 1; }
+  kill "$reused"; wait "$reused" 2>/dev/null || true
+  [ ! -f "$CEL_SERVE_STATE/pid-$gone.json" ] || { echo "a gone pid stayed registered"; _sp_down; return 1; }
+  [ ! -f "$CEL_SERVE_STATE/pid-$reused.json" ] || { echo "a reused pid stayed registered"; _sp_down; return 1; }
+  assert_eq "$(grep -c . "$SP/inbox")" 2 || { _sp_down; return 1; }
+  assert_contains "$(cat "$SP/inbox")" "send worker" || { _sp_down; return 1; }
+  assert_contains "$(cat "$SP/inbox")" "nothing was stopped" || { _sp_down; return 1; }
+  serve_sweep >/dev/null 2>&1
+  assert_eq "$(grep -c . "$SP/inbox")" 2 || { _sp_down; return 1; }
+  _sp_down
+}
