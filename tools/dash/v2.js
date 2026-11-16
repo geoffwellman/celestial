@@ -242,7 +242,7 @@ function teamHtml(t){
 // line over the week when the dashboard has recorded one.
 function money(v,u){if(v==null)return '?';var n=Number(v);return (n<0?'-':'')+(u==='usd'||!u?'$':'')+Math.abs(n).toFixed(2)+(u&&u!=='usd'?' '+esc(u):'')}
 function whenShort(iso){if(!iso)return '';var d=new Date(iso);if(isNaN(d))return '';
-  var h=(d-Date.now())/3600e3;return h<20?hhmm(iso):d.toLocaleDateString([], {weekday:'short'})+' '+hhmm(iso)}
+  var h=Math.abs(d-Date.now())/3600e3;return h<20?hhmm(iso):d.toLocaleDateString([], {weekday:'short'})+' '+hhmm(iso)}
 function uTag(t){return '<span class="utag '+(t==='orch'?'o':t==='workers'?'k':t==='not orch'?'x':'')+'">'+esc(t)+'</span>'}
 function uSpark(h){if(!h||h.length<2)return '';var t0=new Date(h[0][0]).getTime(),t1=new Date(h[h.length-1][0]).getTime(),sp=Math.max(1,t1-t0);
   var pts=h.map(function(p){return ((new Date(p[0]).getTime()-t0)/sp*100).toFixed(1)+','+(100-Math.min(100,p[1])).toFixed(1)}).join(' ');
@@ -253,7 +253,8 @@ function uWin(w,big){
    (big?(uSpark(w.history)||'<div class="sub">no history yet</div>'):'')+'</div>';
   var pace=w.projected_pct!==w.used_pct&&w.projected_pct>w.used_pct;
   var head=w.at_risk?'<b class="'+(w.used_pct>=95?'neg':'amb')+'">'+esc(w.label)+' · '+w.used_pct+'%</b>':esc(w.label)+' · '+w.used_pct+'%';
-  return '<div class="uwin"><div class="ulab">'+head+(w.resets?' · resets '+esc(whenShort(w.resets)):'')+'</div>'+
+  // a window the last read could not refresh keeps its number and says it is the last known one
+  return '<div class="uwin"><div class="ulab">'+head+(w.last_known?' · <span class="sub">last known'+(w.read_at?', read '+esc(whenShort(w.read_at)):'')+'</span>':'')+(w.resets?' · resets '+esc(whenShort(w.resets)):'')+'</div>'+
    '<div class="ubar"><i class="'+w.level+'" style="width:'+Math.min(100,w.used_pct)+'%"></i>'+(pace?'<s style="left:'+Math.min(99,w.projected_pct)+'%" title="~'+w.projected_pct+'% at reset at this pace"></s>':'')+'</div>'+
    (pace&&w.projected_pct>=50?'<div class="sub">'+(w.projected_pct>=100?'on pace for '+Math.min(999,w.projected_pct)+'% - hits the cap before it resets':'on pace for ~'+w.projected_pct+'%')+'</div>':'')+
    (big?(uSpark(w.history)||'<div class="sub">no history yet</div>'):'')+'</div>'}

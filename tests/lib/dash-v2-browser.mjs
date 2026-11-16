@@ -294,6 +294,8 @@ const main = async () => {
       out.amber = await evaluate(`document.querySelectorAll('${q('.ubar i.warn')}').length`);
       // a window whose reset passed: its label says so, its bar has no fill
       out.resetWins = await evaluate(`[].slice.call(document.querySelectorAll('${q('.uwin')}')).filter(function(e){return /reset, no fresh reading/.test(e.textContent)}).map(function(e){return e.querySelectorAll('.ubar i').length}).join(',')`);
+      // a window the last read could not refresh: its number, said to be the last known one
+      out.lastKnown = await evaluate(`[].slice.call(document.querySelectorAll('${q('.uwin')}')).filter(function(e){return /last known/.test(e.textContent)}).map(function(e){return (/\\d+%/.exec(e.textContent)||[''])[0]}).join(',')`);
       out.tags = await evaluate(`[].slice.call(document.querySelectorAll('${q('.uacct .utag')}')).map(function(e){return e.textContent}).join(',')`);
       out.money = await evaluate(`[].slice.call(document.querySelectorAll('${q('.umoney b')}')).map(function(e){return e.textContent}).join('|')`);
       await evaluate(`document.querySelector('#grid .w[data-id=usage] .ex').click()`);

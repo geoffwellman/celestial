@@ -2006,7 +2006,10 @@ stable id. The readings are cached for 60 seconds, so `cel fleet --json` and
 the dashboard's Subscriptions card read the cache rather than calling a
 provider on every draw. A window whose reset time has passed shows as
 `reset, no fresh reading` until a fresh read — never its old percentage —
-everywhere these numbers appear, including after a read that failed.
+everywhere these numbers appear, including after a read that failed. When a
+read fails, a window that has not reset keeps its last percentage, marked
+`last known` with the time it was read: a spent window stays spent — still
+alerted on and still vetoed — until a reading says otherwise.
 
 The steward checks the windows once a tick and raises **one rolled-up item per
 account** — a status over `CEL_SUB_WARN_PCT` (80), a blocker at 100 — and

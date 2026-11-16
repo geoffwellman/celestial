@@ -2636,6 +2636,54 @@ _reset_sub_case() { # <window>
 test_steward_clears_a_5h_subscription_item_after_its_reset_until_a_fresh_reading() { _reset_sub_case 5h; }
 test_steward_clears_a_7d_subscription_item_after_its_reset_until_a_fresh_reading() { _reset_sub_case 7d; }
 
+# A WEEK SPENT TO 100% IS NOT TAKEN DOWN BY ITS 5H WINDOW RESETTING: the reset
+# window has no number and says nothing, and the week speaks for the account.
+_spent_week_reading() { # [age-seconds]: pi's reading - 5h reset an hour ago, 7d spent until tomorrow
+  local f; f="$(_sub_cache_file claude pi)"
+  jq -nc --arg p "$(date -u -d "@$(( $(date +%s) - 3600 ))" +%Y-%m-%dT%H:%M:%S.995970+00:00)" \
+         --arg n "$(date -u -d "@$(( $(date +%s) + 86400 ))" +%Y-%m-%dT%H:%M:%S.995970+00:00)" \
+    '{provider: "claude", account: "pi", label: "ana@alpha.test", source: "direct",
+      windows: [{name: "5h", scope: null, used_pct: 97, resets_at: $p},
+                {name: "7d", scope: null, used_pct: 100, resets_at: $n}],
+      extra: {state: "enabled", reason: ""}}' > "$f"
+  touch -d "@$(( $(date +%s) - ${1:-0} ))" "$f"
+}
+
+test_steward_raises_a_spent_week_beside_a_reset_five_hour_window() {
+  _reset_fixture
+  _spent_week_reading
+  _steward_subscriptions >/dev/null 2>&1
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_contains "$open" "blocked"
+  assert_contains "$open" "spent its 7d window (100%)"
+  _steward_usage_pace >/dev/null 2>&1
+  assert_contains "$(jq -r 'select(.fp == "usage-pace") | .message' "$CEL_INBOX_DIR/alpha.jsonl")" "claude 7d: 100% now"
+  rm -rf "$T"
+}
+
+# AND A READ THAT FAILS DOES NOT MAKE IT LOOK FINE. The week keeps its last
+# number, said to be the last known reading: the item stays open, its repeats
+# say so, and nothing clears it until a reading does.
+test_steward_keeps_alerting_on_a_spent_week_a_failed_read_cannot_refresh() {
+  _reset_fixture
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id i
+  _spent_week_reading
+  _steward_subscriptions >/dev/null 2>&1
+  id="$(_inbox_open_fp alpha sub-claude-pi steward root)"
+  [ -n "$id" ] || { echo "a spent week raised no item"; return 1; }
+  # ten minutes on, the account's read fails
+  touch -d "@$(( $(date +%s) - 600 ))" "$(_sub_cache_file claude pi)"
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_subscriptions >/dev/null 2>&1; done
+  assert_eq "$(_inbox_open_fp alpha sub-claude-pi steward root)" "$id"
+  assert_eq "$(jq -s '[.[] | select((.message // "") | startswith("cleared:"))] | length' "$f")" "0"
+  assert_contains "$(jq -s -r --arg i "$id" '[.[] | select(.kind == "update" and .ref == $i) | .message] | last // ""' "$f")" \
+    "spent its 7d window (100%, last known reading"
+  assert_contains "$(_sub_line "$(subscription_list --cached | jq -c '.[0]')")" "7d 100% (last known, read "
+  _steward_usage_pace >/dev/null 2>&1
+  assert_contains "$(jq -r 'select(.fp == "usage-pace") | .message' "$f")" "claude 7d: 100% at the last known reading (read "
+  rm -rf "$T"
+}
+
 # Ticks never overlap. A tick that finds one running exits at once,
 # before it touches herdr, gc or anything else.
 test_steward_tick_exits_when_another_holds_the_lock() {

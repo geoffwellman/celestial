@@ -890,8 +890,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (now - lastRecord < 55000) return;
     lastRecord = now;
     const u = {};
-    // a window that has reset has no reading to keep (lib/quota.sh _SUB_RESET_JQ)
-    for (const s of q.subscriptions) for (const w of s.windows || []) if (!w.reset && w.used_pct != null) u[winKey(s, w)] = Math.round((Number(w.used_pct) || 0) * 10) / 10;
+    // a window that has reset, or that the last read could not refresh, has no
+    // new reading to keep (lib/quota.sh _SUB_RESET_JQ, _sub_carry_last)
+    for (const s of q.subscriptions) for (const w of s.windows || []) if (!w.reset && !w.stale && w.used_pct != null) u[winKey(s, w)] = Math.round((Number(w.used_pct) || 0) * 10) / 10;
     try {
       mkdirSync(STATE_DIR, { recursive: true });
       appendFileSync(USAGE_RING(), JSON.stringify({ ts: new Date(now).toISOString(), u }) + '\n');
@@ -920,6 +921,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // same test is applied to what it holds. Either way: reset, no fresh
   // reading - never the old number, never at risk.
   const isReset = (w, resets, now) => w.reset === true || (resets !== null && resets <= now);
+  // A reset time read the way the shared rule reads it (sub_epoch): an ISO
+  // time with no zone is UTC - never this server's local time - and a number
+  // is epoch seconds, or milliseconds when it is that large. Epoch ms, or null.
+  const epochMs = (v) => {
+    if (typeof v === 'number') return Number.isFinite(v) ? (v > 1e11 ? v : v * 1000) : null;
+    if (typeof v !== 'string' || !v) return null;
+    const t = new Date(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(v) ? `${v}Z` : v).getTime();
+    return Number.isNaN(t) ? null : t;
+  };
+  const isoOf = (ms) => (ms === null ? null : new Date(ms).toISOString());
   const level = (pct) => (pct >= 95 ? 'bad' : pct >= 75 ? 'warn' : 'ok');
   const usage = async (wss) => {
     const q = (await quota()) || {};
@@ -943,14 +954,17 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       } else if (gw.has(`${s.provider}|${lw}`)) tags.push('workers');
       const windows = (s.windows || []).map((w) => {
         const len = winLen(w.name);
-        const resets = new Date(w.resets_at).getTime() || null;
+        const resets = epochMs(w.resets_at);
         const key = winKey(s, w);
         const history = ring.filter((r) => r.u && r.u[key] !== undefined).map((r) => [r.ts, r.u[key]]);
         const base = { label: winLabel(w), name: w.name, scope: w.scope || null, len: len || 0, history: history.length > 1 ? history.slice(-200) : [] };
         if (isReset(w, resets, now)) return { ...base, reset: true, used_pct: null, resets: null, projected_pct: null, level: 'ok', at_risk: false };
         const used = Math.round(Number(w.used_pct) || 0);
         const projected = project(used, len, resets, now);
-        return { ...base, used_pct: used, resets: iso(w.resets_at),
+        // a last-known window (the read failed, the window still running)
+        // keeps its number and counts: it is said to be last known, not fresh
+        const known = w.stale === true ? { last_known: true, read_at: isoOf(epochMs(w.read_at)) } : {};
+        return { ...base, ...known, used_pct: used, resets: isoOf(resets),
           projected_pct: projected, level: level(Math.max(used, projected >= 100 ? 75 : 0)),
           at_risk: projected >= 100 || used >= 95 };
       }).sort((a, b) => (a.len - b.len) || String(a.scope || '').localeCompare(String(b.scope || '')));

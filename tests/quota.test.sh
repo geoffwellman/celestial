@@ -301,8 +301,9 @@ test_a_window_whose_reset_passed_reads_as_reset_with_no_number() {
 
 # THE FRESH READ FAILS - the provider is down or rate-limited. The reading it
 # replaces is not quoted for a window that has reset since: that window is
-# still listed, as reset with no fresh reading, so the row says what changed.
-# A window still running is not carried: no reading is no number.
+# still listed, as reset with no fresh reading. A window still running keeps
+# its last number, said to be the last known one and when it was read: an
+# account that was spent is still spent until a reading says otherwise.
 test_a_failed_read_after_the_reset_says_reset_no_fresh_reading() {
   _quota_setup
   _quota_manifest_stub
@@ -311,21 +312,53 @@ test_a_failed_read_after_the_reset_says_reset_no_fresh_reading() {
   export CEL_SUB_ANTHROPIC_URL="http://127.0.0.1:1/api/oauth/usage"
   export CEL_SUB_CODEX_URL="http://127.0.0.1:1/backend-api/codex-wham/usage"
   . "$CEL_ROOT/lib/quota.sh"
-  local f; f="$(_sub_cache_file claude pi)"; mkdir -p "$CEL_CACHE"
+  local f m read; f="$(_sub_cache_file claude pi)"; mkdir -p "$CEL_CACHE"
   jq -nc --arg p "$(_reset_iso -3600)" --arg n "$(_reset_iso 86400)" \
     '{provider: "claude", account: "pi", label: "pi", source: "direct",
       windows: [{name: "5h", scope: null, used_pct: 97, resets_at: $p},
                 {name: "7d", scope: null, used_pct: 48, resets_at: $n}],
       extra: {state: "enabled", reason: ""}}' > "$f"
   touch -d '-5 minutes' "$f"
+  m="$(stat -c %Y "$f")"; read="$(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ)"
   local row; row="$(subscription_usage claude "$PI_TOKEN" pi)"
   assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" unreadable
-  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, .reset, .used_pct]]')" '[["5h",true,null]]'
-  # cached that way, so the next read and the fleet path see the same row
-  assert_eq "$(jq -c '[.windows[] | [.name, .reset]]' "$f")" '[["5h",true]]'
+  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, (.reset // false), .used_pct, (.stale // false), .read_at]]')" \
+    "[[\"5h\",true,null,false,null],[\"7d\",false,48,true,\"$read\"]]"
+  # cached that way, so the next read and the fleet path see the same row -
+  # and a second failed read keeps the time of the reading, not of the failure
+  touch -d '-2 minutes' "$f"
+  row="$(subscription_usage claude "$PI_TOKEN" pi)"
+  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, (.reset // false), .used_pct, .read_at]]')" \
+    "[[\"5h\",true,null,null],[\"7d\",false,48,\"$read\"]]"
   local out; out="$(cmd_quota 2>/dev/null)"
   assert_contains "$out" '5h reset, no fresh reading'
+  assert_contains "$out" "7d 48% (last known, read $(sub_reset_human "$read"); resets "
   case "$out" in *97%*) printf 'cel quota showed a reset window with its old number:\n%s\n' "$out" >&2; return 1;; esac
+  _quota_teardown
+}
+
+# THE CASE THE LAST-KNOWN NUMBER IS FOR. A week spent to 100% that has not
+# reset is still spent when the read fails, and a 5h window at 100% still
+# vetoes the profiles routed at it - an exhausted account must not look fine
+# until the next read that works.
+test_a_failed_read_keeps_a_spent_window_spent_and_vetoed() {
+  _quota_setup
+  export CEL_SUB_ANTHROPIC_URL="http://127.0.0.1:1/api/oauth/usage"
+  . "$CEL_ROOT/lib/quota.sh"
+  _subscription_accounts() { printf 'claude\tpi\t%s\n' "$PI_TOKEN"; }
+  local f; f="$(_sub_cache_file claude pi)"; mkdir -p "$CEL_CACHE"
+  jq -nc --arg n "$(_reset_iso 7200)" --arg w "$(_reset_iso 86400)" \
+    '{provider: "claude", account: "pi", label: "pi", source: "direct",
+      windows: [{name: "5h", scope: null, used_pct: 100, resets_at: $n},
+                {name: "7d", scope: null, used_pct: 100, resets_at: $w}],
+      extra: {state: "enabled", reason: ""}}' > "$f"
+  touch -d '-5 minutes' "$f"
+  local row; row="$(subscription_usage claude "$PI_TOKEN" pi)"
+  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, .used_pct, .stale]]')" '[["5h",100,true],["7d",100,true]]'
+  local msg=""
+  quota_vetoed anthropic unknown && msg="$SUBSCRIPTION_VETO"
+  [ -n "$msg" ] || { echo 'a last-known spent 5h window was not vetoed'; return 1; }
+  assert_contains "$msg" 'last known'
   _quota_teardown
 }
 
@@ -345,8 +378,8 @@ test_a_gateway_account_that_cannot_be_read_still_says_its_window_reset() {
       extra: {state: "enabled", reason: ""}}' > "$(_sub_cache_file claude ant-one)"
   local row; row="$(subscription_list | jq -c '.[] | select(.account == "ant-one")')"
   assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" unreadable
-  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, .reset, .used_pct]]')" '[["5h",true,null]]'
-  assert_eq "$(subscription_list --cached | jq -c '.[] | select(.account == "ant-one") | [.windows[] | [.name, .reset]]')" '[["5h",true]]'
+  assert_eq "$(printf '%s' "$row" | jq -c '[.windows[] | [.name, (.reset // false), .used_pct, (.stale // false)]]')" '[["5h",true,null,false],["7d",false,48,true]]'
+  assert_eq "$(subscription_list --cached | jq -c '.[] | select(.account == "ant-one") | [.windows[] | [.name, (.reset // false), (.stale // false)]]')" '[["5h",true,false],["7d",false,true]]'
   _quota_teardown
 }
 

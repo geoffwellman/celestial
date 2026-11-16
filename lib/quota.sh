@@ -214,25 +214,35 @@ def sub_epoch:
 def sub_window_now:
   if type == "object" and .reset != true
      and (((.resets_at // null) | sub_epoch) as $r | $r != null and $r <= now)
-  then . + {used_pct: null, resets_at: null, reset: true} else . end;
+  then del(.stale, .read_at) + {used_pct: null, resets_at: null, reset: true} else . end;
 def sub_row_now:
   if type == "object" and ((.windows // null) | type) == "array"
   then .windows |= map(sub_window_now) else . end;
 '
 
-# A FAILED READ DOES NOT ERASE A RESET. When a fresh read answers nothing - the
-# provider is down, rate-limited, the token stale - the row it writes has no
-# windows, and the reading it replaces is the only record that a window was
-# running at all. Every window of that reading which has reset since stays on
-# the row as reset, so the row says "5h reset, no fresh reading" beside its
-# fault rather than nothing. A window still running is NOT carried: its last
-# number is not a reading of now. Reads the new row on stdin.
-_sub_carry_resets() { # <cache-file>
-  local doc; doc="$(cat)"
+# A FAILED READ DOES NOT ERASE THE LAST ONE. When a fresh read answers nothing
+# - the provider is down, rate-limited, the token stale - the row it writes has
+# no windows, and the reading it replaces is the only record of them. So every
+# window of that reading stays on the row:
+#
+#   - one that has reset since is reset, with no number ("reset, no fresh
+#     reading");
+#   - one still running keeps its number as the LAST KNOWN one - `stale: true`
+#     and `read_at`, when that reading was taken (the old file's time, or the
+#     time it already carried). A week spent to 100% that has not reset is
+#     still spent: dropping it made an exhausted account look fine until the
+#     next read that worked. Everything that alerts or vetoes reads it as the
+#     number it is; everything that says it says it is the last known one.
+#
+# Reads the new row on stdin.
+_sub_carry_last() { # <cache-file>
+  local doc read; doc="$(cat)"
   if [ -f "$1" ]; then
-    jq -c --slurpfile o "$1" "$_SUB_RESET_JQ"'
+    read="$(date -u -d "@$(stat -c %Y "$1" 2>/dev/null || echo 0)" +%Y-%m-%dT%H:%M:%SZ)"
+    jq -c --slurpfile o "$1" --arg read "$read" "$_SUB_RESET_JQ"'
       if type == "object" and ((.windows // []) | length) == 0
-      then .windows = [($o[0].windows // [])[]? | sub_window_now | select(type == "object" and .reset == true)]
+      then .windows = [($o[0].windows // [])[]? | select(type == "object") | sub_window_now
+                       | if .reset == true then . else . + {stale: true, read_at: (.read_at // $read)} end]
       else . end' <<< "$doc" 2>/dev/null && return 0
   fi
   printf '%s\n' "$doc"
@@ -816,7 +826,7 @@ subscription_usage() { # <provider> <token> [account] [label]
       '{provider: $p, account: $a, label: $l, source: "direct", windows: [],
         extra: {state: "unreadable",
                 reason: "the usage endpoint could not be read - not signed in here, or it is down"}}' \
-      | _sub_carry_resets "$cache")"
+      | _sub_carry_last "$cache")"
   fi
   # 0700 ON THE DIRECTORY, 0600 ON THE FILE. These answers are derived from a
   # credentialed request against the owner's own accounts: they carry no token,
@@ -891,8 +901,8 @@ subscription_list() { # [--cached]
     omp_keys="$omp_keys$vk "
     oa="$(printf '%s' "$orow" | jq -r '.account')"
     f="$(_sub_cache_file "$op" "$oa")"
-    # a row with nothing read keeps the windows that reset since the last one
-    case "$orow" in *'"windows":[]'*) orow="$(printf '%s' "$orow" | _sub_carry_resets "$f")" ;; esac
+    # a row with nothing read keeps the last reading's windows (_sub_carry_last)
+    case "$orow" in *'"windows":[]'*) orow="$(printf '%s' "$orow" | _sub_carry_last "$f")" ;; esac
     pub_f+=("$f"); pub_d+=("$orow")
     rows="$rows$orow
 "
@@ -935,7 +945,7 @@ subscription_list() { # [--cached]
     vp="$(printf '%s' "$vrow" | jq -r '.provider')"
     va="$(printf '%s' "$vrow" | jq -r '.account')"
     f="$(_sub_cache_file "$vp" "$va")"
-    case "$vrow" in *'"windows":[]'*) vrow="$(printf '%s' "$vrow" | _sub_carry_resets "$f")" ;; esac
+    case "$vrow" in *'"windows":[]'*) vrow="$(printf '%s' "$vrow" | _sub_carry_last "$f")" ;; esac
     pub_f+=("$f"); pub_d+=("$vrow")
     rows="$rows$vrow
 "
@@ -1011,16 +1021,17 @@ _sub_provider_for() { # <cel-provider>
   esac
 }
 
-# A human reset: today is a clock time, anything further out carries its day.
-# Local time, always - "resets 19:00" is a decision about this evening and
-# nobody converts UTC in their head correctly at the moment they need to.
+# A human time: within a day of now - ahead or behind - a clock time,
+# anything further carries its day. Local time, always - "resets 19:00" is a
+# decision about this evening and nobody converts UTC in their head correctly
+# at the moment they need to.
 sub_reset_human() { # <iso8601>
   [ -n "${1:-}" ] || return 0
-  local at now
+  local at d
   at="$(date -d "$1" +%s 2>/dev/null || true)"
   [ -n "$at" ] || { printf '%s' "$1"; return 0; }
-  now="$(date +%s)"
-  if [ $((at - now)) -lt 86400 ]; then date -d "@$at" +%H:%M
+  d=$(( at - $(date +%s) )); [ "$d" -ge 0 ] || d=$(( -d ))
+  if [ "$d" -lt 86400 ]; then date -d "@$at" +%H:%M
   else date -d "@$at" '+%a %H:%M'; fi
 }
 
@@ -1031,24 +1042,29 @@ sub_reset_human() { # <iso8601>
 # The rule is the FIVE HOUR window at 100%, because that is the one that stops
 # work now; a seven day window at 100% is the same wall but the reset an
 # operator can act on is the short one. Extra usage that is the only remaining
-# path and is disabled counts as spent for the same reason.
+# path and is disabled counts as spent for the same reason. A LAST-KNOWN
+# window (the read failed; see _sub_carry_last) at 100% is spent: nothing has
+# said otherwise, and the refusal says it is the last known reading.
 subscription_veto() { # <cel-provider>
   local sub; sub="$(_sub_provider_for "$1")"
   [ -n "$sub" ] || return 1
-  local p a t line pct resets state
+  local p a t line pct stale resets state read
   while IFS=$'\t' read -r p a t; do
     [ "$p" = "$sub" ] || continue
     line="$(subscription_usage "$p" "$t" "$a")"
-    IFS=$'\t' read -r pct resets state <<< "$(printf '%s' "$line" | jq -r '
+    IFS=$'\t' read -r pct stale resets state read <<< "$(printf '%s' "$line" | jq -r '
       [((.windows[] | select(.name == "5h") | .used_pct) // -1),
-       ((.windows[] | select(.name == "5h") | .resets_at) // ""),
-       (.extra.state // "unknown")] | @tsv' 2>/dev/null || true)"
+       ((.windows[] | select(.name == "5h") | .stale) // false),
+       ((.windows[] | select(.name == "5h") | .resets_at) // "-"),
+       (.extra.state // "unknown"),
+       ((.windows[] | select(.name == "5h") | .read_at) // "-")] | @tsv' 2>/dev/null || true)"
     case "$pct" in ''|-1) continue ;; esac
     if awk -v p="$pct" 'BEGIN { exit !(p+0 >= 100) }'; then
-      printf '%s subscription %s has spent its 5h window (100%%)%s - it resets at %s.' \
+      printf '%s subscription %s has spent its 5h window (100%%%s)%s - it resets at %s.' \
         "$1" "$a" \
+        "$([ "$stale" = true ] && printf ', last known reading at %s' "$(sub_reset_human "${read#-}")" || true)" \
         "$([ "$state" = disabled ] && printf ' and extra usage is disabled' || true)" \
-        "$(sub_reset_human "$resets")"
+        "$(sub_reset_human "${resets#-}")"
       return 0
     fi
   done < <(_subscription_accounts)
@@ -1097,28 +1113,34 @@ sub_bar() { # <pct> <width>
     printf "%s", s }'
 }
 
-# `5h 16% (resets 19:00)   7d 41% (resets Sat 05:00)   7d Fable 75%`, and a
+# `5h 16% (resets 19:00)   7d 41% (resets Sat 05:00)   7d Fable 75%`; a
 # window whose reset has passed with no reading since: `5h reset, no fresh
-# reading` - never its old number.
+# reading` - never its old number; and one the last read could not refresh:
+# `7d 100% (last known, read 13:06; resets Fri 05:59)`.
 _sub_line() { # <usage-json> [bar-width]
-  local out="" n p r s bw="${2:-0}"
+  local out="" n p r s k bw="${2:-0}"
   # `-` for an empty field: a tab is IFS whitespace, so two in a row would
   # collapse and shift the scope into the reset's place
-  while IFS=$'\t' read -r n p r s; do
+  while IFS=$'\t' read -r n p r s k; do
     [ -n "$n" ] || continue
     [ "$r" = - ] && r=""
     [ "$s" = - ] && s=""
+    [ "$k" = - ] && k=""
     # A SCOPE IS PART OF THE WINDOW'S NAME, not a footnote: two 7d windows on
     # one account are told apart by the model they are scoped to.
     [ -n "$s" ] && n="$n $s"
     if [ "$p" = reset ]; then out="$out$n reset, no fresh reading   "; continue; fi
+    local note=""
+    [ -n "$k" ] && note="last known, read $(sub_reset_human "$k")"
+    [ -n "$r" ] && note="${note:+$note; }resets $(sub_reset_human "$r")"
     out="$out$(printf '%s%s %s%%%s   ' "$n" \
       "$([ "$bw" -ge 6 ] 2>/dev/null && printf ' %s' "$(sub_bar "$p" "$bw")" || true)" \
       "$(printf '%.0f' "$p")" \
-      "$([ -n "$r" ] && printf ' (resets %s)' "$(sub_reset_human "$r")" || true)")"
+      "${note:+ ($note)}")"
   done < <(printf '%s' "$1" | sub_row_now | jq -r '.windows[]?
     | [.name, (if .reset == true then "reset" else (.used_pct // 0) end),
-       ((.resets_at // "") | if . == "" then "-" else tostring end), ((.scope // "") | if . == "" then "-" else . end)] | @tsv')
+       ((.resets_at // "") | if . == "" then "-" else tostring end), ((.scope // "") | if . == "" then "-" else . end),
+       (if .stale == true then (.read_at // "-") else "-" end)] | @tsv')
   local state reason
   IFS=$'\t' read -r state reason <<< "$(printf '%s' "$1" | jq -r '[(.extra.state // ""), (.extra.reason // "")] | @tsv')"
   [ "$state" = disabled ] && out="${out}extra: ${reason//_/ }"
@@ -1230,7 +1252,9 @@ quota_orch_pool() {
 # providers again, so its number can describe a window that is already over.
 # Every row goes through sub_row_now first (the one rule, _SUB_RESET_JQ), so
 # such a window has no number and is never quoted, and the reset each entry
-# names comes with its epoch (`reset_epoch`) for the steward to keep.
+# names comes with its epoch (`reset_epoch`) for the steward to keep. A
+# last-known window (the read failed, it is still running) counts at its last
+# number and says so: `last_known`, `read_at`.
 quota_at_risk() {
   jq -c "$_SUB_RESET_JQ"'
     def len: if . == "5h" then 18000 elif . == "1d" or . == "daily" then 86400
@@ -1246,7 +1270,8 @@ quota_at_risk() {
         | (if $f != null and $f > 0.05 and $f <= 1 then ([999, ($u / $f)] | min | round) else ($u | round) end) as $p
         | select($p >= 100 or $u >= 95)
         | {provider: $s.provider, who: ($s.label // $s.account), window: .name, scope: .scope,
-           used_pct: ($u | round), projected_pct: $p, resets: .resets_at, reset_epoch: ($r | if . == null then null else floor end)} ]' 2>/dev/null || printf '[]'
+           used_pct: ($u | round), projected_pct: $p, resets: .resets_at, reset_epoch: ($r | if . == null then null else floor end),
+           last_known: (.stale == true), read_at: (if .stale == true then .read_at else null end)} ]' 2>/dev/null || printf '[]'
 }
 
 # The providers `cel quota` reports a balance for: one named, or every
