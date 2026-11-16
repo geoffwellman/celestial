@@ -345,7 +345,7 @@ test_serve_registered_servers_cover_their_descendants() {
   _serve_desc_proc() { # <pid> <ppid> <start> <port|-> <argv...> [cgroup via SERVE_CG]
     local pid="$1" ppid="$2" start="$3" port="$4" d; shift 4; d="$CEL_SERVE_PROC_ROOT/$pid"
     mkdir -p "$d"
-    printf '%s (x) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s 0 0\n' "$pid" "$ppid" "$start" > "$d/stat"
+    printf '%s (%s) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s 0 0\n' "$pid" "${SERVE_COMM:-x}" "$ppid" "$start" > "$d/stat"
     printf '%s\0' "$@" > "$d/cmdline"
     # shellcheck disable=SC2059
     if [ -n "${SERVE_CG:-}" ]; then printf '0::%s\n' "$SERVE_CG" > "$d/cgroup"; else printf "0::$scope\n" "$pid" > "$d/cgroup"; fi
@@ -368,7 +368,24 @@ test_serve_registered_servers_cover_their_descendants() {
   # an unrelated node server
   _serve_desc_proc 4030 4000 900 8080 node server.js --port 8080
   out="$(serve_adopt_json)"
-  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[4011,4030]'
+  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[4011,4030]' || { rm -rf "$t"; return 1; }
+  # adopting a covered child names the server that covers it
+  out="$(serve_adopt 4002 o w 3600 "" 2>&1)" && { echo "adopted a covered child"; rm -rf "$t"; return 1; }
+  assert_contains "$out" "already covered by registered server pid-4001" || { rm -rf "$t"; return 1; }
+  out="$(serve_adopt 4020 o w 3600 "" 2>&1)" && { echo "adopted a unit's child"; rm -rf "$t"; return 1; }
+  assert_contains "$out" "already covered by registered server cel-serve-web" || { rm -rf "$t"; return 1; }
+  # A CHAIN DEEPER THAN THE CAP, comm with spaces and parens: 5000 registered,
+  # 5001..5040 each the child of the one before. 5031 is 31 hops down
+  # (covered), 5033 is 33 (past the 32-level cap, not covered) - in either
+  # order the candidates are walked.
+  local i
+  SERVE_COMM='a) (b c' _serve_desc_proc 5000 1 42 - bun run api.ts
+  for ((i = 5001; i <= 5040; i++)); do SERVE_COMM='a) (b c' _serve_desc_proc "$i" $((i - 1)) "$i" - node x; done
+  assert_eq "$(_serve_pid_start_in "$CEL_SERVE_PROC_ROOT" 5000)" 42 || { rm -rf "$t"; return 1; }
+  assert_eq "$(printf '5033\n5031\n' | _serve_ledgered_descendants 5000:42 | cut -d' ' -f1 | paste -sd,)" 5031 || { rm -rf "$t"; return 1; }
+  assert_eq "$(printf '5031\n5033\n' | _serve_ledgered_descendants 5000:42 | cut -d' ' -f1 | paste -sd,)" 5031 || { rm -rf "$t"; return 1; }
+  assert_eq "$(printf '5032\n5040\n5001\n' | _serve_ledgered_descendants 5000:42)" '5032 5000
+5001 5000' || { rm -rf "$t"; return 1; }
   unset CEL_SERVE_STATE CEL_SERVE_PROC_ROOT CEL_SERVE_SYSTEMCTL CEL_CONFIG_FILE CEL_SERVE_ADOPT_DATA CEL_SERVE_PROC_DATA
   rm -rf "$t"
 }

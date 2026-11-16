@@ -32,7 +32,7 @@ _serve_pid_start_in() { # <proc-root> <pid>
   local line="" rest
   local -a f=()
   { IFS= read -r line < "$1/$2/stat"; } 2>/dev/null || [ -n "$line" ] || return 0
-  rest="${line#*)}"; rest="${rest%%)*}"
+  rest="${line##*)}"   # comm may hold spaces and ')': fields follow the LAST ')'
   read -ra f <<<"$rest"
   printf '%s' "${f[19]:-}"
 }
@@ -521,51 +521,92 @@ _serve_not_a_preview() { # <pid> <command> [port]
 # they are that server's, not new unledgered ones. A candidate is covered when
 # its ancestor chain (ppid from /proc/<pid>/stat, at most 32 levels) reaches a
 # registered pid whose start time is the one its record holds - a pid number
-# reused by another process covers nothing. One pass over every candidate:
-# each process's verdict is remembered, so a shared ancestor is read once, and
-# all of it with builtins. (A registered unit covers whatever runs in its
-# cgroup: _serve_pid_in_ledgered_unit.) Prints the covered candidates' pids.
+# reused by another process covers nothing. One pass over every candidate,
+# all of it with builtins: each ancestor's answer is remembered so a shared
+# ancestor is read once. A covered answer is remembered as the DISTANCE (hops)
+# to the registered pid, and reused only while the whole chain stays within
+# the cap; "not covered" is remembered only from a walk that really ended (pid
+# 1, no ppid, an unreadable stat), never from one the cap cut short - so the
+# verdict never depends on the order candidates come in. (A registered unit
+# covers whatever runs in its cgroup: _serve_pid_in_ledgered_unit.) Prints
+# `<candidate> <registered-pid>` for each covered candidate.
 _serve_ledgered_descendants() { # <pid:start...> ; candidate pids on stdin
-  local proc="${CEL_SERVE_PROC_ROOT:-/proc}" pid p line rest depth v
-  local -A start=() verdict=()
+  local proc="${CEL_SERVE_PROC_ROOT:-/proc}" pid p line rest depth dist reg i n
+  local -A start=() dist_of=() reg_of=() dead=()
   local -a f chain
-  for v in "$@"; do start["${v%%:*}"]="${v#*:}"; done
+  for p in "$@"; do start["${p%%:*}"]="${p#*:}"; done
   [ "${#start[@]}" -gt 0 ] || return 0
   while IFS= read -r pid; do
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
-    chain=(); v=0; depth=0
-    { IFS= read -r line < "$proc/$pid/stat"; } 2>/dev/null || line=''
+    chain=(); dist=''; reg=''; depth=0
+    line=''; { IFS= read -r line < "$proc/$pid/stat"; } 2>/dev/null || true
     rest="${line##*)}"; read -ra f <<<"$rest"; p="${f[1]:-}"
-    while [[ "$p" =~ ^[1-9][0-9]*$ ]] && [ "$p" != 1 ] && [ "$depth" -lt 32 ]; do
+    while :; do
+      if ! [[ "$p" =~ ^[1-9][0-9]*$ ]] || [ "$p" = 1 ]; then
+        for i in "${chain[@]}"; do dead["$i"]=1; done; break
+      fi
+      [ "$depth" -lt 32 ] || break          # truncated: remember nothing negative
       depth=$((depth + 1))
-      if [ -n "${verdict[$p]:-}" ]; then v="${verdict[$p]}"; break; fi
+      [ -z "${dead[$p]:-}" ] || { for i in "${chain[@]}"; do dead["$i"]=1; done; break; }
+      if [ -n "${dist_of[$p]:-}" ]; then dist="${dist_of[$p]}"; reg="${reg_of[$p]}"; break; fi
       chain+=("$p")
       line=''; { IFS= read -r line < "$proc/$p/stat"; } 2>/dev/null || true
-      [ -n "$line" ] || break
+      if [ -z "$line" ]; then for i in "${chain[@]}"; do dead["$i"]=1; done; break; fi
       rest="${line##*)}"; read -ra f <<<"$rest"
-      if [ -n "${start[$p]:-}" ] && [ "${f[19]:-}" = "${start[$p]}" ]; then v=1; break; fi
+      if [ -n "${start[$p]:-}" ] && [ "${f[19]:-}" = "${start[$p]}" ]; then dist=0; reg="$p"; break; fi
       p="${f[1]:-}"
     done
-    for p in "${chain[@]}"; do verdict["$p"]="$v"; done
-    [ "$v" = 1 ] && printf '%s\n' "$pid"
+    [ -n "$dist" ] || continue
+    # chain[i] sits at depth i+1; the match (or cached ancestor) at $depth
+    n="${#chain[@]}"
+    for ((i = 0; i < n; i++)); do
+      dist_of["${chain[$i]}"]=$((depth - i - 1 + dist)); reg_of["${chain[$i]}"]="$reg"
+    done
+    [ $((depth + dist)) -le 32 ] && printf '%s %s\n' "$pid" "$reg"
   done
   return 0
 }
+# Every server registered by pid, as `pid:start` (records without a start
+# time cover no descendants: nothing proves the pid is still theirs).
+_serve_ledgered_pid_starts() {
+  local f
+  for f in "$(_serve_state)"/*.json; do
+    [ -f "$f" ] || continue
+    jq -r 'select(.kind == "pid" and ((.pid // 0) | tostring | test("^[1-9][0-9]*$")) and ((.pid_start // "") | tostring | test("^[0-9]+$"))) | "\(.pid):\(.pid_start)"' "$f" 2>/dev/null || true
+  done
+}
+# The registered server a pid is covered by - an ancestor registered by pid,
+# or the registered unit whose cgroup it runs in - by its record name.
+_serve_covering_server() { # <pid> -> name, or status 1
+  local pid="$1" reg _x f u
+  local -a starts=()
+  mapfile -t starts < <(_serve_ledgered_pid_starts)
+  if [ "${#starts[@]}" -gt 0 ] && read -r _x reg < <(printf '%s\n' "$pid" | _serve_ledgered_descendants "${starts[@]}") && [ -n "$reg" ]; then
+    for f in "$(_serve_state)"/*.json; do
+      [ -f "$f" ] || continue
+      jq -er --argjson p "$reg" 'select(.kind == "pid" and .pid == $p) | .name // "pid-\($p)"' "$f" 2>/dev/null && return 0
+    done
+    printf 'pid-%s' "$reg"; return 0
+  fi
+  for f in "$(_serve_state)"/*.json; do
+    [ -f "$f" ] || continue
+    u="$(jq -r 'select((.kind // "unit") != "pid") | .unit // ""' "$f" 2>/dev/null)"
+    [ -n "$u" ] && _serve_pid_in_ledgered_unit "$pid" "$u" && { jq -r '.name // .unit' "$f"; return 0; }
+  done
+  return 1
+}
 
 serve_adopt_json() {
-  local rows row pid unit id f kind pstart
+  local rows row pid unit id f kind
   local -a ledger_units=() ledger_starts=()
   local -A ledger_pids=() ledger_names=() covered=()
+  mapfile -t ledger_starts < <(_serve_ledgered_pid_starts)
   for f in "$(_serve_state)"/*.json; do
     [ -f "$f" ] || continue
     kind="$(jq -r '.kind // "unit"' "$f" 2>/dev/null)"
     if [ "$kind" = pid ]; then
       pid="$(jq -r '.pid // 0' "$f" 2>/dev/null)"
-      pstart="$(jq -r '.pid_start // ""' "$f" 2>/dev/null)"
-      if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
-        ledger_pids["$pid"]=1
-        [[ "$pstart" =~ ^[0-9]+$ ]] && ledger_starts+=("$pid:$pstart")
-      fi
+      [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ledger_pids["$pid"]=1
     else
       unit="$(jq -r '.unit // ""' "$f" 2>/dev/null)"
       if [ -n "$unit" ]; then
@@ -577,7 +618,7 @@ serve_adopt_json() {
   done
   rows="$(_serve_adopt_rows | jq -s 'reverse | unique_by(if (.pid // 0) > 0 then "pid:\(.pid)" else "unit:\(.unit)" end)')"
   if [ "${#ledger_starts[@]}" -gt 0 ]; then
-    while IFS= read -r pid; do covered["$pid"]=1; done \
+    while read -r pid _; do covered["$pid"]=1; done \
       < <(printf '%s' "$rows" | jq -r '.[] | .pid // empty' | _serve_ledgered_descendants "${ledger_starts[@]}")
   fi
   while IFS= read -r row; do
@@ -638,6 +679,10 @@ serve_adopt() { # <unit|pid> <owner> <workspace> <ttl-seconds|permanent> <port|"
   rows="$(serve_adopt_json)"
   row="$(printf '%s' "$rows" | jq -ce --arg target "$target" '[.[] | select((.unit // "") == $target or ((.pid // 0) | tostring) == $target)] | .[0] // empty')" || row=''
   if [ -z "$row" ]; then
+    if [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
+      local by
+      by="$(_serve_covering_server "$target")" && die "cel serve adopt: $target is already covered by registered server $by"
+    fi
     [ "$permanent" = true ] && ! [[ "$target" =~ ^[0-9]+$ ]] && _serve_name_ok "$target" \
       || die 'cel serve adopt: target is not a running unledgered server'
     case "$target" in cel-serve-*) ;; cel-*) die "cel serve adopt: $target is one of Celestial's own services, not a server to register" ;; esac
