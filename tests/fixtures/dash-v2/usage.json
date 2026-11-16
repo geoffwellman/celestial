@@ -21,7 +21,7 @@
     {"who": "ben@alpha.test", "account": "ant-ben", "tags": ["workers", "not orch"], "state": "enabled", "reason": "", "at_risk": false,
      "windows": [
       {"label": "5 hours", "name": "5h", "scope": null, "used_pct": null, "resets": null, "projected_pct": null, "level": "ok", "at_risk": false, "reset": true, "history": []},
-      {"label": "Week", "name": "7d", "scope": null, "used_pct": 17, "resets": "2030-10-11T19:00:00Z", "projected_pct": 45, "level": "ok", "at_risk": false, "history": []}]}]},
+      {"label": "Week", "name": "7d", "scope": null, "used_pct": 17, "resets": "2030-10-11T19:00:00Z", "projected_pct": 45, "level": "ok", "at_risk": false, "last_known": true, "read_at": "2030-10-08T06:00:00Z", "history": []}]}]},
   {"provider": "codex", "title": "ChatGPT (codex)",
    "who": {"orch": false, "workers": false},
    "accounts": [

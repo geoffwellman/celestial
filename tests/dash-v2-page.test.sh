@@ -236,6 +236,8 @@ test_dash_v2page_usage_card_is_structured_from_the_mockup() {
   assert_eq "$(_vpj .amber)" "1"
   # ben's 5-hour window has reset with no fresh reading: said, not drawn as 0%
   assert_eq "$(_vpj .resetWins)" "0"
+  # ben's week could not be re-read: still drawn with its number, marked last known
+  assert_eq "$(_vpj .lastKnown)" "17%"
   assert_eq "$(_vpj .tags)" "orch,workers,workers,not orch"
   assert_eq "$(_vpj .money)" "deepseek · alpha, bundle|openrouter · bundle|openrouter · gadget"
   assert_eq "$(_vpj .overlaySparks)" "2"

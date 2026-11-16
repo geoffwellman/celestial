@@ -634,6 +634,41 @@ test_v2_usage_draws_a_window_whose_reset_passed_with_no_number() {
   _v2_down
 }
 
+# A RESET WITH NO ZONE IS UTC, as the shared rule reads it (sub_epoch in
+# lib/quota.sh), whatever zone the dashboard runs in; epoch seconds are
+# seconds. Read as local time at UTC+14, a reset three hours ahead was eleven
+# hours gone, and the card drew a running window as reset.
+test_v2_usage_reads_a_zoneless_reset_as_utc_like_the_shared_rule() {
+  export TZ=Pacific/Kiritimati
+  _v2_boot; _v2_quota_fixture
+  local ahead secs
+  ahead="$(date -u -d "@$(( $(date +%s) + 10800 ))" +%Y-%m-%dT%H:%M:%S)"
+  secs="$(( $(date +%s) + 10800 ))"
+  jq --arg z "$ahead" --argjson s "$secs" '.subscriptions[1].windows[0] |= (.used_pct = 30 | .resets_at = $z)
+    | .subscriptions[2].windows[0] |= (.used_pct = 30 | .resets_at = $s)' \
+    "$T/quota.json" > "$T/q.json" && mv "$T/q.json" "$T/quota.json"
+  local u; u="$(_v2_get "$(_v2_url usage)")"
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .windows[0] | [(.reset // false), .used_pct, .resets]')" \
+    "[false,30,\"${ahead}.000Z\"]"
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[1].accounts[0].windows[0] | [(.reset // false), .used_pct, .resets]')" \
+    "[false,30,\"${ahead}.000Z\"]"
+  _v2_down
+}
+
+# A LAST-KNOWN WINDOW - the read failed, its window still running - keeps its
+# number, says when it was read, and still counts: a spent week is at risk.
+test_v2_usage_keeps_a_last_known_window_and_says_so() {
+  _v2_boot; _v2_quota_fixture
+  local read; read="$(date -u -d "@$(( $(date +%s) - 600 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  jq --arg r "$read" '.subscriptions[1].windows[0] |= (.used_pct = 100 | .stale = true | .read_at = $r)' \
+    "$T/quota.json" > "$T/q.json" && mv "$T/q.json" "$T/quota.json"
+  local u; u="$(_v2_get "$(_v2_url usage)")"
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .windows[0] | [.last_known, .read_at, .used_pct, .at_risk]')" \
+    "[true,\"${read%Z}.000Z\",100,true]"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.summary.at_risk[].who] | join(",")')" "ana@alpha.test,ben@alpha.test"
+  _v2_down
+}
+
 test_v2_usage_merges_a_shared_balance_and_counts_below_floor() {
   _v2_boot; _v2_quota_fixture
   local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"
