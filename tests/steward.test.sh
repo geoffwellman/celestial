@@ -1110,7 +1110,7 @@ _sub_fixture() { # <five-hour-pct>
   subscription_usage() {
     jq -nc --argjson p "$SUB_PCT" \
       '{provider: "claude", account: "a1b2c3",
-        windows: [{name: "5h", used_pct: $p, resets_at: "2026-09-18T09:00:00Z"}],
+        windows: [{name: "5h", used_pct: $p, resets_at: "2099-09-18T09:00:00Z"}],
         extra: {state: "enabled", reason: ""}}'
   }
 }
@@ -2542,6 +2542,99 @@ test_steward_clears_the_pace_item_once_the_reset_passes_and_never_cites_it() {
   if grep -qF "$past" "$f"; then echo "cited a reset already past: $past"; return 1; fi
   rm -rf "$T"
 }
+
+# AH-261116: the same thing the way it reached the box. The reading is in the
+# real cache (no stub for the list), its reset in Anthropic's own spelling
+# (`...T02:09:59.995970+00:00`), and the clock really passes that reset - the
+# steward remembers what it quoted, so the test cannot fake the time by
+# rewriting the reading. Then the account's own read fails (down, or
+# rate-limited). Both steward items come down ONCE and stay down, the cached
+# list says "reset, no fresh reading", and only a fresh reading of the new
+# window over the line raises again - at once, because the four-hour repeat
+# window spoke for the window that is over.
+_reset_fixture() {
+  source "$CEL_ROOT/lib/quota.sh"
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward CEL_CACHE="$T/cache"
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR" "$CEL_CACHE"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  export CEL_SUB_ANTHROPIC_URL="http://127.0.0.1:1/api/oauth/usage"
+  _subscription_accounts() { printf 'claude\tpi\tfixture-token\n'; }
+}
+_reset_reading() { # <window> <used-pct> <seconds-to-reset>: pi's reading, taken just now
+  RESET_AT=$(( $(date +%s) + $3 ))
+  jq -nc --arg w "$1" --argjson u "$2" --arg r "$(date -u -d "@$RESET_AT" +%Y-%m-%dT%H:%M:%S.995970+00:00)" \
+    '{provider: "claude", account: "pi", label: "ana@alpha.test", source: "direct",
+      windows: [{name: $w, scope: null, used_pct: $u, resets_at: $r}],
+      extra: {state: "enabled", reason: ""}}' > "$(_sub_cache_file claude pi)"
+}
+# The clock passes the reading's reset. By then the reading is ten minutes
+# old, so the account's next read is a fresh one - which fails here.
+_reset_passes() {
+  while [ "$(date +%s)" -le "$RESET_AT" ]; do sleep 0.2; done
+  touch -d "@$(( $(date +%s) - 600 ))" "$(_sub_cache_file claude pi)"
+}
+
+_reset_pace_case() { # <window>
+  _reset_fixture
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id past i
+  _reset_reading "$1" 97 5
+  _steward_usage_pace >/dev/null 2>&1
+  id="$(_inbox_open_fp alpha usage-pace steward root)"
+  [ -n "$id" ] || { echo "97% of $1 raised no usage-pace item"; return 1; }
+  # the reset passes and nothing re-reads the account - the incident: the
+  # gateway's reading sat in the cache four hours past its reset
+  _reset_passes
+  past="$(jq -r '.windows[0].resets_at' "$(_sub_cache_file claude pi)")"
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_usage_pace >/dev/null 2>&1; done
+  assert_eq "$(_inbox_open_fp alpha usage-pace steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "update" and .ref == $i)] | length' "$f")" "0"
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "resolution" and .ref == $i)] | length' "$f")" "1"
+  # the raise quoted it while it was ahead; nothing said since does
+  assert_eq "$(jq -s --arg i "$id" --arg p "$past" '[.[] | select(.id != $i) | (.message // "") | select(contains($p))] | length' "$f")" "0"
+  assert_eq "$(_sub_line "$(subscription_list --cached | jq -c '.[0]')")" "$1 reset, no fresh reading   "
+  # then the account's own read fails: still down, still said once
+  for i in 1 2 3; do
+    _STEWARD_WINDOW=0 _steward_subscriptions >/dev/null 2>&1
+    _STEWARD_WINDOW=0 _steward_usage_pace >/dev/null 2>&1
+  done
+  assert_eq "$(_inbox_open_fp alpha usage-pace steward root)" ""
+  assert_eq "$(jq -s '[.[] | select((.message // "") | startswith("cleared:"))] | length' "$f")" "1"
+  assert_eq "$(_sub_line "$(subscription_list --cached | jq -c '.[0]')")" "$1 reset, no fresh reading   unreadable: the usage endpoint could not be read - not signed in here, or it is down"
+  # the new window, read fresh and over the line: raised again, at once
+  _reset_reading "$1" 97 600
+  _steward_usage_pace >/dev/null 2>&1
+  [ -n "$(_inbox_open_fp alpha usage-pace steward root)" ] || {
+    echo "a fresh post-reset reading at 97% of $1 raised nothing"; return 1; }
+  rm -rf "$T"
+}
+test_steward_clears_a_5h_pace_item_after_its_reset_until_a_fresh_reading() { _reset_pace_case 5h; }
+test_steward_clears_a_7d_pace_item_after_its_reset_until_a_fresh_reading() { _reset_pace_case 7d; }
+
+_reset_sub_case() { # <window>
+  _reset_fixture
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id i
+  _reset_reading "$1" 97 5
+  _steward_subscriptions >/dev/null 2>&1
+  id="$(_inbox_open_fp alpha sub-claude-pi steward root)"
+  [ -n "$id" ] || { echo "97% of $1 raised no subscription item"; return 1; }
+  _reset_passes
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_subscriptions >/dev/null 2>&1; done
+  assert_eq "$(_inbox_open_fp alpha sub-claude-pi steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "update" and .ref == $i)] | length' "$f")" "0"
+  assert_eq "$(jq -s '[.[] | select((.message // "") | startswith("cleared:"))] | length' "$f")" "1"
+  assert_contains "$(jq -r 'select((.message // "") | startswith("cleared:")) | .message' "$f")" "$1 reset, no fresh reading"
+  assert_eq "$(_sub_line "$(subscription_list --cached | jq -c '.[0]')")" "$1 reset, no fresh reading   unreadable: the usage endpoint could not be read - not signed in here, or it is down"
+  _reset_reading "$1" 97 600
+  _steward_subscriptions >/dev/null 2>&1
+  [ -n "$(_inbox_open_fp alpha sub-claude-pi steward root)" ] || {
+    echo "a fresh post-reset reading at 97% of $1 raised nothing"; return 1; }
+  rm -rf "$T"
+}
+test_steward_clears_a_5h_subscription_item_after_its_reset_until_a_fresh_reading() { _reset_sub_case 5h; }
+test_steward_clears_a_7d_subscription_item_after_its_reset_until_a_fresh_reading() { _reset_sub_case 7d; }
 
 # Ticks never overlap. A tick that finds one running exits at once,
 # before it touches herdr, gc or anything else.

@@ -890,7 +890,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (now - lastRecord < 55000) return;
     lastRecord = now;
     const u = {};
-    for (const s of q.subscriptions) for (const w of s.windows || []) u[winKey(s, w)] = Math.round((Number(w.used_pct) || 0) * 10) / 10;
+    // a window that has reset has no reading to keep (lib/quota.sh _SUB_RESET_JQ)
+    for (const s of q.subscriptions) for (const w of s.windows || []) if (!w.reset && w.used_pct != null) u[winKey(s, w)] = Math.round((Number(w.used_pct) || 0) * 10) / 10;
     try {
       mkdirSync(STATE_DIR, { recursive: true });
       appendFileSync(USAGE_RING(), JSON.stringify({ ts: new Date(now).toISOString(), u }) + '\n');
@@ -906,13 +907,19 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return w.scope ? `${w.scope} ${base === 'Week' ? 'week' : base.toLowerCase()}` : base;
   };
   // used / fraction of the window gone; quota_at_risk in lib/quota.sh is the
-  // steward's copy of this rule and the two must agree - including that a
-  // window whose reset has already passed is a stale reading, never at risk
+  // steward's copy of this rule and the two must agree
   const project = (used, len, resets, now) => {
     if (!len || !resets) return used;
     const frac = (len - (resets - now)) / len;
     return frac > 0.05 && frac <= 1 ? Math.min(999, Math.round(used / frac)) : Math.round(used);
   };
+  // A WINDOW WHOSE RESET HAS PASSED HAS NO NUMBER (AH-261116). `cel quota`
+  // reads every row through lib/quota.sh's one rule (_SUB_RESET_JQ) and marks
+  // such a window `reset: true`; this card holds that answer for a minute -
+  // longer while the read fails - so a reset can also pass under it, and the
+  // same test is applied to what it holds. Either way: reset, no fresh
+  // reading - never the old number, never at risk.
+  const isReset = (w, resets, now) => w.reset === true || (resets !== null && resets <= now);
   const level = (pct) => (pct >= 95 ? 'bad' : pct >= 75 ? 'warn' : 'ok');
   const usage = async (wss) => {
     const q = (await quota()) || {};
@@ -935,15 +942,17 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         if (dead.has(lw)) tags.push('not orch');
       } else if (gw.has(`${s.provider}|${lw}`)) tags.push('workers');
       const windows = (s.windows || []).map((w) => {
-        const used = Math.round(Number(w.used_pct) || 0);
         const len = winLen(w.name);
         const resets = new Date(w.resets_at).getTime() || null;
-        const projected = project(used, len, resets, now);
         const key = winKey(s, w);
         const history = ring.filter((r) => r.u && r.u[key] !== undefined).map((r) => [r.ts, r.u[key]]);
-        return { label: winLabel(w), name: w.name, scope: w.scope || null, used_pct: used, resets: iso(w.resets_at),
+        const base = { label: winLabel(w), name: w.name, scope: w.scope || null, len: len || 0, history: history.length > 1 ? history.slice(-200) : [] };
+        if (isReset(w, resets, now)) return { ...base, reset: true, used_pct: null, resets: null, projected_pct: null, level: 'ok', at_risk: false };
+        const used = Math.round(Number(w.used_pct) || 0);
+        const projected = project(used, len, resets, now);
+        return { ...base, used_pct: used, resets: iso(w.resets_at),
           projected_pct: projected, level: level(Math.max(used, projected >= 100 ? 75 : 0)),
-          at_risk: !(resets && resets <= now) && (projected >= 100 || used >= 95), len: len || 0, history: history.length > 1 ? history.slice(-200) : [] };
+          at_risk: projected >= 100 || used >= 95 };
       }).sort((a, b) => (a.len - b.len) || String(a.scope || '').localeCompare(String(b.scope || '')));
       for (const w of windows) {
         if (w.at_risk) atRisk.push({ who, provider: s.provider, window: w.label, used_pct: w.used_pct, projected_pct: w.projected_pct, resets: w.resets });

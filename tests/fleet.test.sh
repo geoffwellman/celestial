@@ -282,7 +282,7 @@ test_fleet_json_carries_subscriptions_from_the_cache() {
   export CEL_CACHE="$T/cache"
   mkdir -p "$CEL_CACHE"
   jq -nc '{provider: "claude", account: "a1b2c3",
-           windows: [{name: "5h", used_pct: 16, resets_at: "2026-09-18T09:00:00Z"}],
+           windows: [{name: "5h", used_pct: 16, resets_at: "2099-09-18T09:00:00Z"}],
            extra: {state: "enabled", reason: ""}}' \
     > "$CEL_CACHE/subscription-claude-a1b2c3.json"
   local doc; doc="$(cmd_fleet --json --workspace alpha)"
@@ -308,7 +308,7 @@ test_fleet_subscriptions_are_the_quota_list_folded_the_same_way() {
   _fleet_setup
   export CEL_CACHE="$T/cache35"
   mkdir -p "$CEL_CACHE"
-  local w='[{"name":"5h","used_pct":16,"resets_at":"2026-09-18T09:00:00Z"}]'
+  local w='[{"name":"5h","used_pct":16,"resets_at":"2099-09-18T09:00:00Z"}]'
   jq -nc --argjson w "$w" '{provider: "claude", account: "pi", label: "pi", source: "direct",
                             windows: $w, extra: {state: "enabled", reason: ""}}' \
     > "$CEL_CACHE/subscription-claude-pi.json"

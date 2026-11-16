@@ -1366,6 +1366,31 @@ _steward_quota() {
   done
 }
 
+# WHAT AN OPEN ITEM QUOTES, KEPT (AH-261116). A subscription item names a
+# window and the reset it is waiting for. Once that reset has passed, the item
+# is about a window that is over: what it says is no longer true, and the
+# repeat window that kept it quiet spoke for that window too. So each raise
+# keeps the reset it quotes (`cite-<key> <epoch> <window>`), and the first
+# tick past it forgets both - the item is then taken down, or re-raised AT ONCE
+# when a fresh reading of the new window is over the line.
+_steward_cite() { # <key> [epoch] [window]: what the item just raised quotes; none forgets it
+  if [ -n "${2:-}" ]; then
+    _steward_state_edit "$_STEWARD_STATE" _steward_state_set "cite-$1" "$2" "${3:--}" || true
+  elif _steward_state_has "cite-$1"; then
+    _steward_forget "cite-$1"
+  fi
+}
+# Once the reset the open item quoted has passed: prints its window (`-` when
+# it named none), forgets the quote and the item's repeat window, returns 0.
+_steward_cite_passed() { # <key>
+  local r="" w=""
+  read -r r w < <(awk -v k="cite-$1" '$1 == k { r = $2; w = $3 } END { print r, w }' "$_STEWARD_STATE" 2>/dev/null) || true
+  case "$r" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$r" -le "$(date +%s)" ] || return 1
+  _steward_forget "$1"; _steward_forget "cite-$1"
+  printf '%s' "${w:--}"
+}
+
 # THE SUBSCRIPTIONS, once per account per tick.
 #
 # The two windows the fleet actually runs on are invisible until they stop it:
@@ -1379,39 +1404,64 @@ _steward_quota() {
 # behind every workspace on this machine, so the item goes to the first
 # registered workspace's root mailbox - saying it once per box, not once per
 # workspace.
+#
+# A WINDOW THAT HAS RESET HAS NO NUMBER (_SUB_RESET_JQ in lib/quota.sh): it
+# never speaks for the account, and once the reset an open item quoted has
+# passed, that item comes down even when the fresh read fails - "reset, no
+# fresh reading" - and is raised again only on a fresh reading over the line.
 _steward_subscriptions() {
   # shellcheck source=lib/quota.sh
   . "$CEL_ROOT/lib/quota.sh"
   local ws; ws="$(registry_names | head -n1)"
   [ -n "$ws" ] || return 0
   local warn="${CEL_SUB_WARN_PCT:-80}"
-  local p a t doc worst wname resets state
+  local p a t key doc worst wname resets at gone
   while IFS=$'\t' read -r p a t; do
     [ -n "$p" ] || continue
+    key="sub-$p-$a"
     doc="$(subscription_usage "$p" "$t" "$a" 2>/dev/null || true)"
     [ -n "$doc" ] || continue
+    gone="$(_steward_cite_passed "$key")" || gone=""
     # ONE LINE PER ACCOUNT, so the tightest window speaks for it: two lines
     # about one account is the same fact twice, and the operator acts on the
-    # shorter reset either way.
-    IFS=$'\t' read -r worst wname resets state <<< "$(printf '%s' "$doc" | jq -r '
-      ((.windows // []) | sort_by(-(.used_pct // 0)) | first) as $w
-      | [(($w.used_pct // -1)), ($w.name // ""), ($w.resets_at // ""), (.extra.state // "")]
+    # shorter reset either way. Only a window with a number speaks.
+    IFS=$'\t' read -r worst wname resets at <<< "$(printf '%s' "$doc" | jq -r "$_SUB_RESET_JQ"'
+      sub_row_now
+      | ([(.windows // [])[] | select(type == "object" and .reset != true and .used_pct != null)]
+       | sort_by(-.used_pct) | first) as $w
+      | [($w.used_pct // -1), ($w.name // ""), ($w.resets_at // ""),
+         (($w.resets_at // null) | sub_epoch | if . == null then "" else floor end)]
       | @tsv' 2>/dev/null || true)"
-    case "$worst" in ''|-1) continue ;; esac
+    case "$worst" in
+      ''|-1)
+        # Nothing with a number - the read failed, or every window reset. That
+        # is no evidence about a window still running, so an open item stays;
+        # but one whose quoted window is over comes down, once.
+        [ -n "$gone" ] && _steward_clear "$ws" "$key" \
+          "$p $a: ${gone/#-/its window} reset, no fresh reading - the window it warned about is over"
+        continue ;;
+    esac
 
     local pct; pct="$(printf '%.0f' "$worst" 2>/dev/null || printf 0)"
     if [ "$pct" -ge 100 ]; then
       c_err "$p $a: $wname window is spent (100%) - workers on that account are VETOED until it resets at $(sub_reset_human "$resets")"
-      _steward_due "sub-$p-$a" && _steward_raise "$ws" "sub-$p-$a" blocked \
-        "steward: the $p subscription $a has spent its $wname window (100%). Delegations routed there will refuse until it resets at $(sub_reset_human "$resets")." || true
+      if _steward_due "$key"; then
+        _steward_raise "$ws" "$key" blocked \
+          "steward: the $p subscription $a has spent its $wname window (100%). Delegations routed there will refuse until it resets at $(sub_reset_human "$resets")."
+        _steward_cite "$key" "$at" "$wname"
+      fi
     elif [ "$pct" -ge "$warn" ]; then
       c_warn "$p $a: $wname window at $pct% (resets $(sub_reset_human "$resets"))"
-      _steward_due "sub-$p-$a" && _steward_raise "$ws" "sub-$p-$a" status \
-        "steward: the $p subscription $a is at $pct% of its $wname window, resetting at $(sub_reset_human "$resets"). Work routed there will start refusing at 100%." || true
+      if _steward_due "$key"; then
+        _steward_raise "$ws" "$key" status \
+          "steward: the $p subscription $a is at $pct% of its $wname window, resetting at $(sub_reset_human "$resets"). Work routed there will start refusing at 100%."
+        _steward_cite "$key" "$at" "$wname"
+      fi
     else
       # Back under the threshold: the steward takes its own item down rather
       # than leaving someone to work out whether a day-old warning still holds.
-      _steward_clear "$ws" "sub-$p-$a" "$p $a is back to $pct% of its $wname window - routes to it are clear"
+      _steward_clear "$ws" "$key" "$p $a is back to $pct% of its $wname window - routes to it are clear"
+      _steward_cite "$key"
     fi
   done < <(_subscription_accounts)
 }
@@ -1478,23 +1528,40 @@ _steward_orch_pool() {
 # window at 95%), updated in place while it stays true and resolved when the
 # pace no longer gets there. Read from the cached list - the steward never
 # asks a provider for this.
+#
+# A RESET THE ITEM QUOTED HAS PASSED (AH-261116): the list reads such a window
+# as reset with no number, so it is never quoted; the open item is re-raised
+# at once with what is still at risk, or comes down - and a fresh reading of
+# the new window over the line raises it again without waiting out the
+# repeat window.
 _steward_usage_pace() {
   # shellcheck source=lib/quota.sh
   command -v quota_at_risk >/dev/null 2>&1 || . "$CEL_ROOT/lib/quota.sh"
   local ws; ws="$(registry_names | head -n1)"
   [ -n "$ws" ] || return 0
+  local gone; gone="$(_steward_cite_passed usage-pace)" || gone=""
   local subs; subs="$(subscription_list --cached 2>/dev/null || true)"
-  # no cached reading is no evidence: leave whatever is open alone
-  [ -n "$subs" ] && [ "$subs" != "[]" ] || return 0
-  local risk; risk="$(printf '%s' "$subs" | quota_at_risk | jq -r '
+  # no cached reading is no evidence: leave whatever is open alone - unless
+  # what it quoted is over
+  if [ -z "$subs" ] || [ "$subs" = "[]" ]; then
+    [ -n "$gone" ] && _steward_clear "$ws" usage-pace "the window it named has reset, with no fresh reading since"
+    return 0
+  fi
+  local at risk
+  at="$(printf '%s' "$subs" | quota_at_risk)"
+  risk="$(printf '%s' "$at" | jq -r '
     map("\(.who) (\(.provider) \(.window)\(if .scope then " " + .scope else "" end): \(.used_pct)% now, ~\(.projected_pct)% at reset\(if .resets then " " + .resets else "" end))")
     | join("; ")' 2>/dev/null || true)"
   if [ -n "$risk" ]; then
     c_warn "usage on pace for a cap: $risk"
-    _steward_due "usage-pace" && _steward_raise "$ws" usage-pace status \
-      "steward: on this week's pace an account hits its cap before it resets - $risk. Move work off it or expect refusals." || true
+    if _steward_due "usage-pace"; then
+      _steward_raise "$ws" usage-pace status \
+        "steward: on this week's pace an account hits its cap before it resets - $risk. Move work off it or expect refusals."
+      _steward_cite usage-pace "$(printf '%s' "$at" | jq -r '[.[].reset_epoch | numbers] | min // empty' 2>/dev/null || true)"
+    fi
   else
     _steward_clear "$ws" usage-pace "no account is on pace to hit its cap before it resets"
+    _steward_cite usage-pace
   fi
 }
 

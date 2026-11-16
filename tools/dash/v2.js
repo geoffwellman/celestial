@@ -248,6 +248,9 @@ function uSpark(h){if(!h||h.length<2)return '';var t0=new Date(h[0][0]).getTime(
   var pts=h.map(function(p){return ((new Date(p[0]).getTime()-t0)/sp*100).toFixed(1)+','+(100-Math.min(100,p[1])).toFixed(1)}).join(' ');
   return '<svg class="uspark" viewBox="0 0 100 100" preserveAspectRatio="none"><polyline points="'+pts+'"/></svg>'}
 function uWin(w,big){
+  // a window whose reset has passed has no number until a fresh read: said, with an empty track
+  if(w.reset)return '<div class="uwin"><div class="ulab">'+esc(w.label)+' · <span class="sub">reset, no fresh reading</span></div><div class="ubar"></div>'+
+   (big?(uSpark(w.history)||'<div class="sub">no history yet</div>'):'')+'</div>';
   var pace=w.projected_pct!==w.used_pct&&w.projected_pct>w.used_pct;
   var head=w.at_risk?'<b class="'+(w.used_pct>=95?'neg':'amb')+'">'+esc(w.label)+' · '+w.used_pct+'%</b>':esc(w.label)+' · '+w.used_pct+'%';
   return '<div class="uwin"><div class="ulab">'+head+(w.resets?' · resets '+esc(whenShort(w.resets)):'')+'</div>'+

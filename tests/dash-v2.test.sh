@@ -615,6 +615,25 @@ test_v2_usage_does_not_flag_a_window_whose_reset_has_passed() {
   _v2_down
 }
 
+# AH-261116: nor does it draw the old number. The card holds its last `cel
+# quota` answer for a minute (longer while that read fails), so a reset can
+# pass under it; that window - like one `cel quota` already marked reset - is
+# drawn as reset with no number, no pace and no history point.
+test_v2_usage_draws_a_window_whose_reset_passed_with_no_number() {
+  _v2_boot; _v2_quota_fixture
+  local past; past="$(date -u -d "@$(( $(date +%s) - 3600 ))" +%Y-%m-%dT%H:%M:%S.995970+00:00)"
+  jq --arg p "$past" '.subscriptions[1].windows[0] |= (.used_pct = 97 | .resets_at = $p)
+    | .subscriptions[2].windows[0] |= {name: "7d", scope: null, used_pct: null, resets_at: null, reset: true}' \
+    "$T/quota.json" > "$T/q.json" && mv "$T/q.json" "$T/quota.json"
+  local u; u="$(_v2_get "$(_v2_url usage)")"
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .windows[0] | [.reset, .used_pct, .projected_pct, .level, .resets]')" \
+    '[true,null,null,"ok",null]'
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[1].accounts[0].windows[0] | [.reset, .used_pct, .projected_pct, .level]')" \
+    '[true,null,null,"ok"]'
+  assert_eq "$(printf '%s' "$u" | jq -r '[.summary.at_risk[].who] | join(",")')" "ana@alpha.test"
+  _v2_down
+}
+
 test_v2_usage_merges_a_shared_balance_and_counts_below_floor() {
   _v2_boot; _v2_quota_fixture
   local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"
