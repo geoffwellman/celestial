@@ -1253,11 +1253,31 @@ test_steward_restart_without_a_workspace_agent_refuses_naming_it() {
 _suite_lock_fixture() {
   T="$(mktemp -d)"
   export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
-  mkdir -p "$T/alpha/.cel" "$T/inbox"
-  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  mkdir -p "$T/alpha/.cel" "$T/beta/.cel" "$T/inbox"
+  # two workspaces, alpha first: root of the FIRST one hears about a box-wide
+  # lock, never root of every one
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
   printf 'name: alpha\nrepos: [{name: widget}]\n' > "$T/alpha/workspace.yaml"
+  printf 'name: beta\nrepos: [{name: gadget}]\n' > "$T/beta/workspace.yaml"
   CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
   export CEL_SUITE_LOCK="$T/suite.lock"
+}
+
+_suite_lock_hold() { # -> sets holder: a live process holding the fixture lock, aged 31m
+  ( flock 9; exec sleep 30 ) 9>>"$CEL_SUITE_LOCK" &
+  holder=$!
+  local i=0
+  while flock -n "$CEL_SUITE_LOCK" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); [ "$i" -lt 50 ] || break; done
+  printf '%s %s\n' "$holder" "$(date +%H:%M)" > "$CEL_SUITE_LOCK"
+  touch -d '31 minutes ago' "$CEL_SUITE_LOCK"
+}
+_suite_lock_start_of() { # <pid> -> its start tick, as tests/run.sh records it
+  local s; s="$(cat "/proc/$1/stat")"; s="${s##*) }"
+  printf '%s' "$(printf '%s\n' "$s" | awk '{print $20}')"
+}
+_suite_lock_record() { # <pid> <start> - the holder record tests/run.sh writes
+  printf 'pid=%s\nstart=%s\nagent=beta-orch\nworkspace=beta\nworktree=/w/beta-checkout\nfiles=gc.test.sh steward.test.sh\nsince=%s\n' \
+    "$1" "$2" "$(( $(date +%s) - 31 * 60 ))" > "$CEL_SUITE_LOCK.holder"
 }
 
 test_steward_reports_a_suite_lock_held_past_the_warning_and_clears_it() {
@@ -1279,6 +1299,9 @@ test_steward_reports_a_suite_lock_held_past_the_warning_and_clears_it() {
   local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
   assert_eq "$(printf '%s\n' "$mail" | grep -c 'suite lock held' || true)" "1"
   assert_contains "$mail" "by pid $holder"
+  # no holder record: today's words, to root of the first workspace only
+  assert_contains "$mail" "(worktree "
+  assert_eq "$(cmd_inbox read --for root --workspace beta --all)" ""
   assert_contains "$mail" "31m"
 
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
@@ -1306,6 +1329,80 @@ test_steward_says_nothing_about_a_suite_lock_held_for_a_normal_run() {
   _steward_suite_lock >/dev/null 2>&1
   assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  rm -rf "$T"
+}
+
+# WHO, WHERE, DOING WHAT - AND TOLD TO THEM. The runner leaves a holder record
+# beside the lock; the alert names the agent, its worktree and what it is
+# running, goes to that agent's own mailbox, and root of the box's first
+# workspace hears it once. The clear goes to the same two.
+test_steward_names_the_suite_lock_holder_and_tells_it_and_root_once() {
+  _suite_lock_fixture
+  local holder; _suite_lock_hold
+  _suite_lock_record "$holder" "$(_suite_lock_start_of "$holder")"
+  local j
+  for j in 1 2 3; do _steward_suite_lock >/dev/null 2>&1; done
+  local own root_a root_b
+  own="$(cmd_inbox read --for beta-orch --workspace beta --all)"
+  root_a="$(cmd_inbox read --for root --workspace alpha --all)"
+  root_b="$(cmd_inbox read --for root --workspace beta --all)"
+  assert_eq "$(printf '%s\n' "$own" | grep -c 'suite lock held' || true)" "1"
+  assert_contains "$own" "beta-orch"
+  assert_contains "$own" "/w/beta-checkout"
+  assert_contains "$own" "gc.test.sh steward.test.sh"
+  assert_contains "$own" "31m"
+  assert_eq "$(printf '%s\n' "$root_a" | grep -c 'suite lock held' || true)" "1"
+  assert_contains "$root_a" "beta-orch"
+  assert_contains "$root_a" "/w/beta-checkout"
+  assert_eq "$root_b" ""
+
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _steward_suite_lock >/dev/null 2>&1
+  _steward_suite_lock >/dev/null 2>&1
+  own="$(cmd_inbox read --for beta-orch --workspace beta --all)"
+  root_a="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_eq "$(printf '%s\n' "$own" | grep -c 'cleared: the suite lock is free again' || true)" "1"
+  assert_eq "$(printf '%s\n' "$root_a" | grep -c 'cleared: the suite lock is free again' || true)" "1"
+  assert_eq "$(cmd_inbox read --for root --workspace beta --all)" ""
+  assert_eq "$(_inbox_open_fp beta suite-lock steward beta-orch)" ""
+  assert_eq "$(_inbox_open_fp alpha suite-lock steward root)" ""
+  rm -rf "$T"
+}
+
+# A RECORD FOR A DIFFERENT PROCESS NAMES NOBODY. A record left by a killed run
+# can carry a pid the kernel has since handed to the current holder; its start
+# time then disagrees, and the alert falls back to root alone.
+test_steward_ignores_a_suite_lock_holder_record_for_a_reused_pid() {
+  _suite_lock_fixture
+  local holder; _suite_lock_hold
+  _suite_lock_record "$holder" 1
+  _steward_suite_lock >/dev/null 2>&1
+  local root_a; root_a="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_contains "$root_a" "by pid $holder"
+  assert_contains "$root_a" "(worktree "
+  case "$root_a" in *beta-orch*) echo "a stale record named an agent"; kill "$holder"; rm -rf "$T"; return 1;; esac
+  assert_eq "$(cmd_inbox read --for beta-orch --workspace beta --all)" ""
+  assert_eq "$(cmd_inbox read --for root --workspace beta --all)" ""
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  rm -rf "$T"
+}
+
+# AN OLDER STEWARD told root in every workspace and left an empty marker. A
+# raise that lands while it is still held must not forget those recipients:
+# when the lock frees, every one of the old items comes down.
+test_steward_clears_every_workspace_an_older_steward_told_about_the_suite_lock() {
+  _suite_lock_fixture
+  local holder; _suite_lock_hold
+  local ws
+  for ws in alpha beta; do _steward_raise "$ws" suite-lock status "steward: suite lock held 31m by pid 1 (worktree x)"; done
+  : > "$T/state.suite-lock"
+  _steward_suite_lock >/dev/null 2>&1
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _steward_suite_lock >/dev/null 2>&1
+  for ws in alpha beta; do
+    assert_eq "$(_inbox_open_fp "$ws" suite-lock steward root)" ""
+    assert_contains "$(cmd_inbox read --for root --workspace "$ws" --all)" "cleared: the suite lock is free again"
+  done
   rm -rf "$T"
 }
 

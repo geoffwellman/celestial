@@ -222,6 +222,36 @@ test_the_lock_file_names_its_holders_pid_time_and_cwd() {
   rm -rf "$T"
 }
 
+# AND A PRIVATE RECORD BESIDE THE LOCK SAYS WHOSE RUN IT IS: the agent's
+# mailbox (read before the runner drops the caller's CEL_* identity), the
+# checkout's top level rather than whatever subdirectory it started in, the
+# files it was asked for, and the pid's kernel start time so a reader can tell
+# this run from a later process that reuses the pid. It goes with the run.
+test_the_holder_record_names_the_agent_worktree_and_files_and_goes_with_the_run() {
+  _suite_fixture
+  git -C "$T" init -q
+  ( cd "$T/tests" && CEL_INBOX_ME=beta-orch CEL_INBOX_WS=beta exec bash "$T/tests/run.sh" slow.test.sh > "$T/out" 2>&1 ) &
+  local p=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$p" 2>/dev/null; rm -rf "$T"; return 1; }
+  sleep 0.5
+  local rec="$CEL_SUITE_LOCK.holder"
+  [ -f "$rec" ] || { echo "no holder record beside the lock"; kill "$p" 2>/dev/null; rm -rf "$T"; return 1; }
+  local body start; body="$(cat "$rec")"
+  start="$(cut -d' ' -f22 "/proc/$p/stat")"
+  assert_eq "$(stat -c %a "$rec")" "600"
+  assert_contains "$body" "pid=$p"
+  assert_contains "$body" "start=$start"
+  assert_contains "$body" "agent=beta-orch"
+  assert_contains "$body" "workspace=beta"
+  assert_contains "$body" "worktree=$T"$'\n'
+  assert_contains "$body" "files=slow.test.sh"
+  assert_contains "$body" "since="
+  wait "$p" 2>/dev/null || true
+  assert_contains "$(cat "$T/out")" "1 passed, 0 failed"
+  [ ! -e "$rec" ] || { echo "the holder record outlived the run"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # A wait that has gone on long enough to be a problem says who to go and ask.
 # The one-line "waiting" notice is printed once at the start and then the run
 # is silent; after CEL_SUITE_WAIT_WARN seconds it says it again, with the

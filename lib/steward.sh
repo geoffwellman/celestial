@@ -102,7 +102,10 @@ _steward_due() { # <key>
 # THE STEWARD SAYS A THING ONCE. A raise carries a condition key, so a repeat
 # lands as an update on the item already open instead of a fresh item.
 _steward_raise() { # <ws> <fp> <kind> <message>
-  cmd_inbox send root "$4" --from steward --workspace "$1" --kind "$3" --fp "$2" \
+  _steward_raise_to "$1" root "$2" "$3" "$4"
+}
+_steward_raise_to() { # <ws> <to> <fp> <kind> <message>
+  cmd_inbox send "$2" "$5" --from steward --workspace "$1" --kind "$4" --fp "$3" \
     >/dev/null 2>&1 || true
 }
 
@@ -135,22 +138,26 @@ _steward_raise_on_change() { # <ws> <fp> <kind> <message>
 # something was resolved - a failed resolve leaves the item open, and the next
 # tick tries again rather than having said a false thing.
 _steward_clear_ids() { # <ws> <message> <id...>
-  local ws="$1" msg="$2" id n=0; shift 2
+  local ws="$1" msg="$2"; shift 2
+  _steward_clear_ids_to "$ws" root "$msg" "$@"
+}
+_steward_clear_ids_to() { # <ws> <to> <message> <id...>
+  local ws="$1" to="$2" msg="$3" id n=0; shift 3
   for id in "$@"; do
     [ -n "$id" ] || continue
     if cmd_inbox resolve "$id" --by steward --workspace "$ws" >/dev/null 2>&1; then n=$((n + 1)); fi
   done
   [ "$n" -gt 0 ] || return 0
-  cmd_inbox send root "cleared: $msg" --from steward --workspace "$ws" --kind status \
+  cmd_inbox send "$to" "cleared: $msg" --from steward --workspace "$ws" --kind status \
     >/dev/null 2>&1 || true
   c_ok "$ws: cleared - $msg"
 }
 
-_steward_clear() { # <ws> <fp> <message>
-  local ids; ids="$(_inbox_open_fp_ids "$1" "$2" steward root)" || return 0
+_steward_clear() { # <ws> <fp> <message> [to=root]
+  local to="${4:-root}" ids; ids="$(_inbox_open_fp_ids "$1" "$2" steward "$to")" || return 0
   [ -n "$ids" ] || return 0
   # shellcheck disable=SC2086 # ids are digits, one per line
-  _steward_clear_ids "$1" "$3" $ids
+  _steward_clear_ids_to "$1" "$to" "$3" $ids
 }
 
 # Every pane herdr can see, one per line. Empty means herdr did not answer,
@@ -1605,23 +1612,69 @@ _steward_suite_lock_path() {
   printf '%s/cel-suite-%s.lock' "${TMPDIR:-/tmp}" "${UID:-0}"
 }
 
+# THE HOLDER RECORD (tests/run.sh writes it beside the lock): pid, its kernel
+# start time, the caller's mailbox and workspace, the checkout and the files
+# asked for. It counts only when it describes the process holding the lock now
+# - the pid in the lock file, with the same start time - so a record a killed
+# run left behind, whose pid the kernel has since reused, names nobody. Sets
+# the caller's agent, hws, wt and files.
+_steward_suite_holder() { # <record> <pid>
+  local k v rpid="" rstart="" stat
+  local -a f
+  [ -f "$1" ] || return 1
+  while IFS='=' read -r k v; do
+    case "$k" in
+      pid) rpid="$v" ;; start) rstart="$v" ;; agent) agent="$v" ;;
+      workspace) hws="$v" ;; worktree) wt="$v" ;; files) files="$v" ;;
+    esac
+  done < "$1" 2>/dev/null
+  [ "$rpid" = "$2" ] && [ -n "$rstart" ] || return 1
+  { IFS= read -r stat < "/proc/$2/stat"; } 2>/dev/null || return 1
+  read -r -a f <<< "${stat##*) }"
+  [ "${f[19]:-}" = "$rstart" ]
+}
+
+# The holder's mailbox lives in its own workspace: the one its launch named, if
+# this box knows it, else the registered workspace its checkout is under.
+_steward_suite_holder_ws() { # <named-ws> <worktree>
+  local ws p
+  if [ -n "$1" ] && [ -n "$(registry_path "$1" 2>/dev/null)" ]; then printf '%s' "$1"; return 0; fi
+  [ -n "$2" ] || return 0
+  for ws in $(registry_names); do
+    p="$(registry_path "$ws" 2>/dev/null)" || continue
+    [ -n "$p" ] || continue
+    case "$2/" in "${p%/}/"*) printf '%s' "$ws"; return 0 ;; esac
+  done
+}
+
+# AN EMPTY MARKER is one an older steward left after telling root in every
+# workspace; it becomes those recipients, so their items are taken down where
+# they were raised - whichever path (clear, or a raise that appends) sees it.
+_steward_suite_marker_expand() { # <marker>
+  local ws
+  [ -f "$1" ] && [ ! -s "$1" ] || return 0
+  for ws in $(registry_names); do printf '%s\troot\n' "$ws"; done > "$1"
+}
+
 _steward_suite_lock() {
-  local path ws
+  local path ws to
   path="$(_steward_suite_lock_path)"
   [ "$path" = none ] && return 0
   have flock || return 0
 
   # Free, or gone entirely: whatever was said about it is no longer true. The
   # file surviving an unheld lock is normal - it is the descriptor that holds
-  # it, not the file - so its existence proves nothing on its own.
+  # it, not the file - so its existence proves nothing on its own. The clear
+  # goes to whoever was told, one line each, recorded in $raised as
+  # "<ws>\t<mailbox>" when the alert went out.
   local raised="$_STEWARD_STATE.suite-lock"
   if [ ! -f "$path" ] || flock -n "$path" -c true >/dev/null 2>&1; then
     [ -f "$raised" ] || return 0
-    # One line per workspace that was told: the clear says it, never a second
-    # `cleared:` beside it.
-    for ws in $(registry_names); do
-      _steward_clear "$ws" suite-lock "the suite lock is free again - gates are no longer queued"
-    done
+    _steward_suite_marker_expand "$raised"
+    while IFS=$'\t' read -r ws to; do
+      [ -n "$ws" ] && [ -n "$to" ] || continue
+      _steward_clear "$ws" suite-lock "the suite lock is free again - gates are no longer queued" "$to"
+    done < "$raised"
     rm -f "$raised"
     return 0
   fi
@@ -1638,18 +1691,48 @@ _steward_suite_lock() {
   age=$(( $(date +%s) - mtime ))
   [ "$age" -ge "$_STEWARD_SUITE_HOLD_WARN_SECS" ] || return 0
 
-  # Which tree it is running in, if the kernel will say. Unknown is not a
-  # reason to stay quiet: the pid and the duration are already actionable.
-  local wt="unknown"
-  [ "$pid" = "?" ] || wt="$(readlink "/proc/$pid/cwd" 2>/dev/null || printf unknown)"
-  local msg
-  msg="steward: suite lock held $(( age / 60 ))m by pid $pid (worktree $wt) - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
+  # Whose run, where and doing what, from the holder record when it is this
+  # holder's. Without one, which tree it is running in if the kernel will
+  # say; unknown is not a reason to stay quiet: the pid and the duration are
+  # already actionable.
+  local agent="" hws="" wt="" files="" ows="" msg
+  if [ "$pid" != "?" ] && _steward_suite_holder "$path.holder" "$pid"; then
+    local who="pid $pid"
+    [ -z "$agent" ] || who="$agent (pid $pid)"
+    # The record is the holder's own words: each field is capped, so a long
+    # path or filter cannot swell every mailbox it lands in.
+    : "${wt:=unknown}" "${files:=all}"
+    msg="steward: suite lock held $(( age / 60 ))m by $who in worktree ${wt:0:200}, running ${files:0:200} - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
+    [ -z "$agent" ] || ows="$(_steward_suite_holder_ws "$hws" "$wt")"
+  else
+    agent=""
+    wt="unknown"
+    [ "$pid" = "?" ] || wt="$(readlink "/proc/$pid/cwd" 2>/dev/null || printf unknown)"
+    msg="steward: suite lock held $(( age / 60 ))m by pid $pid (worktree $wt) - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
+  fi
   c_warn "$msg"
   # Once per window, not once per tick: the steward says a thing once, and a
   # suite that is going to take an hour will still be there in five minutes.
   _steward_due suite-lock || return 0
-  : > "$raised"
-  for ws in $(registry_names); do _steward_raise "$ws" suite-lock status "$msg"; done
+  # The lock is the box's, not any workspace's: root hears it once, in the
+  # box's first workspace, and the holder hears it in its own mailbox.
+  # Recipients accumulate until the lock is free: a later window with a
+  # different holder must not forget the mailbox the first one was told in.
+  local first line; first="$(registry_names | sed -n 1p)"
+  local -a tell=()
+  [ -z "$first" ] || tell+=("$first"$'\t'root)
+  if [ -n "$ows" ]; then
+    line="$ows"$'\t'"$(_inbox_sanitise "$agent")"
+    [ "$line" = "${tell[0]:-}" ] || tell+=("$line")
+  fi
+  _steward_suite_marker_expand "$raised"
+  touch "$raised"
+  for line in "${tell[@]}"; do
+    grep -qxF -- "$line" "$raised" 2>/dev/null || printf '%s\n' "$line" >> "$raised"
+  done
+  for line in "${tell[@]}"; do
+    _steward_raise_to "${line%%$'\t'*}" "${line#*$'\t'}" suite-lock status "$msg"
+  done
 }
 
 # AFK IS A MODE WITH AN HOUR ON IT, and the steward is the thing still running
