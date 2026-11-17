@@ -747,7 +747,7 @@ _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug prsj ref
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   # shellcheck source=lib/solo.sh
-  . "${BASH_SOURCE[0]%/*}/solo.sh"   # solo_pr_list_authors: whose PRs are ours
+  . "${BASH_SOURCE[0]%/*}/solo.sh"   # solo_owned_prs_load: our open PRs, once per tick
   # Owner cards (_steward_owner_prs) silence the red, changes-requested and
   # no-worker nudges for their PRs. Read once per workspace.
   local -A owner_prs
@@ -768,19 +768,15 @@ _steward_review_sweep() { # <agents-json>
       # ONLY OUR OWN PRs. Every PR a solo agent opens is authored by the
       # token cel runs under, so `--author @me` is the ownership line - plus
       # each author repos[].pr_authors lists (a bot that opens the product's
-      # PRs; lib/solo.sh solo_pr_author_ok), one list each, merged by number.
+      # PRs; lib/solo.sh solo_pr_author_ok). The tick lists them once per
+      # repo (solo_owned_prs_load, gh's own fields for a GitHub repo) and the
+      # solo sweep reuses that listing; an author whose list cannot be read
+      # is skipped, the others still nudged.
       # A colleague's PR must never be nudged into "action it now".
       # Colleagues' PRs are theirs to land. This filter guards every check
       # below it, including reminders about our ticket naming convention.
-      local pra one prs_ok=1
-      prsj='[]'
-      for pra in $(solo_pr_list_authors "$wsdir" "$repo"); do
-        one="$(ws_gh "$wsdir" pr list --repo "$slug" --author "$pra" \
-              --json number,headRefName,headRefOid,reviewDecision,isDraft,statusCheckRollup,createdAt,labels,reviews 2>/dev/null)" \
-          && prsj="$(jq -c --argjson o "$one" '(. + $o) | unique_by(.number)' <<<"$prsj" 2>/dev/null)" \
-          || { prs_ok=0; break; }
-      done
-      [ "$prs_ok" = 1 ] || continue
+      solo_owned_prs_load "$wsdir" "$repo" || continue
+      prsj="$(solo_owned_prs_github "$wsdir" "$repo")" || continue
       # A `superseded` or `hold` PR (_STEWARD_JQ_LEFT_ALONE) is dropped before
       # any check below sees it.
       prsj="$(printf '%s' "$prsj" | jq -c "$_STEWARD_JQ_LEFT_ALONE"'[.[] | select([.labels[]?.name] | left_alone | not)]' 2>/dev/null)" || continue
@@ -892,6 +888,13 @@ _steward_solo_sweep() { # [agents-json]
     owner=""
     for product in $(ws_product_names "$wsdir"); do
       [ "$(ws_build_mode "$wsdir" "$product")" = solo ] || continue
+      # read here, in this shell, so the lists below (each in its own
+      # subshell) reuse this tick's one listing per repo (solo_owned_prs_load)
+      if [ "${_SOLO_OWNED_REUSE:-0}" = 1 ]; then
+        while IFS= read -r repo; do
+          [ -z "$repo" ] || solo_owned_prs_load "$wsdir" "$repo" || true
+        done < <(ws_product_repos "$wsdir" "$product")
+      fi
       while IFS=$'\t' read -r repo pr head; do
         [ -n "$pr" ] || continue
         # ONCE PER HEAD, NOT ONCE PER WINDOW: the default dedup window is four
@@ -959,7 +962,7 @@ _steward_solo_changes() { # <ws> <wsdir> <product> <owner-pr-refs, one per line>
                             and .value.verdict? == "changes" and ((.value.head? // "") | test("^[0-9a-f]{40}$")))
       | [(.key | ltrimstr($p)), .value.head] | @tsv' 2>/dev/null || true)
     [ "${#pending[@]}" -gt 0 ] || continue
-    prs="$(solo_owned_prs "$wsdir" "$repo" 50 2>/dev/null)" || continue
+    prs="$(solo_owned_prs "$wsdir" "$repo" 2>/dev/null)" || continue
     for pr in "${pending[@]}"; do
       num="${pr%% *}" vhead="${pr#* }"
       idle="solo-changes-idle-$ws-$repo-$num-${vhead:0:12}"
@@ -2428,8 +2431,13 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   agents_json="$(cel_agent_list 2>/dev/null)" || { agents_json=""; c_warn "agent discovery unavailable - liveness observations skipped"; }
   _steward_sample "$agents_json"
 
-  _steward_review_sweep "$agents_json"
-  _steward_solo_sweep "$agents_json"
+  # one listing of our open PRs per repo for the whole tick (lib/solo.sh
+  # solo_owned_prs_load): the review sweep reads it first, the solo sweep reuses it
+  # shellcheck source=lib/solo.sh
+  . "${BASH_SOURCE[0]%/*}/solo.sh"
+  solo_owned_prs_reset
+  _SOLO_OWNED_REUSE=1 _steward_review_sweep "$agents_json"
+  _SOLO_OWNED_REUSE=1 _steward_solo_sweep "$agents_json"
   # feature teams: reservations nobody confirmed, verdicts a newer candidate
   # outdated - the lead is told; nothing is retired
   _steward_team_sweep

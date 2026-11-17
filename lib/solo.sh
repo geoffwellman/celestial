@@ -187,7 +187,9 @@ solo_extra_gaps() { # <extra-approvals-json> <repo> <pr> <head>
 # `own` when the workspace's account on the forge (<me>) opened it, `listed`
 # when its author is one repos[].pr_authors names for <repo> (committed
 # workspace.yaml only, lib/workspace.sh ws_repo_pr_authors); else nothing and
-# status 1. `cel solo review`, `cel solo land` and the steward's PR nudges
+# status 1. EXACT MATCH, never normalised: GitHub reports an App's PRs as
+# `app/<name>`, and a human whose login is `<name>` must not pass as the App.
+# `cel solo review`, `cel solo land` and the steward's PR lists
 # (solo_owned_prs) all ask this, so none of them can disagree.
 solo_pr_author_ok() { # <wsdir> <repo> <author> <me> -> own|listed, or status 1
   [ -n "$3" ] || return 1
@@ -202,22 +204,74 @@ solo_pr_author_hint() { # <repo> <author>
     "${2:-that author}" "$1" "${2:-<login>}"
 }
 # The authors whose open PRs are ours, as a forge's PR list takes them: the
-# account as @me, then each listed login. The steward's review sweep lists
-# through gh by these; solo_owned_prs through lib/forge.sh.
+# account as @me, then each listed login. Read into an array by the callers
+# (mapfile), never word-split: a login is data, not a pattern.
 solo_pr_list_authors() { # <wsdir> <repo> -> one author a line
   printf '@me\n'
   ws_repo_pr_authors "$1" "$2" 2>/dev/null || true
 }
-# The open PRs solo_pr_author_ok calls ours: one forge_pr_list per author
-# (solo_pr_list_authors), merged by number. A list that cannot be read
-# fails the whole answer - silence, never half of it.
-solo_owned_prs() { # <wsdir> <repo> [limit] -> JSON array
-  local wsdir="$1" repo="$2" limit="${3:-50}" a one all='[]'
-  for a in $(solo_pr_list_authors "$wsdir" "$repo"); do
-    one="$(_solo_forge forge_pr_list "$wsdir" "$repo" open --author "$a" --limit "$limit")" || return 1
-    all="$(jq -c --argjson o "$one" '(. + $o) | unique_by(.number)' <<<"$all")" || return 1
+
+# OUR OPEN PRS ON A REPO: one list per author (solo_pr_list_authors), merged
+# by number, newest first (highest number first, as each forge lists them).
+# solo_owned_prs_load reads them into _SOLO_OWNED (lib/forge.sh's PR shape)
+# and, for a GitHub repo, _SOLO_OWNED_GH (gh's own fields, with the
+# reviewDecision, statusCheckRollup, reviews and createdAt the steward's
+# review sweep reads) - the same one gh call per author feeds both.
+# An author whose list cannot be read is skipped with a warning; the others
+# still count. Only when no list could be read is the repo unreadable
+# (status 1). A list is never what a land acts on: `cel solo land` re-reads
+# the PR it is given.
+# ONE LISTING PER REPO PER STEWARD TICK: the tick sets _SOLO_OWNED_REUSE=1
+# and clears the maps (solo_owned_prs_reset), and a load then answers from
+# what this shell already read - so it must run in the tick's own shell, not
+# in a $(...) or a <(...), for the reviews sweep, the ready-to-land list and
+# the changes nudges to share it. Without the flag every load reads afresh.
+declare -gA _SOLO_OWNED=() _SOLO_OWNED_GH=()
+_SOLO_GH_SWEEP_FIELDS=createdAt,reviewDecision,statusCheckRollup,reviews
+solo_owned_prs_reset() { _SOLO_OWNED=(); _SOLO_OWNED_GH=(); }
+solo_owned_prs_load() { # <wsdir> <repo> -> status 0 readable, 1 not
+  local wsdir="$1" repo="$2" key="$1|$2"
+  if [ "${_SOLO_OWNED_REUSE:-0}" = 1 ] && [ -n "${_SOLO_OWNED[$key]+set}" ]; then
+    [ -n "${_SOLO_OWNED[$key]}" ]; return
+  fi
+  local desc provider="" slug="" a one next all='[]' read=0
+  local -a authors=()
+  mapfile -t authors < <(solo_pr_list_authors "$wsdir" "$repo")
+  if desc="$(forge_repo "$wsdir" "$repo" "$wsdir/repos/$repo" 2>/dev/null)"; then
+    provider="$(jq -r '.provider // ""' <<<"$desc")" slug="$(jq -r '"\(.owner)/\(.repo)"' <<<"$desc")"
+  fi
+  for a in "${authors[@]}"; do
+    [ -n "$a" ] || continue
+    if [ "$provider" = github ]; then
+      one="$(_solo_forge _forge_gh "$wsdir" pr list --repo "$slug" --state open --author "$a" --limit 50 \
+        --json "$_FORGE_GH_PR_FIELDS,$_SOLO_GH_SWEEP_FIELDS" 2>/dev/null)"
+    else
+      one="$(_solo_forge forge_pr_list "$wsdir" "$repo" open --author "$a" --limit 50 2>/dev/null)"
+    fi && next="$(jq -c --argjson o "$one" 'if ($o | type) == "array" and all($o[]; (.number | type) == "number")
+        then . + $o else error("not a list of pull requests") end' <<<"$all" 2>/dev/null)" \
+      || { c_warn "cel: could not list $repo's open PRs by $a - skipped this time; the other authors' still count" >&2; continue; }
+    all="$next" read=1
   done
-  printf '%s\n' "$all"
+  _SOLO_OWNED[$key]="" _SOLO_OWNED_GH[$key]=""
+  [ "$read" = 1 ] || return 1
+  all="$(jq -c 'unique_by(.number) | reverse' <<<"$all")" || return 1
+  if [ "$provider" = github ]; then
+    _SOLO_OWNED[$key]="$(jq -c "$_FORGE_JQ_GH"' map(gh_pr)' <<<"$all")" || { _SOLO_OWNED[$key]=""; return 1; }
+    _SOLO_OWNED_GH[$key]="$all"
+  else
+    _SOLO_OWNED[$key]="$all"
+  fi
+}
+solo_owned_prs() { # <wsdir> <repo> -> JSON array (lib/forge.sh's PR shape)
+  solo_owned_prs_load "$1" "$2" || return 1
+  printf '%s\n' "${_SOLO_OWNED[$1|$2]}"
+}
+# gh's own fields for a GitHub repo's PRs, as solo_owned_prs_load last read
+# them in this shell; status 1 (nothing printed) for a repo it could not read
+# or that is not on GitHub. Load first.
+solo_owned_prs_github() { # <wsdir> <repo> -> JSON array
+  [ -n "${_SOLO_OWNED_GH[$1|$2]:-}" ] || return 1
+  printf '%s\n' "${_SOLO_OWNED_GH[$1|$2]}"
 }
 
 # A solo product's PRs that `cel solo land` would merge right now - by the
@@ -232,13 +286,14 @@ solo_owned_prs() { # <wsdir> <repo> [limit] -> JSON array
 # head). GitHub and Forgejo repos alike, through lib/forge.sh. One
 # `<repo><TAB><pr><TAB><head>` line each. The steward nudges the product's
 # agent with these; it never lands them itself. A forge that cannot be read
-# yields nothing for that repo - silence, never a guess.
+# yields nothing for that repo (an author whose list cannot be read, nothing
+# for that author: solo_owned_prs_load) - silence, never a guess.
 solo_ready_prs() { # <wsdir> <product>
   local wsdir="$1" product="$2" repo prs pr num head checks
   [ "$(ws_policy "$wsdir" merge)" = self ] || return 0
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    prs="$(solo_owned_prs "$wsdir" "$repo" 50 2>/dev/null)" || continue
+    prs="$(solo_owned_prs "$wsdir" "$repo" 2>/dev/null)" || continue
     while IFS= read -r pr; do
       [ -n "$pr" ] || continue
       num="$(printf '%s' "$pr" | jq -r .number)" head="$(printf '%s' "$pr" | jq -r .head_sha)"

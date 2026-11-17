@@ -1017,7 +1017,19 @@ Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
   refusal names the line to add. The list is the team's contract:
   `workspace.local.yaml` cannot add to it (`cel doctor` names a local
   `pr_authors` as ignored), and `cel doctor` fails an entry that is not a
-  login-shaped string (a GitHub App's PRs show as `app/<name>`).
+  login-shaped string.
+
+  List the author exactly as the forge reports it; nothing is normalised, so
+  a person whose login happens to be a bot's name never passes as the bot:
+
+  | forge | PR opened by | it reports (`cel forge pr view <repo>#<n> --json`, `.author`) | put in `pr_authors` |
+  |---|---|---|---|
+  | GitHub | a GitHub App (Dependabot, Renovate, your own App) | `app/<name>`, e.g. `app/renovate` | `app/renovate` |
+  | GitHub | a machine user (an ordinary account a bot logs in as) | its plain login | `example-bot` |
+  | Forgejo | any account, bot or not | its plain login | `example-bot` |
+
+  GitHub's REST API spells an App `<name>[bot]`; cel reads authors through
+  `gh`, which never does, so that spelling is not accepted.
 
 The rest of the box sees a solo product for what it is: `cel fleet` draws it as
 `solo <agent state>  worktrees N` (JSON: `mode`, `solo_worktrees`), the

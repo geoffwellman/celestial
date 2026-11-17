@@ -880,20 +880,28 @@ warns about an invalid value and about a lane with no lane-state record
 review and land": `own` when the workspace's account on the forge opened it,
 `listed` when its author is a login `repos[].pr_authors` names for the repo
 (`ws_repo_pr_authors`, `lib/workspace.sh`), else no. It reads the committed
-`workspace.yaml` only, like `repos[].lane`; an entry that is not a
-login-shaped string (`_WS_LOGIN_RE`: GitHub/Forgejo login characters, an
-optional `app/` prefix or `[bot]` suffix) names nobody, and
-`doctor_repo_pr_authors_lines` fails it. Its callers:
+`workspace.yaml` only, like `repos[].lane`, and matches exactly as the forge
+reports the author (gh: `app/<name>` for a GitHub App, the plain login for an
+account; Forgejo: the plain login) - never normalised, so a human `<name>`
+cannot pass as `app/<name>`. An entry that is not login-shaped
+(`_WS_LOGIN_RE`: login characters, an optional `app/` prefix) names nobody,
+and `doctor_repo_pr_authors_lines` fails it. Its callers:
 
 - `cel solo review` records an approval only on such a PR, and its refusal
   of any other names the `pr_authors` line to add (`solo_pr_author_hint`);
 - `cel solo land` refuses any other PR the same way, and for a `listed` one
   adds `PR-author: <login> (allowed by repos[].pr_authors)` to the squash
   body above `Landed-by:`; every other check is unchanged;
-- the steward lists open PRs per author - `@me` and each listed login
-  (`solo_pr_list_authors`) - merged by number: `solo_owned_prs` for
-  `solo_ready_prs` and the recorded-`changes` sweep, and the review sweep's
-  gh list. One list that cannot be read drops that repo for the tick.
+- the steward lists open PRs once per repo per tick (`solo_owned_prs_load`):
+  one forge list per author - `@me` and each listed login
+  (`solo_pr_list_authors`, read into an array, never word-split) - merged by
+  number, newest first. For a GitHub repo the one gh call also carries the
+  review sweep's fields, so the review sweep, `solo_ready_prs` and the
+  recorded-`changes` sweep share it (the tick sets `_SOLO_OWNED_REUSE=1` and
+  loads in its own shell; the two solo lists read it from their subshells).
+  An author whose list cannot be read is skipped with a warning; the repo is
+  dropped for the tick only when no list could be read. No land acts on a
+  list: `cel solo land` re-reads the PR it is given.
 
 `cel solo approvals` decides no ownership: it reports the reviews `cel solo
 land` would count for any PR it is given, so a listed author's PR reads the
