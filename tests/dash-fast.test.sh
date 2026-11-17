@@ -72,3 +72,46 @@ console.log(got + '|' + threw);
   assert_eq "$out" "a,été|true"
   rm -rf "$T"
 }
+
+# An upstream cache is stale-while-revalidate, like v2's `slow`: the first
+# ask waits; past its TTL an ask gets the last good answer at once while ONE
+# refresh runs behind it; a failed refresh keeps the last good answer.
+test_dash_cached_serves_stale_at_once_and_refreshes_once_behind() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let calls = 0, next = 'one', gate = null;
+const fn = async () => { calls++; if (gate) await gate; return next; };
+const ask = () => cached('k', 50, fn, 'empty');
+const first = await ask();
+await sleep(70);
+next = 'two'; let open; gate = new Promise((r) => { open = r; });
+const t0 = Date.now();
+const [a, b, c] = await Promise.all([ask(), ask(), ask()]);
+const quick = Date.now() - t0 < 30;
+const during = calls;
+open(); await sleep(10);
+const after = await ask();
+console.log([first, a, b, c, quick, during, after, calls].join('|'));
+")"
+  assert_eq "$out" "one|one|one|one|true|2|two|2"
+}
+
+test_dash_cached_failed_refresh_keeps_the_last_good_answer() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let mode = 'ok', calls = 0;
+const fn = async () => { calls++; if (mode === 'undef') return undefined; if (mode === 'throw') throw new Error('x'); return 'good'; };
+const ask = () => cached('k', 30, fn, 'empty');
+const r = [await ask()];
+mode = 'undef'; await sleep(40); r.push(await ask()); await sleep(5); r.push(await ask());
+mode = 'throw'; await sleep(40); r.push(await ask()); await sleep(5); r.push(await ask());
+const cold = createCached().cached('k', 30, async () => undefined, 'empty');
+r.push(await cold, calls);
+console.log(r.join('|'));
+")"
+  assert_eq "$out" "good|good|good|good|good|empty|3"
+}

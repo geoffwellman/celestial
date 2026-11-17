@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { controlSecurity, internalError } from '../http-security.mjs';
 import { createV2 } from './v2.mjs';
 import { store } from './store.mjs';
+import { createCached } from './cached.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
 // One server carries every workspace; a config without the list (an old
 // launcher, a test fixture) is a list of one.
@@ -65,26 +66,8 @@ const run = (cmd, args, timeout = 15000) =>
     execFile(cmd, args, { timeout, maxBuffer: 4 * 1024 * 1024 }, (err, out) =>
       resolve(err ? null : out)));
 
-// Each upstream has its own staleness budget: pane state is cheap and local,
-// gh burns rate limit. Per key one read is in flight at a time, shared by
-// every ask that arrives meanwhile. A fetcher answers undefined when its
-// upstream failed: that is never kept as the answer - the last good value
-// stands (`empty` when there is none) - and it holds off the next try for
-// the same budget, at most a minute.
-const cache = {};
-const cached = (key, ttlMs, fn, empty) => {
-  const e = cache[key] || (cache[key] = { v: undefined, t: 0, hold: 0, p: null });
-  const answer = () => (e.v === undefined ? empty : e.v);
-  if (Date.now() - e.t < e.hold) return Promise.resolve(answer());
-  if (!e.p) {
-    e.p = Promise.resolve().then(fn).then((v) => {
-      e.t = Date.now();
-      if (v === undefined) { e.hold = Math.min(ttlMs, 60000); return answer(); }
-      e.v = v; e.hold = ttlMs; return v;
-    }).finally(() => { e.p = null; });
-  }
-  return e.p;
-};
+// Per-key upstream caches, served stale-while-revalidate: tools/dash/cached.mjs.
+const { cache, cached } = createCached();
 
 // WHO IS RUNNING, whichever terminal holds it: `cel sessions --json`, which
 // is lib/rex.sh's cel_agent_list - Herdr's agents plus every managed Rex
@@ -100,8 +83,9 @@ const cached = (key, ttlMs, fn, empty) => {
 //   herdrWs - the Herdr sidebar workspace its pane sits in, whose label is
 //     the name a person knows it by (null for Rex).
 // One read every 8 s at most, about a third of a second on this box (Herdr
-// answers in milliseconds; Rex receipts are each proven live); every page
-// reads it through a warm answer (/api/state's, v2's `slow`), never waiting.
+// answers in milliseconds; Rex receipts are each proven live). Past that,
+// an ask gets the last good list at once and the read runs behind it
+// (cached.mjs); only the dashboard's first ask after a start waits for it.
 const agentRow = (a) => {
   const backend = String(a.backend || 'herdr');
   return {
