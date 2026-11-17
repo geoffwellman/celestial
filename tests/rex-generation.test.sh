@@ -57,7 +57,7 @@ case "$*" in
   # What the terminal last showed (an OpenCode launcher's refusal line).
   'capture -s '*) cat "$S/capture" 2>/dev/null ;;
   'kill '*)
-    echo "kill $2" >> "$REXT_CALLS"; rm -f "$S/sess/$2"
+    echo "kill $2" >> "$REXT_CALLS"; [ ! -e "$S/kill-fails" ] || exit 1; rm -f "$S/sess/$2"
     if [ "$(cat "$S/exit_empty")" = true ] && [ -z "$(ls "$S/sess")" ]; then : > "$S/instance"; fi ;;
   *) exit 1 ;;
 esac
@@ -89,7 +89,8 @@ case "$attempt" in refuse:*) echo "${attempt#refuse:}" >&2; exit 1 ;; esac
 [ -f "$REXT_SRV/receipt-$name" ] || cp "$CEL_REX_STATE/$name.json" "$REXT_SRV/receipt-$name"
 agent=omp
 case "$attempt" in
-  dies:*) agent=opencode; printf '%s\n' "${attempt#dies:}" > "$REXT_SRV/capture"
+  dies:*|stuck:*) agent=opencode; printf '%s\n' "${attempt#*:}" > "$REXT_SRV/capture"
+    case "$attempt" in stuck:*) : > "$REXT_SRV/kill-fails" ;; esac
     sleep 1 >/dev/null 2>&1 & ;;
   *) sleep 300 >/dev/null 2>&1 & ;;
 esac
@@ -278,6 +279,60 @@ test_rex_resume_retry_never_relaunches_an_agent_live_by_then() {
   case "$out" in *failed*) echo "a live agent was reported as failed: $out"; _rg_down; return 1 ;; esac
   assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 1
   _rex_live "$CEL_REX_STATE/alpha-orch.json" || { echo 'the live agent did not survive'; _rg_down; return 1; }
+  _rg_down
+}
+
+# A first attempt whose dead terminal could not be closed is not retried (a
+# retry would open a second terminal); the failure names the open one.
+test_rex_resume_with_an_unclosed_dead_terminal_is_not_retried() {
+  _rg_setup
+  local out
+  out="$(_rg_resume_with_attempts alpha "stuck:$_RG_TIMEOUT")"
+  assert_contains "$out" "$(printf 'failed\talpha-orch\t%s\t%s; its Rex terminal rex/session:new-alpha-orch/block:new could not be closed' "$RT/ws" "$_RG_TIMEOUT")"
+  case "$out" in *retried*) echo "retried with a terminal open: $out"; rm -f "$REXT_SRV/kill-fails"; _rg_down; return 1 ;; esac
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 1
+  rm -f "$REXT_SRV/kill-fails"
+  _rg_down
+}
+
+# A manual relaunch that lands during the wait (and has since exited) means
+# no retry: the receipt is no longer the failed attempt's.
+test_rex_resume_retry_skips_an_agent_relaunched_during_the_wait() {
+  _rg_setup
+  local out pid
+  _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
+  CEL_ROOT="$RT/celroot" rex_generation_tick >/dev/null
+  printf '%s\n' "refuse:$_RG_TIMEOUT" > "$REXT_SRV/attempts-alpha"
+  _rg_server_restart instance-B
+  CEL_ROOT="$RT/celroot" CEL_REX_RESUME_RETRY_SECS=3 rex_generation_tick > "$RT/out" &
+  local tick=$!
+  for ((i = 0; i < 50; i++)); do [ "$(wc -l < "$REXT_LOG" 2>/dev/null | tr -d ' ')" = 1 ] && break; sleep 0.1; done
+  sleep 0.5
+  REX_AUTOSTART=false "$RT/celroot/bin/cel" run orchestrator --product alpha 2>/dev/null
+  pid="$(jq -r .pid "$CEL_REX_STATE/alpha-orch.json")"; kill "$pid"
+  wait "$tick"
+  out="$(cat "$RT/out")"
+  assert_contains "$out" "$(printf 'skipped\talpha-orch\t%s\trelaunched or stopped since its failed attempt, so not retried' "$RT/ws")"
+  ! grep -q '^failed' <<<"$out" || { echo "reported as failed: $out"; _rg_down; return 1; }
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 2   # the first attempt and the manual one
+  _rg_down
+}
+
+# The retries in one pass are capped; one past the cap is reported, not run.
+test_rex_resume_retries_past_the_cap_are_reported_not_run() {
+  _rg_setup
+  local out
+  _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
+  _rg_agent beta-orch solo idle "$(_rg_line beta)"
+  CEL_ROOT="$RT/celroot" rex_generation_tick >/dev/null
+  printf '%s\n' "refuse:$_RG_TIMEOUT" "refuse:$_RG_TIMEOUT" > "$REXT_SRV/attempts-alpha"
+  printf '%s\n' "refuse:$_RG_TIMEOUT" "refuse:$_RG_TIMEOUT" > "$REXT_SRV/attempts-beta"
+  _rg_server_restart instance-B
+  out="$(CEL_ROOT="$RT/celroot" CEL_REX_RESUME_RETRY_MAX=1 rex_generation_tick)"
+  assert_eq "$(grep -c 'retry skipped: restore time cap' <<<"$out")" 1
+  assert_eq "$(grep -c 'retried once' <<<"$out")" 1
+  assert_eq "$(grep -c '^failed' <<<"$out")" 2
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 3
   _rg_down
 }
 

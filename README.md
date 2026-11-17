@@ -721,7 +721,12 @@ can make it - is run once more after `CEL_REX_RESUME_RETRY_SECS` (60), unless
 the agent is live again by then or its retirement has begun. If the retry
 also fails, the summary reports it once and says it was retried. A refusal
 for any other reason (guard, auth, scope, session, a veto or a duplicate) is
-reported without a retry.
+reported without a retry. Nor is it retried when the first attempt's dead
+terminal could not be closed, when the agent was relaunched or stopped during
+the wait, or when its saved session no longer matches. A pass retries at most
+`CEL_REX_RESUME_RETRY_MAX` (3) agents within `CEL_REX_RESUME_RETRY_BUDGET_SECS`
+(300); the rest are reported with "retry skipped: restore time cap". Retries
+add about 3 minutes to that steward tick, at most about 7.
 
 Before resuming, the restore repairs what a restart leaves behind. The new
 server restores the old sessions as empty shells under the same labels: for

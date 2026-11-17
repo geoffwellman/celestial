@@ -348,10 +348,11 @@ rex_agent_stop() { # pane id, stop only an exact owned terminal
 rex_launch_settle() { # <name> <runtime>
   local f pid i polls=10 lock rc=0
   f="$(_rex_file "$1")"
-  pid="$(jq -r .pid "$f" 2>/dev/null)" || return 2
   [ "$2" != opencode ] || polls="${CEL_REX_ADMIT_POLLS:-1000}"
   for ((i = 0; i < polls; i++)); do
     _rex_live "$f" || break
+    # The receipt's own pid each time: a relaunch mid-wait replaces it.
+    pid="$(jq -r .pid "$f" 2>/dev/null)" || return 2
     [ "$2" != opencode ] || ! opencode_launch_admitted "$pid" || return 0
     sleep 0.1
   done
@@ -731,7 +732,7 @@ _rex_resume_confirm() { # <rows> -> rows
       if [ "$src" != 0 ]; then
         out="$(_rex_refusal_line "$out")"
         row="$(printf 'failed\t%s\t%s\t%s' "$name" "$ws" "${out:-its OpenCode launcher exited before admitting a TUI}")"
-        [ "$src" = 1 ] || row+="; its Rex terminal could not be closed"
+        [ "$src" = 1 ] || row+="; its Rex terminal $(jq -r '.pane_id // "?"' "$f" 2>/dev/null) could not be closed (close it before resuming it)"
       fi
     fi
     checked+="$row"$'\n'
@@ -750,18 +751,28 @@ _rex_resume_confirm() { # <rows> -> rows
 
 # THE ONE RETRY of a resume that ran out of time, through the same recorded
 # line, read from the receipt as it was before the first attempt (closing a
-# dead launch's terminal removes its receipt). Never a duplicate: an agent
-# live again by now (someone relaunched it) or whose retirement has begun is
-# left alone - and the line's own duplicate and session-claim refusals still
-# stand behind this check.
-_rex_resume_retry() { # <name> <receipt-before-first-attempt> -> one row
-  local name="$1" snap="$2" f ws
+# dead launch's terminal removes its receipt). Never a duplicate, never into
+# another conversation: it is left alone when it is live again, when its
+# receipt is no longer the failed attempt's (<after>: its pid then, or "-"
+# for none - a relaunch or stop since), when its retirement has begun, or
+# when its resume would now be vetoed (its saved session changed). The line's
+# own duplicate and session-claim refusals still stand behind this.
+_rex_resume_retry() { # <name> <receipt-before-first-attempt> <after> -> one row
+  local name="$1" snap="$2" after="$3" f ws now="-" veto
   f="$(_rex_file "$name")"; ws="$(jq -r '.workspace // ""' "$snap")"
   if [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f"; then
     printf 'skipped\t%s\t%s\trunning again before its retry, so not relaunched\n' "$name" "$ws"; return 0
   fi
+  [ ! -f "$f" ] || now="$(jq -r '.pid // "?" | tostring' "$f" 2>/dev/null || printf '?')"
+  if [ "$now" != "$after" ]; then
+    printf 'skipped\t%s\t%s\trelaunched or stopped since its failed attempt, so not retried\n' "$name" "$ws"; return 0
+  fi
   if compgen -G "$(_rex_state)/retirements/$name-[0-9]*-*.json" >/dev/null; then
     printf 'skipped\t%s\t%s\tits retirement had begun before its retry\n' "$name" "$ws"; return 0
+  fi
+  veto="$(_rex_resume_veto "$snap")"
+  if [ -n "$veto" ]; then
+    printf 'held\t%s\t%s\tnot retried: %s\n' "$name" "$ws" "$(_rex_one_line <<<"$veto")"; return 0
   fi
   _rex_relaunch_one "$name" "$(jq -r '.pid | tostring' "$snap")" "$snap"
 }
@@ -881,21 +892,39 @@ _rex_restore() { # <old-generation-json>
     rows+="$(_rex_relaunch_one "$name" "$pid")"$'\n'
   done <<<"$todo"
   rows="$(_rex_resume_confirm "$rows")"
+  # A first attempt whose dead terminal stayed open is never retried: a retry
+  # would open a second one.
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     IFS=$'\t' read -r outcome name ws detail <<<"$row"
-    if [ "$outcome" = failed ] && _rex_resume_transient "$detail" && [ -n "$snap" ] && [ -f "$snap/$name.json" ]; then
-      retry+="$row"$'\n'
+    if [ "$outcome" = failed ] && _rex_resume_transient "$detail" && [[ "$detail" != *'could not be closed'* ]] \
+       && [ -n "$snap" ] && [ -f "$snap/$name.json" ]; then
+      f="$(_rex_file "$name")"; pid="-"
+      [ ! -f "$f" ] || pid="$(jq -r '.pid // "?" | tostring' "$f" 2>/dev/null || printf '?')"
+      retry+="$row"$'\t'"$pid"$'\n'
     else
       printf '%s\n' "$row"
     fi
   done <<<"$rows"
+  # THE COST to the steward tick: one wait (CEL_REX_RESUME_RETRY_SECS, 60s),
+  # then at most CEL_REX_RESUME_RETRY_MAX (3) relaunches started within
+  # CEL_REX_RESUME_RETRY_BUDGET_SECS (300s) of it, then their confirmation
+  # (each OpenCode launcher up to ~100s, mostly overlapping, plus the 15s
+  # settle) - about 3 minutes, at worst about 7. A retry past the cap is
+  # reported as failed.
   if [ -n "$retry" ]; then
     sleep "${CEL_REX_RESUME_RETRY_SECS:-60}"
+    local started="$SECONDS" count=0 after
     rows=""
-    while IFS=$'\t' read -r outcome name ws detail; do
+    while IFS=$'\t' read -r outcome name ws detail after; do
       [ -n "$name" ] || continue
-      rows+="$(_rex_resume_retry "$name" "$snap/$name.json")"$'\n'
+      if [ "$count" -ge "${CEL_REX_RESUME_RETRY_MAX:-3}" ] \
+         || [ $((SECONDS - started)) -ge "${CEL_REX_RESUME_RETRY_BUDGET_SECS:-300}" ]; then
+        printf 'failed\t%s\t%s\t%s - retry skipped: restore time cap\n' "$name" "$ws" "$detail"
+        continue
+      fi
+      count=$((count + 1))
+      rows+="$(_rex_resume_retry "$name" "$snap/$name.json" "$after")"$'\n'
     done <<<"$retry"
     while IFS= read -r row; do
       [ -n "$row" ] || continue
