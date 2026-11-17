@@ -759,17 +759,30 @@ test_v2_usage_keeps_a_last_known_window_and_says_so() {
 }
 
 # AN UNREAD ONE IS NOT A PACE (AH-261118). Hours without a read, `cel quota`
-# marks the window `unread`: still drawn with its last number, never at risk -
-# the same rule as the steward's quota_at_risk.
-test_v2_usage_does_not_flag_an_unread_last_known_window() {
-  _v2_boot; _v2_quota_fixture
+# marks the window `unread`: still drawn with its last number, never
+# projected, and at risk only when spent - the same rule as the steward's
+# quota_at_risk.
+_v2_unread_fixture() { # <used-pct>
   local read; read="$(date -u -d "@$(( $(date +%s) - 3 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
-  jq --arg r "$read" '.subscriptions[1].windows[0] |= (.used_pct = 100 | .stale = true | .read_at = $r | .unread = true)' \
+  jq --arg r "$read" --argjson u "$1" '.subscriptions[1].windows[0] |= (.used_pct = $u | .stale = true | .read_at = $r | .unread = true)' \
     "$T/quota.json" > "$T/q.json" && mv "$T/q.json" "$T/quota.json"
+}
+test_v2_usage_does_not_flag_an_unread_last_known_window() {
+  _v2_boot; _v2_quota_fixture; _v2_unread_fixture 97
   local u; u="$(_v2_get "$(_v2_url usage)")"
-  assert_eq "$(printf '%s' "$u" | jq -c '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .windows[0] | [.last_known, .unread, .used_pct, .at_risk]')" \
-    "[true,true,100,false]"
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .windows[0] | [.last_known, .unread, .used_pct, .projected_pct, .at_risk]')" \
+    "[true,true,97,97,false]"
   assert_eq "$(printf '%s' "$u" | jq -r '[.summary.at_risk[].who] | join(",")')" "ana@alpha.test"
+  _v2_down
+}
+
+# A SPENT ONE STAYS SPENT: unread at 100% is still at risk.
+test_v2_usage_keeps_an_unread_spent_window_at_risk() {
+  _v2_boot; _v2_quota_fixture; _v2_unread_fixture 100
+  local u; u="$(_v2_get "$(_v2_url usage)")"
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .windows[0] | [.unread, .used_pct, .projected_pct, .at_risk]')" \
+    "[true,100,100,true]"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.summary.at_risk[].who] | join(",")')" "ana@alpha.test,ben@alpha.test"
   _v2_down
 }
 

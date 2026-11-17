@@ -2796,13 +2796,32 @@ test_steward_says_an_account_unread_for_hours_instead_of_forecasting_it() {
     "$T/subs.json" > "$T/s.json" && mv "$T/s.json" "$T/subs.json"
   _steward_usage_pace >/dev/null 2>&1
   msg="$(jq -r 'select(.fp == "usage-pace") | .message' "$f")"
-  assert_contains "$msg" "ana@alpha.test (claude) not read since $old: needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant) (last known 7d 73%, not forecast)"
+  assert_contains "$msg" "ana@alpha.test (claude) not read since $old: needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant) (last known 7d 73% not forecast)"
   if printf '%s' "$msg" | grep -q 'at reset'; then echo "forecast an unread account: $msg"; return 1; fi
   [ -n "$(_inbox_open_fp alpha usage-pace steward root)" ] || { echo "no open usage-pace item"; return 1; }
   # a fresh reading under the line takes it down
   _pace_set 10 172800
   _steward_usage_pace >/dev/null 2>&1
   assert_eq "$(_inbox_open_fp alpha usage-pace steward root)" ""
+  rm -rf "$T"
+}
+
+# AND A SPENT ONE STAYS SPENT: unread at 100% is still on the pace item, said
+# as spent as of its last reading - never projected, never merely "not
+# forecast".
+test_steward_says_an_unread_spent_week_is_spent_as_of_its_last_reading() {
+  _pace_fixture 10 172800
+  local f="$CEL_INBOX_DIR/alpha.jsonl" old r msg
+  old="$(date -u -d "@$(( $(date +%s) - 15 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  r="$(date -u -d "@$(( $(date +%s) + 172800 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  jq --arg o "$old" --arg r "$r" '.[0] |= (.windows = [{name: "7d", scope: null, used_pct: 100, resets_at: $r, stale: true, read_at: $o}]
+      | .extra = {state: "needs_login", reason: "needs login: cel gateway login claude"})' \
+    "$T/subs.json" > "$T/s.json" && mv "$T/s.json" "$T/subs.json"
+  _steward_usage_pace >/dev/null 2>&1
+  msg="$(jq -r 'select(.fp == "usage-pace") | .message' "$f")"
+  assert_contains "$msg" "ana@alpha.test (claude 7d: 100% spent (last known, not read since $old))"
+  assert_contains "$msg" "(last known 7d 100% spent (last known, not read since $old))"
+  if printf '%s' "$msg" | grep -q 'at reset\|not forecast'; then echo "forecast or hedged a spent week: $msg"; return 1; fi
   rm -rf "$T"
 }
 

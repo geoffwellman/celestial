@@ -2085,11 +2085,16 @@ read fails, a window that has not reset keeps its last percentage, marked
 alerted on and still vetoed — until a reading says otherwise. Once that
 reading is more than `CEL_SUB_UNREAD_AFTER_H` hours old (default 2) the
 window is `unread`: still drawn, never forecast. The steward's pace item says
-instead that the account has `not read since <time>`, why, and what to do.
+instead that the account has `not read since <time>`, why, and what to do —
+and an unread window at 100% stays at risk, said as `100% spent (last known,
+not read since <time>)`.
 
-A gateway account whose access token has expired is asked about once, read
-only, through CLIProxyAPI's management listing: when the gateway's own refresh
-was refused (`invalid grant` — the refresh token is dead) the row says
+A gateway account whose access token has expired is asked about read only,
+through CLIProxyAPI's management listing — at most once a minute (the answer,
+or the failure, is cached 0600 beside the subscription cache), and only at a
+loopback address (`127.0.0.1`, `::1`, `localhost`), since the management
+secret opens the whole vault. When the gateway's own refresh was refused
+(`invalid grant` — the refresh token is dead) the row says
 `needs login: cel gateway login <provider>`, because only a person at a
 browser can bring it back. Celestial never refreshes a credential itself.
 

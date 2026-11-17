@@ -1039,7 +1039,7 @@ test_a_last_known_window_read_hours_ago_is_unread_and_not_forecast() {
   assert_eq "$(printf '%s' "$subs" | quota_at_risk | jq -r '[.[].who] | join(",")')" 'ben@alpha.test'
   local u; u="$(printf '%s' "$subs" | quota_unread)"
   assert_eq "$(printf '%s' "$u" | jq -r '[.[].who] | join(",")')" 'ana@alpha.test,cy@alpha.test'
-  assert_eq "$(printf '%s' "$u" | jq -c '.[0] | [.read_at, .state, .last]')" "[\"$old\",\"needs_login\",[\"7d 90%\",\"7d Fable 37%\"]]"
+  assert_eq "$(printf '%s' "$u" | jq -c '.[0] | [.read_at, .state, .last]')" "[\"$old\",\"needs_login\",[\"7d 90% not forecast\",\"7d Fable 37% not forecast\"]]"
   assert_eq "$(printf '%s' "$u" | jq -r '.[0].why')" \
     'needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant)'
   assert_contains "$(printf '%s' "$u" | jq -r '.[1].why')" 'the gateway is not refreshing it: see cel gateway status, and sign in again (cel gateway login claude)'
@@ -1047,6 +1047,79 @@ test_a_last_known_window_read_hours_ago_is_unread_and_not_forecast() {
   subs="$(jq -nc --arg r "$(_reset_iso -60)" --arg o "$old" '[{provider: "claude", label: "ana",
     windows: [{name: "5h", used_pct: 97, resets_at: $r, stale: true, read_at: $o}], extra: {state: "stale"}}]')"
   assert_eq "$(printf '%s' "$subs" | quota_unread | jq length)" 0
+}
+
+# BUT A SPENT ONE STAYS SPENT. An unread window at 100% is still at risk and
+# still said - as spent, as of when it was last read - never projected.
+test_an_unread_spent_window_stays_at_risk_and_says_when_it_was_read() {
+  . "$CEL_ROOT/lib/quota.sh"
+  local r old subs a u
+  r="$(_reset_iso 86400)"
+  old="$(date -u -d "@$(( $(date +%s) - 3 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  subs="$(jq -nc --arg r "$r" --arg o "$old" '[
+    {provider: "claude", account: "ana", label: "ana@alpha.test",
+     windows: [{name: "7d", used_pct: 100, resets_at: $r, stale: true, read_at: $o},
+               {name: "7d", scope: "Fable", used_pct: 37, resets_at: $r, stale: true, read_at: $o}],
+     extra: {state: "needs_login", reason: "needs login: cel gateway login claude"}}]')"
+  a="$(printf '%s' "$subs" | quota_at_risk)"
+  assert_eq "$(printf '%s' "$a" | jq -c '[.[] | [.window, .scope, .used_pct, .projected_pct, .unread]]')" '[["7d",null,100,100,true]]'
+  assert_eq "$(printf '%s' "$a" | jq -r '.[0].say')" "100% spent (last known, not read since $old)"
+  u="$(printf '%s' "$subs" | quota_unread)"
+  assert_eq "$(printf '%s' "$u" | jq -c '.[0].last')" \
+    "[\"7d 100% spent (last known, not read since $old)\",\"7d Fable 37% not forecast\"]"
+}
+
+# THE GATEWAY IS ASKED ONCE A MINUTE, not once a list: a gateway that is down
+# costs one timeout per TTL, not one per steward tick and per `cel quota`. The
+# answer is cached 0600, and a failed read is cached too.
+test_the_gateway_states_read_is_cached_for_the_ttl() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  _cpa_gateway_fixture
+  . "$CEL_ROOT/lib/quota.sh"
+  subscription_list >/dev/null
+  assert_eq "$(subscription_list | jq -r '.[] | select(.account == "ant-one") | .extra.state')" needs_login
+  assert_eq "$(grep -c '^GET /v0/management/auth-files' "$T/hits")" 1
+  assert_eq "$(stat -c %a "$CEL_CACHE/gateway-states.json")" 600
+  # past the TTL it is asked again; a gateway that answers nothing is cached
+  # as nothing, and asked no sooner
+  touch -d "@$(( $(date +%s) - 120 ))" "$CEL_CACHE/gateway-states.json"
+  rm -f "$T/auth-files.json"
+  subscription_list >/dev/null; subscription_list >/dev/null
+  assert_eq "$(grep -c '^GET /v0/management/auth-files' "$T/hits")" 2
+  assert_eq "$(subscription_list | jq -r '.[] | select(.account == "ant-one") | .extra.state')" stale
+  unset CEL_CPA_GATEWAY_URL CEL_GATEWAY_STATE
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# THE MANAGEMENT SECRET NEVER LEAVES THE MACHINE: a gateway URL that is not
+# loopback is refused before the key is read, whatever it resolves to.
+test_the_management_key_is_sent_to_loopback_only() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  _cpa_gateway_fixture
+  . "$CEL_ROOT/lib/quota.sh"
+  local port u; port="$(cat "$T/port")"
+  for u in "http://localhost.example.invalid:$port" "http://127.0.0.2:$port" "http://user@127.0.0.1:$port" \
+           "ftp://127.0.0.1:$port" "http://127.0.0.1.example.invalid:$port" "127.0.0.1:$port"; do
+    if _cpa_loopback_url "$u"; then printf 'accepted a non-loopback gateway URL: %s\n' "$u" >&2; return 1; fi
+  done
+  for u in "http://127.0.0.1:$port" "http://localhost:$port/" "http://LOCALHOST:$port" "http://[::1]:$port" "https://127.0.0.1"; do
+    _cpa_loopback_url "$u" || { printf 'refused a loopback gateway URL: %s\n' "$u" >&2; return 1; }
+  done
+  # a gateway URL that is not loopback is never sent the key, nor cached
+  export CEL_CPA_GATEWAY_URL="http://gateway.example.invalid:$port"
+  assert_eq "$(_cpa_gateway_states)" '{}'
+  assert_eq "$(subscription_list | jq -r '.[] | select(.account == "ant-one") | .extra.state')" stale
+  if grep -q '/v0/management' "$T/hits" 2>/dev/null; then printf 'the key went to a non-loopback URL\n' >&2; return 1; fi
+  [ ! -e "$T/mgmt-auth" ] || { printf 'the key went to a non-loopback URL\n' >&2; return 1; }
+  [ ! -e "$CEL_CACHE/gateway-states.json" ] || { printf 'a refused URL was cached\n' >&2; return 1; }
+  unset CEL_CPA_GATEWAY_URL CEL_GATEWAY_STATE
+  _quota_stub_stop
+  _quota_teardown
 }
 
 # A token the vault calls LIVE and the provider rejects anyway is the other
