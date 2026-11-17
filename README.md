@@ -1609,7 +1609,8 @@ it is a checkout of (`repos[].lane`, else the product's agent) wherever it
 lives - a repo symlinked into `repos/` from `~/code/<repo>`, its worktrees in
 `~/code/<repo>-wt/<name>`; a repo can claim more with `owns_paths` in the
 committed `workspace.yaml` (globs; `~/` is the home dir, a relative glob is
-under the workspace, a dir under a match is matched, the longest glob wins):
+under the workspace, a dir under a match is matched, the longest glob wins;
+`cel doctor` warns about a glob that claims the whole home dir):
 
 ```yaml
 repos:
@@ -1617,14 +1618,16 @@ repos:
     owns_paths: ["~/scratch/example-*"]
 ```
 
-then any other dir whose path is a repo's real root (`repos/<repo>` with
-symlinks resolved) or starts with `<real root>-` - the data and release dirs
-its tooling leaves beside it, such as `~/code/<repo>-local-cf-data` - is that
-repo's, the longest root winning; then `repos/<repo>` and `.cel/solo/<product>`
-inside a workspace, and anything else in a workspace is its root's. A server
-in no workspace is told to root of the box's first workspace in registry order,
-and root's summary names that workspace; for a server routed to another agent
-the summary says who was told.
+then any other dir under a repo's real root (`repos/<repo>` with symlinks
+resolved), or beside it named `<real root>` plus a known suffix - `-wt`,
+`-worktrees`, `-local*`, `-data*`, `-release*`, the dirs its tooling leaves
+there, such as `~/code/<repo>-local-cf-data` - is that repo's, the longest
+root winning (any other `<real root>-...`, say `~/code/<repo>-other-project`,
+is another project unless `owns_paths` claims it); then `repos/<repo>` and
+`.cel/solo/<product>` inside a workspace, and anything else in a workspace is
+its root's. A server in no workspace is told to root of the box's first
+workspace in registry order, and root's summary names that workspace; for a
+server routed to another agent the summary says who was told.
 
 Build-tool daemons (Gradle daemons and their workers, the Kotlin compile
 daemon, Metals) are never listed as servers. Instead the steward tells the

@@ -875,14 +875,17 @@ serve_sweep() {
 #     repos/<repo>, it is the repo's PR owner (ws_repo_pr_owner: the lane a
 #     repo declares, else its product's agent);
 #  3. a repo's repos[].owns_paths (committed workspace.yaml only): globs, ~/
-#     the home dir, a relative one under the workspace; a dir a glob matches,
-#     or one under it, is the repo's. The longest glob wins;
+#     the home dir, a relative one under the workspace (ws_owns_glob); a dir
+#     a glob matches, or one under it, is the repo's. The longest glob wins;
 #  4. a dir no git identity placed whose path is a repo's real root (repos/
-#     <repo> with every symlink resolved) or under it, or starts with
-#     "<real root>-" - the data, worktree and release dirs a repo's tooling
+#     <repo> with every symlink resolved) or under it, or a sibling of it
+#     named "<real root>" plus a KNOWN suffix - -wt, -worktrees, -local*,
+#     -data*, -release*: the worktree, data and release dirs a repo's tooling
 #     puts beside it, ~/code/slot-studio-wt or -local-cf-data next to
-#     ~/code/slot-studio - is that repo's. The longest root wins: a repo
-#     checked out at <root>-cf beats <root>'s "-" for dirs in <root>-cf;
+#     ~/code/slot-studio - is that repo's. Any other "<root>-..." is another
+#     project (app-other-project is not app's); owns_paths claims it if it is
+#     the repo's. The longest root wins: a repo checked out at <root>-data
+#     beats <root>'s "-data*" for dirs in <root>-data;
 #  5. inside a workspace: repos/<repo> is the repo's owner, .cel/solo/
 #     <product>/... the product's agent, anything else that workspace's root;
 #  6. anything outside every workspace is root of the box's first workspace
@@ -904,7 +907,9 @@ _serve_git_common() { # <dir> -> the resolved common git dir of the work tree <d
 }
 # Each workspace's repos/<repo> common dirs, and each workspace's repos (one
 # line each: <repo> TAB <real root> [TAB <owns_paths glob>]...), read once per
-# tick: the report empties both before it resolves any owner.
+# tick: the unledgered report and the idle build-daemon note call
+# _serve_owner_preload before they resolve any owner, in the calling shell, so
+# the _serve_dir_owner subshells after it ask yq and git nothing again.
 declare -gA _SERVE_REPO_COMMON=() _SERVE_WS_REPOS=()
 _serve_repo_common() { # <dir> -> memoised _serve_git_common (empty: none)
   [ "${_SERVE_REPO_COMMON[$1]+x}" = x ] || _SERVE_REPO_COMMON[$1]="$(_serve_git_common "$1" || true)"
@@ -921,8 +926,18 @@ _serve_ws_repos_load() { # <wsdir> - fills _SERVE_WS_REPOS[<wsdir>] unless read 
       | @tsv' "$1/workspace.yaml" 2>/dev/null)
   _SERVE_WS_REPOS[$1]="$out"
 }
+_serve_owner_preload() { # empties both memos and reads this tick's
+  local w wd r
+  _SERVE_REPO_COMMON=(); _SERVE_WS_REPOS=()
+  for w in $(registry_names 2>/dev/null); do
+    wd="$(registry_path "$w")" && [ -n "$wd" ] || continue
+    wd="$(readlink -f "$wd" 2>/dev/null || printf '%s' "$wd")"
+    _serve_ws_repos_load "$wd"
+    while IFS=$'\t' read -r r _; do [ -z "$r" ] || _serve_repo_common "$wd/repos/$r" >/dev/null; done <<<"${_SERVE_WS_REPOS[$wd]}"
+  done
+}
 _serve_dir_owner() { # <dir> -> "<ws> <mailbox>" | "<first-ws> root outside"
-  local dir="${1%/}" ws wsdir rel p rest repo common i root g len best=-1 bi='' br=''
+  local dir="${1%/}" ws wsdir rel p rest repo common i root sib g len best=-1 bi='' br=''
   local -a names=() dirs=() globs=()
   for ws in $(registry_names 2>/dev/null); do
     wsdir="$(registry_path "$ws")" && [ -n "$wsdir" ] || continue
@@ -957,8 +972,7 @@ _serve_dir_owner() { # <dir> -> "<ws> <mailbox>" | "<first-ws> root outside"
       [ -n "$repo" ] && [ -n "$rest" ] || continue
       IFS=$'\t' read -r -a globs <<<"$rest"
       for g in "${globs[@]}"; do
-        case "$g" in "~") g="$HOME" ;; "~/"*) g="$HOME/${g#"~/"}" ;; /*) ;; *) g="${dirs[$i]}/$g" ;; esac
-        g="${g%/}"; [ -n "$g" ] || continue
+        g="$(ws_owns_glob "${dirs[$i]}" "$g")"; [ -n "$g" ] || continue
         # shellcheck disable=SC2053 # the glob is a pattern on purpose
         [[ "$dir" == $g || "$dir" == $g/* ]] || continue
         [ "${#g}" -gt "$best" ] && { best="${#g}"; bi="$i"; br="$repo"; }
@@ -970,7 +984,12 @@ _serve_dir_owner() { # <dir> -> "<ws> <mailbox>" | "<first-ws> root outside"
       while IFS=$'\t' read -r repo root _; do
         [ -n "$repo" ] && [ "${root%/}" != "" ] || continue
         root="${root%/}"
-        case "$dir" in "$root"|"$root"/*) len="${#root}" ;; "$root"-*) len="$(( ${#root} + 1 ))" ;; *) continue ;; esac
+        case "$dir" in
+          "$root"|"$root"/*) len="${#root}" ;;
+          "$root"-*) sib="${dir#"$root"}"; sib="${sib%%/*}"
+            case "$sib" in -wt|-worktrees|-local*|-data*|-release*) len="$(( ${#root} + 1 ))" ;; *) continue ;; esac ;;
+          *) continue ;;
+        esac
         [ "$len" -gt "$best" ] && { best="$len"; bi="$i"; br="$repo"; }
       done <<<"${_SERVE_WS_REPOS[${dirs[$i]}]}"
     done
@@ -1049,16 +1068,7 @@ _serve_unledgered_report() {
   if [ -n "$new$gone" ]; then
     root_ws="$(registry_names 2>/dev/null | head -n1)"
     [ -n "$root_ws" ] || return 0
-    # this tick's repos and their common dirs, read here (not in the
-    # subshells below) so each is asked of yq and git once
-    _SERVE_REPO_COMMON=(); _SERVE_WS_REPOS=()
-    local w wd r
-    for w in $(registry_names 2>/dev/null); do
-      wd="$(registry_path "$w")" && [ -n "$wd" ] || continue
-      wd="$(readlink -f "$wd" 2>/dev/null || printf '%s' "$wd")"
-      _serve_ws_repos_load "$wd"
-      while IFS=$'\t' read -r r _; do [ -z "$r" ] || _serve_repo_common "$wd/repos/$r" >/dev/null; done <<<"${_SERVE_WS_REPOS[$wd]}"
-    done
+    _serve_owner_preload
     new=''
     # \x1f, not a tab: an empty dir must stay a field of its own
     while IFS=$'\x1f' read -r key dir name line; do
