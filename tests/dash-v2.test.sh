@@ -29,7 +29,7 @@ EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/cel.log"
 # a launch is only recorded, argument by argument: a test never starts a pane
-if [ "\$1" = run ]; then printf '%q ' "\$@" >> "$T/run.log"; printf '\n' >> "$T/run.log"; exit 0; fi
+if [ "\$1" = run ]; then printf '%q ' "\$@" >> "$T/run.log"; printf '\n' >> "$T/run.log"; [ -x "$T/on-run" ] && "$T/on-run"; exit 0; fi
 if [ "\$1" = serve ]; then
   case "\$2 \$3" in
     "list --json") printf '[{"name":"widget-preview","owner":"alpha-orch","workspace":"alpha","port":5173,"memory_mb":81,"age_seconds":120,"managed":true,"permanent":false},{"name":"shop-server","owner":"shop-orch","workspace":"alpha","port":8090,"memory_mb":117,"age_seconds":99999,"managed":true,"permanent":true,"working_directory":"/srv/shop","command":"/opt/shop/run"}]'; exit 0;;
@@ -315,6 +315,21 @@ test_v2_solo_fleet_knows_agents_lanes_and_reviewers_by_identity() {
   # a stranger in a lane's directory, a lane whose directory is gone, or a
   # reviewer's name outside its review checkout, is none of them
   assert_eq "$(printf '%s' "$f" | jq '[.orchestrators[], .reviewers[] | select(.name == "intruder" or .name == "thor-games-old" or .name == "gadget-pr-9-review")] | length')" "0"
+  _v2_down
+}
+
+# A restart changes who is running: the roster is read fresh after it, not
+# served from the warm answer read before it (here and server.mjs's beneath).
+test_v2_restart_forgets_the_warm_roster() {
+  _v2_boot; _v2_solo_fixture
+  local f; f="$(_v2_get "$(_v2_url 'fleet?ws=bundle')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '.orchestrators[] | select(.name == "thor-games-api") | .status')" "idle" || { _v2_down; return 1; }
+  printf '#!/usr/bin/env bash\njq %q %q > %q.n && mv %q.n %q\n' \
+    '(.result.agents[] | select(.name == "thor-games-api") | .agent_status) = "working"' "$T/agents.json" "$T/agents.json" "$T/agents.json" "$T/agents.json" > "$T/on-run"
+  chmod +x "$T/on-run"
+  assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-api","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200" || { _v2_down; return 1; }
+  f="$(_v2_get "$(_v2_url 'fleet?ws=bundle')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '.orchestrators[] | select(.name == "thor-games-api") | .status')" "working" || { _v2_down; return 1; }
   _v2_down
 }
 

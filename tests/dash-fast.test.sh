@@ -72,3 +72,84 @@ console.log(got + '|' + threw);
   assert_eq "$out" "a,été|true"
   rm -rf "$T"
 }
+
+# An upstream cache is stale-while-revalidate, like v2's `slow`: the first
+# ask waits; past its TTL an ask gets the last good answer at once while ONE
+# refresh runs behind it; a failed refresh keeps the last good answer.
+test_dash_cached_serves_stale_at_once_and_refreshes_once_behind() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let calls = 0, next = 'one', gate = null;
+const fn = async () => { calls++; if (gate) await gate; return next; };
+const ask = () => cached('k', 50, fn, 'empty');
+const first = await ask();
+await sleep(70);
+next = 'two'; let open; gate = new Promise((r) => { open = r; });
+const t0 = Date.now();
+const [a, b, c] = await Promise.all([ask(), ask(), ask()]);
+const quick = Date.now() - t0 < 30;
+const during = calls;
+open(); await sleep(10);
+const after = await ask();
+console.log([first, a, b, c, quick, during, after, calls].join('|'));
+")"
+  assert_eq "$out" "one|one|one|one|true|2|two|2"
+}
+
+test_dash_cached_failed_refresh_keeps_the_last_good_answer() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let mode = 'ok', calls = 0;
+const fn = async () => { calls++; if (mode === 'undef') return undefined; if (mode === 'throw') throw new Error('x'); return 'good'; };
+const ask = () => cached('k', 30, fn, 'empty');
+const r = [await ask()];
+mode = 'undef'; await sleep(40); r.push(await ask()); await sleep(5); r.push(await ask());
+mode = 'throw'; await sleep(40); r.push(await ask()); await sleep(5); r.push(await ask());
+const cold = createCached().cached('k', 30, async () => undefined, 'empty');
+r.push(await cold, calls);
+console.log(r.join('|'));
+")"
+  assert_eq "$out" "good|good|good|good|good|empty|3"
+}
+
+# An answer older than ten budgets is not served at once: the ask waits for a
+# fresh read, as a first ask does - and still keeps it if that read fails.
+test_dash_cached_answer_past_ten_ttls_waits_for_a_fresh_read() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let next = 'old', fail = false;
+const fn = async () => { await sleep(20); if (fail) return undefined; return next; };
+const ask = () => cached('k', 10, fn, 'empty');
+const r = [await ask()];
+await sleep(30); next = 'mid'; r.push(await ask());
+await sleep(25); r.push(await ask());
+await sleep(120); next = 'new'; r.push(await ask());
+await sleep(120); fail = true; r.push(await ask());
+console.log(r.join('|'));
+")"
+  assert_eq "$out" "old|old|mid|new|new"
+}
+
+# With no last good value a failure holds nothing off: the next ask reads
+# again at once (a cold throw is the caller's 500, and the next ask survives).
+test_dash_cached_cold_failure_retries_at_once() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+let mode = 'throw', calls = 0;
+const fn = async () => { calls++; if (mode === 'throw') throw new Error('x'); if (mode === 'undef') return undefined; return 'good'; };
+const ask = () => cached('k', 60000, fn, 'empty');
+const r = [];
+try { await ask(); r.push('no-throw'); } catch { r.push('threw'); }
+mode = 'undef'; r.push(await ask());
+mode = 'ok'; r.push(await ask(), calls);
+console.log(r.join('|'));
+")"
+  assert_eq "$out" "threw|empty|good|3"
+}

@@ -200,6 +200,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // the roster (server.mjs `agents`: Herdr and Rex, one row shape), served
   // warm: past 8 s a refresh runs behind the last answer
   const agents = async () => (await slow('agents', 8000, agentsCold)) || [];
+  // A write acts on what is true NOW, never on a warm answer: an act forgets
+  // the reads it checks against (the roster - here and server.mjs's
+  // `cached` beneath it - the workspaces and the drive list), so they are
+  // read fresh; a restart forgets the roster again once it has run.
+  const forgetAgents = () => { delete flights.agents; delete cache.agents; };
+  const forgetForWrite = () => { forgetAgents(); delete flights.v2ws; delete flights['drive:list']; };
   const ghParse = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
   const ghList = async (slug, st, fields) => {
     const v = await slow(`gh:${st}:${slug}`, 600000, async () => {
@@ -1094,6 +1100,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const REF = /^[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._\/-]{1,160}$/;
   const act = async (req, res, body) => {
     const { action, target } = body || {};
+    forgetForWrite();
     const args = (body && typeof body.args === 'object' && body.args) || {};
     // mail to a live orchestrator through `cel drive send` - kind
     // owner, from owner, delivered by its inbox hook when the turn ends.
@@ -1154,7 +1161,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         argv.push('--restart');
       } else if (lane) argv = ['run', 'solo', '--workspace', wsName, '--product', lane.product, '--lane', lane.lane, '--restart'];
       else return [400, 'not a main agent or solo lane of this workspace'];
-      if (await run(CEL(), argv, 120000) === null) return [502, 'restart failed'];
+      const ok = await run(CEL(), argv, 120000) !== null;
+      forgetAgents();
+      if (!ok) return [502, 'restart failed'];
       logAct(wsName, `dashboard: restarted ${name}`);
       return [200, 'ok'];
     }

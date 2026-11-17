@@ -279,6 +279,22 @@ test_dash_answers_as_me_and_only_what_me_may_answer() {
   _dd_down
 }
 
+# A write decides on a fresh read, never the warm list the page was drawn
+# from: here this login stops naming a person (me:)
+# after the state was read, and the answer is refused.
+test_dash_decide_judges_a_fresh_read_not_the_warm_list() {
+  DD_PEOPLE="$DD_ROUTED_PEOPLE" DD_ME=jo _dd_boot
+  local mine st; mine="$(_dd_routed qa "qa for jo")"
+  st="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")"
+  assert_eq "$(printf '%s' "$st" | jq -r --arg i "$mine" '.needsYou[] | select(.id == $i) | .answerable')" "true" || { _dd_down; return 1; }
+  rm "$T/alpha/workspace.local.yaml"
+  local out; out="$(curl -s -m 20 -X POST -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" \
+    -d "{\"id\":\"$mine\",\"action\":\"answer\",\"option\":1}" "http://127.0.0.1:$DASH_PORT/api/decide")"
+  assert_contains "$out" "names no person" || { _dd_down; return 1; }
+  assert_eq "$(_dd_by alpha "$mine")" "" || { _dd_down; return 1; }
+  _dd_down
+}
+
 # No me: on a workspace with people: the dashboard answers only unrouted
 # decisions; a routed one is refused with the reason.
 test_dash_with_no_me_answers_only_unrouted() {
