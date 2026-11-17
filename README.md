@@ -962,8 +962,9 @@ Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
   with [`repos[].lane`](#solo-lanes-several-big-goals-one-agent-each)). The solo agent itself can never record a verdict on its
   own PR, and only it (or a person) lands one - not a reviewer;
 - `cel solo land <repo>#<n>` merges with the checks in `lib/land.sh`:
-  `merge: self`, the workspace account's own open non-draft
-  PR, an approval of the exact head from every reviewer the review policy
+  `merge: self`, an open non-draft PR the workspace's account opened (or an
+  author the repo lists in `pr_authors`, below), an approval of the exact head
+  from every reviewer the review policy
   requires ([extra reviewers](#extra-reviewers-a-focus-by-hand-or-by-policy)),
   no red check, no conflict, and every
   check the base branch requires - through classic branch protection or a
@@ -1000,6 +1001,23 @@ Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
   history scan's ticket rule before anything is posted. Separate forge
   accounts per agent would put the name in "merged by" itself; that is the
   owner's call, not something `cel solo land` changes.
+- a PR a bot (or any other forge account) opened for the product lands too
+  when the repo lists that login in the committed `workspace.yaml`:
+
+  ```yaml
+  repos:
+    - name: example
+      pr_authors: [example-bot]
+  ```
+
+  Its reviewer can then record verdicts on it, the steward nudges about it
+  like the account's own, and `cel solo land` lands it with every check above
+  unchanged, adding `PR-author: example-bot (allowed by repos[].pr_authors)`
+  above `Landed-by:`. An author nobody listed is refused as before, and the
+  refusal names the line to add. The list is the team's contract:
+  `workspace.local.yaml` cannot add to it (`cel doctor` names a local
+  `pr_authors` as ignored), and `cel doctor` fails an entry that is not a
+  login-shaped string (a GitHub App's PRs show as `app/<name>`).
 
 The rest of the box sees a solo product for what it is: `cel fleet` draws it as
 `solo <agent state>  worktrees N` (JSON: `mode`, `solo_worktrees`), the

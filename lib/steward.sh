@@ -746,6 +746,8 @@ _STEWARD_JQ_LEFT_ALONE='def left_alone: any(.[]?; strings | ascii_downcase | . =
 _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug prsj ref
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
+  # shellcheck source=lib/solo.sh
+  . "${BASH_SOURCE[0]%/*}/solo.sh"   # solo_pr_list_authors: whose PRs are ours
   # Owner cards (_steward_owner_prs) silence the red, changes-requested and
   # no-worker nudges for their PRs. Read once per workspace.
   local -A owner_prs
@@ -764,12 +766,21 @@ _steward_review_sweep() { # <agents-json>
       # product has no pane of its own, so its PRs are the product agent's -
       # or the lane's the repo declares (_steward_pr_nudge, ws_repo_pr_owner).
       # ONLY OUR OWN PRs. Every PR a solo agent opens is authored by the
-      # token cel runs under, so `--author @me` is the ownership line; a
-      # colleague's PR must never be nudged into "action it now".
+      # token cel runs under, so `--author @me` is the ownership line - plus
+      # each author repos[].pr_authors lists (a bot that opens the product's
+      # PRs; lib/solo.sh solo_pr_author_ok), one list each, merged by number.
+      # A colleague's PR must never be nudged into "action it now".
       # Colleagues' PRs are theirs to land. This filter guards every check
       # below it, including reminders about our ticket naming convention.
-      prsj="$(ws_gh "$wsdir" pr list --repo "$slug" --author @me \
-              --json number,headRefName,headRefOid,reviewDecision,isDraft,statusCheckRollup,createdAt,labels,reviews 2>/dev/null)" || continue
+      local pra one prs_ok=1
+      prsj='[]'
+      for pra in $(solo_pr_list_authors "$wsdir" "$repo"); do
+        one="$(ws_gh "$wsdir" pr list --repo "$slug" --author "$pra" \
+              --json number,headRefName,headRefOid,reviewDecision,isDraft,statusCheckRollup,createdAt,labels,reviews 2>/dev/null)" \
+          && prsj="$(jq -c --argjson o "$one" '(. + $o) | unique_by(.number)' <<<"$prsj" 2>/dev/null)" \
+          || { prs_ok=0; break; }
+      done
+      [ "$prs_ok" = 1 ] || continue
       # A `superseded` or `hold` PR (_STEWARD_JQ_LEFT_ALONE) is dropped before
       # any check below sees it.
       prsj="$(printf '%s' "$prsj" | jq -c "$_STEWARD_JQ_LEFT_ALONE"'[.[] | select([.labels[]?.name] | left_alone | not)]' 2>/dev/null)" || continue
@@ -948,7 +959,7 @@ _steward_solo_changes() { # <ws> <wsdir> <product> <owner-pr-refs, one per line>
                             and .value.verdict? == "changes" and ((.value.head? // "") | test("^[0-9a-f]{40}$")))
       | [(.key | ltrimstr($p)), .value.head] | @tsv' 2>/dev/null || true)
     [ "${#pending[@]}" -gt 0 ] || continue
-    prs="$(_solo_forge forge_pr_list "$wsdir" "$repo" open --author @me --limit 50 2>/dev/null)" || continue
+    prs="$(solo_owned_prs "$wsdir" "$repo" 50 2>/dev/null)" || continue
     for pr in "${pending[@]}"; do
       num="${pr%% *}" vhead="${pr#* }"
       idle="solo-changes-idle-$ws-$repo-$num-${vhead:0:12}"

@@ -874,6 +874,31 @@ commands), so it needs no owner. `doctor_repo_lane_lines` (`lib/doctor.sh`)
 warns about an invalid value and about a lane with no lane-state record
 (`.cel/solo/<product>/lane-<lane>`, made at its first launch).
 
+### Whose PRs are the product's own (`repos[].pr_authors`)
+
+`solo_pr_author_ok` (`lib/solo.sh`) is the one answer to "is this PR ours to
+review and land": `own` when the workspace's account on the forge opened it,
+`listed` when its author is a login `repos[].pr_authors` names for the repo
+(`ws_repo_pr_authors`, `lib/workspace.sh`), else no. It reads the committed
+`workspace.yaml` only, like `repos[].lane`; an entry that is not a
+login-shaped string (`_WS_LOGIN_RE`: GitHub/Forgejo login characters, an
+optional `app/` prefix or `[bot]` suffix) names nobody, and
+`doctor_repo_pr_authors_lines` fails it. Its callers:
+
+- `cel solo review` records an approval only on such a PR, and its refusal
+  of any other names the `pr_authors` line to add (`solo_pr_author_hint`);
+- `cel solo land` refuses any other PR the same way, and for a `listed` one
+  adds `PR-author: <login> (allowed by repos[].pr_authors)` to the squash
+  body above `Landed-by:`; every other check is unchanged;
+- the steward lists open PRs per author - `@me` and each listed login
+  (`solo_pr_list_authors`) - merged by number: `solo_owned_prs` for
+  `solo_ready_prs` and the recorded-`changes` sweep, and the review sweep's
+  gh list. One list that cannot be read drops that repo for the tick.
+
+`cel solo approvals` decides no ownership: it reports the reviews `cel solo
+land` would count for any PR it is given, so a listed author's PR reads the
+same as the account's own.
+
 ## Credentials
 
 Workspace `env:` and gitignored `env.local` layer over the caller's environment.
