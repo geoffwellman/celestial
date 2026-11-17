@@ -349,24 +349,30 @@ doctor_repo_pr_authors_lines() { # <wsdir> <workspace name> -> error lines, or n
 }
 
 # A REPO'S owns_paths (lib/workspace.sh ws_owns_glob) that claims the whole
-# home dir - ~, ~/, / or a glob the home dir or one of its parents matches -
-# sends every unledgered server and idle build daemon under it to that repo's
-# owner. A warning, one line per such glob: it still routes somewhere.
+# home dir - ~, ~/, / or a glob the home dir, one of its parents, or every
+# name directly in one of them matches (~/*, ~/**, /*, /**) - or the whole
+# workspace (a relative *, **) sends every unledgered server and idle build
+# daemon under it to that repo's owner. A warning, one line per such glob: it
+# still routes somewhere.
 doctor_repo_owns_paths_lines() { # <wsdir> <workspace name> -> warning lines, or nothing
-  local wsdir="$1" n="$2" r g p a broad
+  local wsdir="$1" n="$2" r g p a broad what
   for r in $(ws_repo_names "$wsdir"); do
     while IFS= read -r g; do
       [ -n "$g" ] || continue
-      p="$(ws_owns_glob "$wsdir" "$g")"; broad=''
+      p="$(ws_owns_glob "$wsdir" "$g")"; broad=''; what='home dir'
       case "$g" in "~"|"~/"|/) broad=1 ;; esac
       a="$HOME"
+      # "@" stands for any name: a glob that matches it under a dir claims
+      # everything there, not a named few
       while [ -z "$broad" ] && [ -n "$p" ] && [ -n "$a" ]; do
         # shellcheck disable=SC2053 # the glob is a pattern on purpose
-        [[ "$a" == $p ]] && broad=1
+        [[ "$a" == $p || "$a/@" == $p ]] && broad=1
         a="${a%/*}"
       done
-      [ -z "$broad" ] || printf "%s/%s: repos[].owns_paths glob '%s' claims the whole home dir - every unledgered server under it would go to %s; list the dirs the repo owns, e.g. ~/code/%s-scratch*\n" \
-        "$n" "$r" "$g" "$(ws_repo_pr_owner "$wsdir" "$r")" "$r"
+      # shellcheck disable=SC2053 # the glob is a pattern on purpose
+      [ -n "$broad" ] || [[ "$wsdir/@" != $p ]] || { broad=1; what='workspace'; }
+      [ -z "$broad" ] || printf "%s/%s: repos[].owns_paths glob '%s' claims the whole %s - every unledgered server under it would go to %s; list the dirs the repo owns, e.g. ~/code/%s-scratch*\n" \
+        "$n" "$r" "$g" "$what" "$(ws_repo_pr_owner "$wsdir" "$r")" "$r"
     done < <(_yqr -r --arg n "$r" '.repos // [] | map(select(.name == $n))[0].owns_paths // []
       | if type == "array" then .[] | strings else empty end' "$wsdir/workspace.yaml" 2>/dev/null)
   done

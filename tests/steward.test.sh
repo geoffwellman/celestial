@@ -3152,6 +3152,25 @@ test_steward_unledgered_sibling_with_an_unknown_suffix_is_not_the_repos() {
   assert_eq "$(_serve_dir_owner "$T/code/app-wt/x")" "alpha bundle-orch" || { _ul_down; return 1; }
   _ul_down
 }
+# A known suffix is the whole word or followed by a dash: app-database and
+# app-releasenotes are other projects, app-data-1 and app-local-cf-data app's.
+test_steward_unledgered_known_suffix_needs_a_dash_after_it() {
+  _ul_fixture
+  printf 'name: alpha\nrepos: [{name: widget}, {name: slots, lane: builder}, {name: app}]\nproducts:\n  - {name: bundle, repos: [widget, slots, app]}\n' \
+    > "$T/alpha/workspace.yaml"
+  mkdir -p "$T/code/app" "$T/code/app-database/x" "$T/code/app-releasenotes" "$T/code/app-localhost" \
+    "$T/code/app-wtf" "$T/code/app-worktreesx" "$T/code/app-data-1/x" "$T/code/app-local-cf-data" \
+    "$T/code/app-release-abc" "$T/code/app-local" "$T/code/app-data" "$T/code/app-release"
+  ln -s "$T/code/app" "$T/alpha/repos/app"
+  local d
+  for d in app-database/x app-releasenotes app-localhost app-wtf app-worktreesx; do
+    assert_eq "$(_serve_dir_owner "$T/code/$d")" "alpha root outside" || { echo "$d"; _ul_down; return 1; }
+  done
+  for d in app-data-1/x app-local-cf-data app-release-abc app-local app-data app-release; do
+    assert_eq "$(_serve_dir_owner "$T/code/$d")" "alpha bundle-orch" || { echo "$d"; _ul_down; return 1; }
+  done
+  _ul_down
+}
 test_steward_unledgered_longest_repo_root_prefix_wins() {
   _ul_fixture
   # cf is checked out at slots-data, beside slots: its own root is longer
