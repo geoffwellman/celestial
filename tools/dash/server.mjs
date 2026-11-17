@@ -480,8 +480,10 @@ const decideOne = async ({ id, action, value, option }) => {
   const byIndex = action === 'answer' && option !== undefined && option !== null;
   if (byIndex && !(Number.isInteger(option) && option >= 1 && option <= 99)) return { code: 400, error: 'bad option' };
   if (!byIndex && (!v || v.length > 2000)) return { code: 400, error: action === 'drop' ? 'a reason is required' : 'an answer is required' };
-  let d = (await decisions()).find((x) => x.id === String(id));
-  if (!d) { delete cache.decisions; d = (await decisions()).find((x) => x.id === String(id)); }
+  // decided on what is true now, never a warm list: routing and answerable
+  // are judged on a fresh read
+  delete cache.decisions;
+  const d = (await decisions()).find((x) => x.id === String(id));
   if (!d) return { code: 409, error: 'not recorded: already answered, or no such decision' };
   const routed = Array.isArray(d.route && d.route.people) && d.route.people.length > 0;
   if (routed && !d.me) return { code: 409, error: `routed to ${d.route.role} (${d.route.people.join(', ')}); this dashboard's login names no person (me:) - it answers only unrouted decisions` };

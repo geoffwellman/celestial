@@ -115,3 +115,23 @@ console.log(r.join('|'));
 ")"
   assert_eq "$out" "good|good|good|good|good|empty|3"
 }
+
+# An answer older than ten budgets is not served at once: the ask waits for a
+# fresh read, as a first ask does - and still keeps it if that read fails.
+test_dash_cached_answer_past_ten_ttls_waits_for_a_fresh_read() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let next = 'old', fail = false;
+const fn = async () => { await sleep(20); if (fail) return undefined; return next; };
+const ask = () => cached('k', 10, fn, 'empty');
+const r = [await ask()];
+await sleep(30); next = 'mid'; r.push(await ask());
+await sleep(25); r.push(await ask());
+await sleep(120); next = 'new'; r.push(await ask());
+await sleep(120); fail = true; r.push(await ask());
+console.log(r.join('|'));
+")"
+  assert_eq "$out" "old|old|mid|new|new"
+}
