@@ -2613,7 +2613,7 @@ _steward_build_daemons() {
   local k c s i r
   local -a f=() daemons=()
   local -A ppid_of=() live_kids=() kind_of=() cpu_of=() start_of=() p_cpu=() p_seen=() p_since=() p_rep=()
-  local comm kid busy
+  local comm kid busy preloaded=''
   { IFS=' .' read -r up _ < "$proc/uptime"; } 2>/dev/null || return 0
   [[ "$up" =~ ^[0-9]+$ ]] || return 0
   clk="$(getconf CLK_TCK 2>/dev/null)" || clk=100
@@ -2662,6 +2662,9 @@ _steward_build_daemons() {
     fi
     age=$((up - start_of[$pid] / clk))
     if [ "$idle" = 1 ] && [ "$rep" = 0 ] && [ "$age" -gt $((min * 60)) ]; then
+      # this tick's repos and common dirs, read here, once, not in each
+      # report's owner subshell
+      [ -n "$preloaded" ] || { _serve_owner_preload; preloaded=1; }
       _steward_build_daemon_report "$proc" "$pid" "${kind_of[$pid]}" $(((up - since) / 60)) "${start_of[$pid]}" && rep=1
     fi
     out+="$key ${cpu_of[$pid]} $up $since $rep"$'\n'

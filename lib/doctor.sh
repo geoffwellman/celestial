@@ -348,6 +348,30 @@ doctor_repo_pr_authors_lines() { # <wsdir> <workspace name> -> error lines, or n
   done
 }
 
+# A REPO'S owns_paths (lib/workspace.sh ws_owns_glob) that claims the whole
+# home dir - ~, ~/, / or a glob the home dir or one of its parents matches -
+# sends every unledgered server and idle build daemon under it to that repo's
+# owner. A warning, one line per such glob: it still routes somewhere.
+doctor_repo_owns_paths_lines() { # <wsdir> <workspace name> -> warning lines, or nothing
+  local wsdir="$1" n="$2" r g p a broad
+  for r in $(ws_repo_names "$wsdir"); do
+    while IFS= read -r g; do
+      [ -n "$g" ] || continue
+      p="$(ws_owns_glob "$wsdir" "$g")"; broad=''
+      case "$g" in "~"|"~/"|/) broad=1 ;; esac
+      a="$HOME"
+      while [ -z "$broad" ] && [ -n "$p" ] && [ -n "$a" ]; do
+        # shellcheck disable=SC2053 # the glob is a pattern on purpose
+        [[ "$a" == $p ]] && broad=1
+        a="${a%/*}"
+      done
+      [ -z "$broad" ] || printf "%s/%s: repos[].owns_paths glob '%s' claims the whole home dir - every unledgered server under it would go to %s; list the dirs the repo owns, e.g. ~/code/%s-scratch*\n" \
+        "$n" "$r" "$g" "$(ws_repo_pr_owner "$wsdir" "$r")" "$r"
+    done < <(_yqr -r --arg n "$r" '.repos // [] | map(select(.name == $n))[0].owns_paths // []
+      | if type == "array" then .[] | strings else empty end' "$wsdir/workspace.yaml" 2>/dev/null)
+  done
+}
+
 # workspace.local.yaml is allowed to override role_profiles, add
 # worker_profiles, override env: keys, name me: and set a product's
 # orchestrator: manual (see lib/yaml.sh:_ws_effective_json; the allowed keys
@@ -634,6 +658,9 @@ check_workspaces() {
     while IFS= read -r setupline; do
       [ -z "$setupline" ] || { c_err "$setupline"; fail=1; }
     done < <(doctor_repo_pr_authors_lines "$path" "$n")
+    while IFS= read -r setupline; do
+      [ -z "$setupline" ] || c_warn "$setupline"
+    done < <(doctor_repo_owns_paths_lines "$path" "$n")
 
     doctor_ws_local_summary "$path" "$n"
     doctor_ws_local_lines "$path" "$n" || fail=1

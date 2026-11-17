@@ -567,6 +567,21 @@ ws_repo_pr_authors() { # <wsdir> <repo> -> each listed login, one a line
     | if type == "array" then .[] | strings | select(test($re)) else empty end' "$1/workspace.yaml"
 }
 
+# WHAT ELSE A REPO'S OWNER RUNS (lib/serve.sh _serve_dir_owner, the
+# unledgered-server report and the idle build-daemon note):
+#   repos: [{name: widget, owns_paths: ["~/scratch/widget-*"]}]
+# Globs read from the committed workspace.yaml only. ws_owns_glob turns one
+# into the pattern a dir is matched against: ~ and ~/ are the home dir, a
+# relative glob is under the workspace, a trailing / is dropped (so / alone is
+# empty and matches nothing). A dir the pattern matches, or one under it, is
+# the repo's; cel doctor (doctor_repo_owns_paths_lines) warns about a glob
+# that claims the whole home dir.
+ws_owns_glob() { # <wsdir> <glob> -> the pattern
+  local g="$2"
+  case "$g" in "~") g="$HOME" ;; "~/"*) g="$HOME/${g#"~/"}" ;; /*|"") ;; *) g="$1/$g" ;; esac
+  printf '%s' "${g%/}"
+}
+
 ws_product_declared() { # <wsdir> <product> - 0 declared, 1 implicit or unknown
   [ "$(_yqr -r --arg p "$2" '(.products // []) | map(select(.name == $p)) | length' \
     "$1/workspace.yaml")" != "0" ]

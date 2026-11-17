@@ -293,3 +293,23 @@ test_check_workspaces_runs_the_people_lines() {
   assert_contains "$out" "home: lee"
   rm -rf "$T"
 }
+
+# A repos[].owns_paths glob that claims the whole home dir (or more) sends
+# every unledgered server under it to that repo's owner: a warning, never a
+# failure. A glob naming dirs under home is fine.
+test_check_workspaces_warns_on_an_owns_paths_glob_that_claims_all_of_home() {
+  _doctor_ws_setup
+  local out rc=0 tmp="$T/w"
+  yq -y '.repos[0].owns_paths = ["~/code/widget-scratch*", "previews/*"]' "$T/alpha/workspace.yaml" > "$tmp" && mv "$tmp" "$T/alpha/workspace.yaml"
+  out="$(check_workspaces 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { printf '%s\n' "$out"; rm -rf "$T"; return 1; }
+  case "$out" in *owns_paths*) echo "warned on a narrow glob: $out"; rm -rf "$T"; return 1 ;; esac
+  local g
+  for g in '~' '~/' '/' "${HOME%/*}/*" '/*'; do
+    yq -y --arg g "$g" '.repos[0].owns_paths = ["~/code/x", $g]' "$T/alpha/workspace.yaml" > "$tmp" && mv "$tmp" "$T/alpha/workspace.yaml"
+    rc=0; out="$(check_workspaces 2>&1)" || rc=$?
+    assert_eq "$rc" 0 || { printf '%s\n' "$out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "alpha/widget: repos[].owns_paths glob '$g' claims the whole home dir" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}

@@ -3093,16 +3093,101 @@ test_steward_unledgered_owner_without_git_identity_falls_back_to_path_rules() {
   ( cd "$T/elsewhere/slots" && assert_eq "$(_serve_dir_owner '')" "alpha root outside" ) || { _ul_down; return 1; }
   git init -q --bare "$T/alpha/repos/widget/bare.git"
   assert_eq "$(_serve_dir_owner "$T/alpha/repos/widget/bare.git")" "alpha bundle-orch" || { _ul_down; return 1; }
-  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/.git")" "alpha root outside" || { _ul_down; return 1; }
-  mkdir -p "$T/elsewhere/slots/locked/web"; chmod 000 "$T/elsewhere/slots/locked"
-  if [ ! -r "$T/elsewhere/slots/locked" ]; then
-    assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/locked/web")" "alpha root outside" || { chmod 755 "$T/elsewhere/slots/locked"; _ul_down; return 1; }
+  # the .git dir of the symlinked checkout lies under the repo's real root
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/.git")" "alpha bundle-builder" || { _ul_down; return 1; }
+  mkdir -p "$T/elsewhere/locked/web"; chmod 000 "$T/elsewhere/locked"
+  if [ ! -r "$T/elsewhere/locked" ]; then
+    assert_eq "$(_serve_dir_owner "$T/elsewhere/locked/web")" "alpha root outside" || { chmod 755 "$T/elsewhere/locked"; _ul_down; return 1; }
   fi
-  chmod 755 "$T/elsewhere/slots/locked"
+  chmod 755 "$T/elsewhere/locked"
   # and a report with an empty path goes to root alone
   ( cd "$T/elsewhere/slots" && _ul_tick '{"pid":3900001,"port":5173,"memory_mb":9,"age_seconds":9,"worktree":"","command":"node x"}' )
   assert_eq "$(_ul_sent_to bundle-builder)" 0 || { cat "$T/sent"; _ul_down; return 1; }
   assert_eq "$(_ul_sent_to root)" 1
+  _ul_down
+}
+
+# The box's own layout (AH-261117): a repo checked out at ~/code/<repo> and
+# symlinked into repos/, its worktrees in ~/code/<repo>-wt/<name>, and a dev
+# server whose cwd is a data dir beside it (~/code/<repo>-local-cf-data, not
+# git). A worktree is the repo's by git identity wherever it lives; a dir with
+# none is the repo's when its path starts with the repo's real root or with
+# "<real root>-", the longest such root winning.
+test_steward_unledgered_symlinked_repo_worktrees_route_by_git_identity_anywhere() {
+  _ul_fixture
+  git -C "$T/alpha/repos/slots" worktree add -q -b wt-a "$T/elsewhere/slots-wt/local-abc" 2>/dev/null
+  git -C "$T/alpha/repos/slots" worktree add -q -b wt-b "$T/scratch/review-x" 2>/dev/null
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-wt/local-abc")" "alpha bundle-builder" || { _ul_down; return 1; }
+  # no shared prefix at all: git identity alone places it
+  assert_eq "$(_serve_dir_owner "$T/scratch/review-x")" "alpha bundle-builder" || { _ul_down; return 1; }
+  _ul_down
+}
+test_steward_unledgered_non_git_dir_beside_a_repo_routes_to_the_repo_owner() {
+  _ul_fixture
+  mkdir -p "$T/elsewhere/slots-local-cf-data/config" "$T/elsewhere/slotsy/x" "$T/elsewhere/slots-wt" \
+    "$T/elsewhere/slots-release-abc" "$T/elsewhere/slots-data" "$T/elsewhere/slots-worktrees"
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-local-cf-data/config")" "alpha bundle-builder" || { _ul_down; return 1; }
+  # the bare worktrees dir itself is no work tree, but it is "<root>-wt"
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-wt")" "alpha bundle-builder" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-worktrees")" "alpha bundle-builder" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-release-abc")" "alpha bundle-builder" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-data")" "alpha bundle-builder" || { _ul_down; return 1; }
+  # "slotsy" is another name, not a sibling: no dash
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slotsy/x")" "alpha root outside" || { _ul_down; return 1; }
+  _ul_tick "$(_ul_pid 3900001 "$T/elsewhere/slots-local-cf-data/config" 300)"
+  assert_eq "$(_ul_sent_to bundle-builder)" 1 || { cat "$T/sent"; _ul_down; return 1; }
+  case "$(cat "$T/sent")" in *"Outside every workspace"*) echo "said outside: $(cat "$T/sent")"; _ul_down; return 1 ;; esac
+  _ul_down
+}
+# Only a KNOWN suffix makes a sibling the repo's: app-other-project is
+# another project, not app's (owns_paths can claim it).
+test_steward_unledgered_sibling_with_an_unknown_suffix_is_not_the_repos() {
+  _ul_fixture
+  printf 'name: alpha\nrepos: [{name: widget}, {name: slots, lane: builder}, {name: app}]\nproducts:\n  - {name: bundle, repos: [widget, slots, app]}\n' \
+    > "$T/alpha/workspace.yaml"
+  mkdir -p "$T/code/app" "$T/code/app-other-project/web" "$T/code/app-wt/x" "$T/elsewhere/slots-other"
+  ln -s "$T/code/app" "$T/alpha/repos/app"
+  assert_eq "$(_serve_dir_owner "$T/code/app-other-project/web")" "alpha root outside" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-other")" "alpha root outside" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/code/app-wt/x")" "alpha bundle-orch" || { _ul_down; return 1; }
+  _ul_down
+}
+test_steward_unledgered_longest_repo_root_prefix_wins() {
+  _ul_fixture
+  # cf is checked out at slots-data, beside slots: its own root is longer
+  # than slots' "<root>-data*"
+  printf 'name: alpha\nrepos: [{name: widget}, {name: slots, lane: builder}, {name: cf}]\nproducts:\n  - {name: bundle, repos: [widget, slots, cf]}\n' \
+    > "$T/alpha/workspace.yaml"
+  mkdir -p "$T/elsewhere/slots-data/state" "$T/elsewhere/slots-data-local" "$T/elsewhere/slots-release-1"
+  ln -s "$T/elsewhere/slots-data" "$T/alpha/repos/cf"
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-data/state")" "alpha bundle-orch" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-data-local")" "alpha bundle-orch" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-release-1")" "alpha bundle-builder" || { _ul_down; return 1; }
+  _ul_down
+}
+
+# Anything else a repo's owner runs: repos[].owns_paths, globs in the
+# committed workspace.yaml (~/ is the home dir, a relative one the
+# workspace's; a dir under a match is matched). It decides before the path
+# prefix does, never over git identity, and a local overlay cannot add one.
+test_steward_unledgered_owns_paths_claims_a_dir_for_the_repo_owner() {
+  _ul_fixture
+  printf 'name: alpha\nrepos:\n  - {name: widget, owns_paths: ["~/tmp/widget-*", "/srv/widget-demo", "previews/widget-*", "%s/elsewhere/slots-data-widget*"]}\n  - {name: slots, lane: builder}\nproducts:\n  - {name: bundle, repos: [widget, slots]}\n' \
+    "$T" > "$T/alpha/workspace.yaml"
+  mkdir -p "$T/home/tmp/widget-preview/sub" "$T/alpha/previews/widget-1" "$T/elsewhere/slots-data-widget"
+  assert_eq "$(HOME="$T/home" _serve_dir_owner "$T/home/tmp/widget-preview/sub")" "alpha bundle-orch" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner /srv/widget-demo)" "alpha bundle-orch" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner /srv/widget-demo-2)" "alpha root outside" || { _ul_down; return 1; }
+  assert_eq "$(_serve_dir_owner "$T/alpha/previews/widget-1")" "alpha bundle-orch" || { _ul_down; return 1; }
+  # over the prefix rule (slots-data* is slots'), not over git identity
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots-data-widget")" "alpha bundle-orch" || { _ul_down; return 1; }
+  printf 'name: alpha\nrepos:\n  - {name: widget, owns_paths: ["%s/elsewhere/slots/*"]}\n  - {name: slots, lane: builder}\nproducts:\n  - {name: bundle, repos: [widget, slots]}\n' \
+    "$T" > "$T/alpha/workspace.yaml"
+  assert_eq "$(_serve_dir_owner "$T/elsewhere/slots/web")" "alpha bundle-builder" || { _ul_down; return 1; }
+  # the committed file only
+  printf 'name: alpha\nrepos: [{name: widget}, {name: slots, lane: builder}]\nproducts:\n  - {name: bundle, repos: [widget, slots]}\n' > "$T/alpha/workspace.yaml"
+  printf 'repos:\n  - {name: widget, owns_paths: ["/srv/widget-demo"]}\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(_serve_dir_owner /srv/widget-demo)" "alpha root outside" || { _ul_down; return 1; }
   _ul_down
 }
 
@@ -3133,19 +3218,29 @@ test_steward_unledgered_old_keys_rekey_in_one_message() {
   _ul_down
 }
 
-# With several workspaces, a server in none goes to the first one's root, and
-# the message says which; with one, nothing extra is said.
+# A server in no workspace goes to the root of the box's first workspace in
+# registry ORDER (not by name), and the message says which.
 test_steward_unledgered_server_outside_every_workspace_names_the_root_told() {
   _ul_fixture
   _ul_tick "$(_ul_pid 3900001 /srv/demo)"
-  case "$(cat "$T/sent")" in *"Outside every workspace"*) echo "one workspace, said outside: $(cat "$T/sent")"; _ul_down; return 1 ;; esac
-  mkdir -p "$T/beta"; printf 'name: beta\nrepos: []\n' > "$T/beta/workspace.yaml"
-  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
+  assert_contains "$(cat "$T/sent")" "Outside every workspace, so reported to workspace alpha's root (the first in the registry): node on port 5173 in /srv/demo." || { _ul_down; return 1; }
+  mkdir -p "$T/zeta"; printf 'name: zeta\nrepos: []\n' > "$T/zeta/workspace.yaml"
+  printf 'workspaces:\n  zeta: {path: "%s/zeta"}\n  alpha: {path: "%s/alpha"}\n' "$T" "$T" > "$CEL_REGISTRY"
+  assert_eq "$(_serve_dir_owner /srv/shop)" "zeta root outside" || { _ul_down; return 1; }
   : > "$T/sent"
   _ul_tick "$(_ul_pid 3900001 /srv/demo),$(_ul_pid 3900002 /srv/shop 100)"
   assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _ul_down; return 1; }
-  assert_contains "$(cat "$T/sent")" "root alpha" || { _ul_down; return 1; }
-  assert_contains "$(cat "$T/sent")" "Outside every workspace, so reported to workspace alpha's root (the first registered): node on port 5173 in /srv/shop."
+  assert_contains "$(cat "$T/sent")" "root zeta" || { _ul_down; return 1; }
+  assert_contains "$(cat "$T/sent")" "Outside every workspace, so reported to workspace zeta's root (the first in the registry): node on port 5173 in /srv/shop."
+  _ul_down
+}
+
+# Root's summary lists every new server; one routed to another agent says who
+# was told, so root does not read it as its own.
+test_steward_unledgered_summary_says_who_was_told_of_each_new_server() {
+  _ul_fixture
+  _ul_tick "$(_ul_pid 3900001 "$T/elsewhere/slots/web" 300),$(_ul_pid 3900002 /srv/demo 200)"
+  assert_contains "$(grep '^root ' "$T/sent")" "New: node on port 5173 in $T/elsewhere/slots/web (pid 3900001, 300MB, 4000s), told bundle-builder (alpha); node on port 5173 in /srv/demo (pid 3900002, 200MB, 4000s)." || { cat "$T/sent"; _ul_down; return 1; }
   _ul_down
 }
 
@@ -3656,6 +3751,20 @@ test_steward_build_daemon_without_cel_inbox_me_is_routed_by_its_cwd() {
   assert_eq "$(_ul_sent_to root)" 1 || { cat "$T/sent"; _bd_done; return 1; }
   assert_contains "$(grep '^root ' "$T/sent")" "root alpha" || { _bd_done; return 1; }
   assert_contains "$(grep '^root ' "$T/sent")" "idle Gradle daemon pid 4601" || { _bd_done; return 1; }
+  _bd_done
+}
+
+# The daemon note reads the repos and their common dirs once per tick, as the
+# unledgered report does, however many daemons it routes.
+test_steward_build_daemon_owners_read_repo_common_dirs_once_per_tick() {
+  _bd_fixture
+  : > "$T/git.log"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/git.log"\nexec %s "$@"\n' "$T" "$(command -v git)" > "$T/bin/git"; chmod +x "$T/bin/git"
+  _bd_kotlin 4900 1 100 100 "$T/elsewhere/slots/web"
+  _bd_kotlin 4901 1 100 150 "$T/elsewhere/slots-worktrees/review/web"
+  _bd_tick; _bd_uptime 10300; : > "$T/git.log"; _bd_tick
+  assert_eq "$(_ul_sent_to bundle-builder)" 2 || { cat "$T/sent"; _bd_done; return 1; }
+  assert_eq "$(grep -c "$T/alpha/repos/slots " "$T/git.log")" 1 || { cat "$T/git.log"; _bd_done; return 1; }
   _bd_done
 }
 
