@@ -563,6 +563,43 @@ EOF
   _gw_teardown
 }
 
+# THE GATEWAY'S KEY NEVER GOES TO A PROXY (AH-261118). curl honours
+# http_proxy even for 127.0.0.1, and a proxy handed the api-key could spend
+# every subscription behind the gateway. Every read that carries it - the
+# catalog reads, the read-only OpenCode one, rotate-key's probe, a service
+# health check with a bearer for a loopback URL - goes through curl_direct:
+# --disable first, --noproxy '*', and no proxy variable in curl's environment.
+test_every_gateway_key_read_bypasses_a_proxy() {
+  _gw_setup
+  # shellcheck source=lib/gateway-rotate.sh
+  . "$CEL_ROOT/lib/gateway-rotate.sh"
+  mkdir -p "$T/state"; chmod 700 "$T/state"
+  printf 'fixture-existing-key-0123456789\n' >"$T/state/api-key"; chmod 600 "$T/state/api-key"
+  printf 'gateway:\n  port: 49221\n' >"$CEL_CONFIG_FILE"
+  cat >"$T/bin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$T/curl.argv"
+printf '[%s]\n' "\${http_proxy:-}\${HTTP_PROXY:-}\${https_proxy:-}\${HTTPS_PROXY:-}\${all_proxy:-}\${ALL_PROXY:-}" >>"$T/curl.proxyenv"
+cat >/dev/null
+printf '%s' '{"data":[{"id":"gpt-5.5"}]}'
+EOF
+  chmod +x "$T/bin/curl"
+  local p=http://proxy.example.invalid:3128
+  export http_proxy=$p HTTP_PROXY=$p https_proxy=$p HTTPS_PROXY=$p all_proxy=$p ALL_PROXY=$p
+  _gateway_models_json_raw >/dev/null || { echo "raw read failed"; _gw_teardown; return 1; }
+  gateway_models_json_existing >/dev/null || { echo "existing-key read failed"; _gw_teardown; return 1; }
+  _gateway_models_json_readonly >/dev/null || { echo "read-only read failed"; _gw_teardown; return 1; }
+  _gwr_http_code fixture-existing-key-0123456789 >/dev/null
+  svc_health_ok 49221 /healthz 'bearer fixture-existing-key-0123456789' || true
+  unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY
+  assert_eq "$(wc -l <"$T/curl.argv")" 5
+  # every one: --disable first (curl honours it nowhere else), then --noproxy
+  assert_eq "$(grep -vc '^--disable --noproxy \* ' "$T/curl.argv")" 0
+  assert_eq "$(sort -u "$T/curl.proxyenv")" '[]'
+  ! grep -q 'fixture-existing-key' "$T/curl.argv" || { echo "the key reached argv"; _gw_teardown; return 1; }
+  _gw_teardown
+}
+
 test_pi_models_catalog_failure_does_not_block_published_chat_availability() {
   _gw_setup
   mkdir -p "$T/state"; printf 'fixture-existing-key' >"$T/state/api-key"; chmod 600 "$T/state/api-key"

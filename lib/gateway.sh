@@ -136,7 +136,9 @@ gateway_ready() {
 }
 
 # GET /v1/models, which every /v1 route requires the api-key for. The key
-# rides STDIN, never argv - a bearer in a command line is a bearer in `ps`.
+# rides STDIN, never argv - a bearer in a command line is a bearer in `ps` -
+# and never through a proxy (curl_direct, lib/common.sh): every read here that
+# carries the key goes direct to the loopback gateway.
 #
 # The catalog every client but omp sees: ids published only because an
 # account carries the omp prefix (`omp/<model>`) are omp's and are dropped
@@ -153,7 +155,7 @@ _gateway_models_json_raw() {
   local key; key="$(_gateway_api_key)"
   [ -n "$key" ] || return 1
   printf 'Authorization: Bearer %s\n' "$key" \
-    | curl -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null
+    | curl_direct -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null
 }
 
 # Dedicated read-only path: unlike the general helper, absent credentials are
@@ -181,8 +183,8 @@ except Exception:
 PY
   )" || return 1
   printf 'Authorization: Bearer %s\n' "$key" \
-    | curl --disable --silent --fail --max-time 10 --max-filesize 8388608 \
-        --noproxy '*' --proto '=http' "$(gateway_url)/v1/models" -H @- 2>/dev/null \
+    | curl_direct --silent --fail --max-time 10 --max-filesize 8388608 \
+        --proto '=http' "$(gateway_url)/v1/models" -H @- 2>/dev/null \
     || { printf 'opencode catalog: gateway model listing failed\n' >&2; return 1; }
 )
 
@@ -241,7 +243,7 @@ gateway_models_json_existing() {
     return 1
   }
   printf 'Authorization: Bearer %s\n' "$key" \
-    | curl -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null || {
+    | curl_direct -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null || {
     printf 'cel gateway pi-models: could not read the published model catalog from %s/v1/models\n' "$(gateway_url)" >&2
     return 1
   }

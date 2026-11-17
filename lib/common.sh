@@ -19,11 +19,28 @@ die()    { c_err "$*"; exit 1; }
 # A REQUEST CARRYING A LOOPBACK-ONLY SECRET NEVER GOES THROUGH A PROXY. curl
 # honours http_proxy / HTTPS_PROXY / ALL_PROXY even for 127.0.0.1 and
 # localhost unless told otherwise, and the proxy would be handed the bearer -
-# the gateway management key opens every credential in the vault. So the
-# proxy variables are dropped for this one curl AND it is told --noproxy '*'.
+# the gateway api-key spends every subscription and the management key opens
+# every credential in the vault. So the proxy variables are dropped for this
+# one curl, it is told --noproxy '*', and --disable (which curl honours only
+# as the FIRST argument) keeps a ~/.curlrc from adding a proxy or a header.
+# Every curl that carries the gateway's api-key or management key goes here.
 curl_direct() { # <curl args...>
   env -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
-    curl --noproxy '*' "$@"
+    curl --disable --noproxy '*' "$@"
+}
+
+# Is <url> an http(s) URL whose host is this machine's loopback - 127.0.0.1,
+# ::1 or localhost, nothing that merely resolves there - with no user info?
+url_is_loopback() { # <url>
+  local rest host
+  case "$1" in http://*|https://*) ;; *) return 1 ;; esac
+  rest="${1#*://}"; rest="${rest%%/*}"; rest="${rest%%\?*}"; rest="${rest%%#*}"
+  case "$rest" in *@*) return 1 ;; esac
+  case "$rest" in
+    \[*\]|\[*\]:*) host="${rest#\[}"; host="${host%%\]*}" ;;
+    *) host="${rest%%:*}" ;;
+  esac
+  case "${host,,}" in 127.0.0.1|::1|localhost) return 0 ;; *) return 1 ;; esac
 }
 
 # IS THIS PROCESS UNDER ITS OWN CHECKOUT'S TEST SUITE? The test seams that

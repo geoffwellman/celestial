@@ -67,11 +67,12 @@ _gwr_write_key() { # <file>
 }
 
 # The HTTP status GET /v1/models answers one key with; 000 when nothing
-# answered. The bearer rides curl's stdin, never its argv.
+# answered. The bearer rides curl's stdin, never its argv, and never a proxy
+# (curl_direct, lib/common.sh).
 _gwr_http_code() { # <key>
   local code
   code="$(printf 'Authorization: Bearer %s\n' "$1" \
-    | curl -s -o /dev/null -w '%{http_code}' -m 5 --noproxy '*' "$(gateway_url)/v1/models" -H @- 2>/dev/null)" || true
+    | curl_direct -s -o /dev/null -w '%{http_code}' -m 5 "$(gateway_url)/v1/models" -H @- 2>/dev/null)" || true
   printf '%s' "${code:-000}"
 }
 

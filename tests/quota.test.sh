@@ -1134,10 +1134,10 @@ test_the_management_key_is_sent_to_loopback_only() {
   local port u; port="$(cat "$T/port")"
   for u in "http://localhost.example.invalid:$port" "http://127.0.0.2:$port" "http://user@127.0.0.1:$port" \
            "ftp://127.0.0.1:$port" "http://127.0.0.1.example.invalid:$port" "127.0.0.1:$port"; do
-    if _cpa_loopback_url "$u"; then printf 'accepted a non-loopback gateway URL: %s\n' "$u" >&2; return 1; fi
+    if url_is_loopback "$u"; then printf 'accepted a non-loopback gateway URL: %s\n' "$u" >&2; return 1; fi
   done
   for u in "http://127.0.0.1:$port" "http://localhost:$port/" "http://LOCALHOST:$port" "http://[::1]:$port" "https://127.0.0.1"; do
-    _cpa_loopback_url "$u" || { printf 'refused a loopback gateway URL: %s\n' "$u" >&2; return 1; }
+    url_is_loopback "$u" || { printf 'refused a loopback gateway URL: %s\n' "$u" >&2; return 1; }
   done
   # a gateway URL that is not loopback is never sent the key, nor cached
   export CEL_CPA_GATEWAY_URL="http://gateway.example.invalid:$port"

@@ -696,7 +696,7 @@ _cpa_gateway_states() {
     command -v gateway_url >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/gateway.sh"
     url="$(gateway_url 2>/dev/null || true)"
   fi
-  _cpa_loopback_url "$url" || { printf '{}'; return 0; }
+  url_is_loopback "$url" || { printf '{}'; return 0; }
   cache="$(_sub_cache_dir)/gateway-states.json"
   if [ -f "$cache" ] && [ ! -L "$cache" ]; then
     age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
@@ -724,20 +724,6 @@ _cpa_gateway_states() {
   [ -n "$out" ] || out='{}'
   _sub_cache_put "$cache" "$(jq -nc --arg u "$url" --argjson s "$out" '{url: $u, states: $s}')" || true
   printf '%s' "$out"
-}
-
-# Is <url> an http(s) URL whose host is this machine's loopback - 127.0.0.1,
-# ::1 or localhost, nothing that merely resolves there?
-_cpa_loopback_url() { # <url>
-  local rest host
-  case "$1" in http://*|https://*) ;; *) return 1 ;; esac
-  rest="${1#*://}"; rest="${rest%%/*}"; rest="${rest%%\?*}"; rest="${rest%%#*}"
-  case "$rest" in *@*) return 1 ;; esac
-  case "$rest" in
-    \[*\]|\[*\]:*) host="${rest#\[}"; host="${host%%\]*}" ;;
-    *) host="${rest%%:*}" ;;
-  esac
-  case "${host,,}" in 127.0.0.1|::1|localhost) return 0 ;; *) return 1 ;; esac
 }
 
 # What the gateway's last refresh of one expired file says: `login<TAB>why`
