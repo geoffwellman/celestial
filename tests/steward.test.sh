@@ -1387,6 +1387,25 @@ test_steward_ignores_a_suite_lock_holder_record_for_a_reused_pid() {
   rm -rf "$T"
 }
 
+# AN OLDER STEWARD told root in every workspace and left an empty marker. A
+# raise that lands while it is still held must not forget those recipients:
+# when the lock frees, every one of the old items comes down.
+test_steward_clears_every_workspace_an_older_steward_told_about_the_suite_lock() {
+  _suite_lock_fixture
+  local holder; _suite_lock_hold
+  local ws
+  for ws in alpha beta; do _steward_raise "$ws" suite-lock status "steward: suite lock held 31m by pid 1 (worktree x)"; done
+  : > "$T/state.suite-lock"
+  _steward_suite_lock >/dev/null 2>&1
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _steward_suite_lock >/dev/null 2>&1
+  for ws in alpha beta; do
+    assert_eq "$(_inbox_open_fp "$ws" suite-lock steward root)" ""
+    assert_contains "$(cmd_inbox read --for root --workspace "$ws" --all)" "cleared: the suite lock is free again"
+  done
+  rm -rf "$T"
+}
+
 # --- the orphan sweep ---------------------------------------------------------
 
 # The memory sweep groups by pane, so watchers, fixtures and shells with no

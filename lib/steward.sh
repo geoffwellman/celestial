@@ -1647,6 +1647,15 @@ _steward_suite_holder_ws() { # <named-ws> <worktree>
   done
 }
 
+# AN EMPTY MARKER is one an older steward left after telling root in every
+# workspace; it becomes those recipients, so their items are taken down where
+# they were raised - whichever path (clear, or a raise that appends) sees it.
+_steward_suite_marker_expand() { # <marker>
+  local ws
+  [ -f "$1" ] && [ ! -s "$1" ] || return 0
+  for ws in $(registry_names); do printf '%s\troot\n' "$ws"; done > "$1"
+}
+
 _steward_suite_lock() {
   local path ws to
   path="$(_steward_suite_lock_path)"
@@ -1661,11 +1670,7 @@ _steward_suite_lock() {
   local raised="$_STEWARD_STATE.suite-lock"
   if [ ! -f "$path" ] || flock -n "$path" -c true >/dev/null 2>&1; then
     [ -f "$raised" ] || return 0
-    # An empty marker is one an older steward left after telling root in
-    # every workspace; those items are taken down where they were raised.
-    if [ ! -s "$raised" ]; then
-      for ws in $(registry_names); do printf '%s\troot\n' "$ws"; done > "$raised"
-    fi
+    _steward_suite_marker_expand "$raised"
     while IFS=$'\t' read -r ws to; do
       [ -n "$ws" ] && [ -n "$to" ] || continue
       _steward_clear "$ws" suite-lock "the suite lock is free again - gates are no longer queued" "$to"
@@ -1694,7 +1699,10 @@ _steward_suite_lock() {
   if [ "$pid" != "?" ] && _steward_suite_holder "$path.holder" "$pid"; then
     local who="pid $pid"
     [ -z "$agent" ] || who="$agent (pid $pid)"
-    msg="steward: suite lock held $(( age / 60 ))m by $who in worktree ${wt:-unknown}, running ${files:-all} - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
+    # The record is the holder's own words: each field is capped, so a long
+    # path or filter cannot swell every mailbox it lands in.
+    : "${wt:=unknown}" "${files:=all}"
+    msg="steward: suite lock held $(( age / 60 ))m by $who in worktree ${wt:0:200}, running ${files:0:200} - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
     [ -z "$agent" ] || ows="$(_steward_suite_holder_ws "$hws" "$wt")"
   else
     agent=""
@@ -1717,6 +1725,7 @@ _steward_suite_lock() {
     line="$ows"$'\t'"$(_inbox_sanitise "$agent")"
     [ "$line" = "${tell[0]:-}" ] || tell+=("$line")
   fi
+  _steward_suite_marker_expand "$raised"
   touch "$raised"
   for line in "${tell[@]}"; do
     grep -qxF -- "$line" "$raised" 2>/dev/null || printf '%s\n' "$line" >> "$raised"
