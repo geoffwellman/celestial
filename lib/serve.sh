@@ -879,13 +879,14 @@ serve_sweep() {
 #     a glob matches, or one under it, is the repo's. The longest glob wins;
 #  4. a dir no git identity placed whose path is a repo's real root (repos/
 #     <repo> with every symlink resolved) or under it, or a sibling of it
-#     named "<real root>" plus a KNOWN suffix - -wt, -worktrees, -local*,
-#     -data*, -release*: the worktree, data and release dirs a repo's tooling
-#     puts beside it, ~/code/slot-studio-wt or -local-cf-data next to
-#     ~/code/slot-studio - is that repo's. Any other "<root>-..." is another
-#     project (app-other-project is not app's); owns_paths claims it if it is
-#     the repo's. The longest root wins: a repo checked out at <root>-data
-#     beats <root>'s "-data*" for dirs in <root>-data;
+#     named "<real root>" plus a KNOWN suffix, alone or followed by a dash -
+#     -wt, -worktrees, -local[-*], -data[-*], -release[-*]: the worktree,
+#     data and release dirs a repo's tooling puts beside it,
+#     ~/code/slot-studio-wt or -local-cf-data next to ~/code/slot-studio - is
+#     that repo's. Any other "<root>-..." is another project (app-other-
+#     project, app-database and app-release-notes are not app's); owns_paths
+#     claims it if it is the repo's. The longest root wins: a repo checked out
+#     at <root>-data beats <root>'s "-data-*" for dirs in <root>-data;
 #  5. inside a workspace: repos/<repo> is the repo's owner, .cel/solo/
 #     <product>/... the product's agent, anything else that workspace's root;
 #  6. anything outside every workspace is root of the box's first workspace
@@ -987,7 +988,7 @@ _serve_dir_owner() { # <dir> -> "<ws> <mailbox>" | "<first-ws> root outside"
         case "$dir" in
           "$root"|"$root"/*) len="${#root}" ;;
           "$root"-*) sib="${dir#"$root"}"; sib="${sib%%/*}"
-            case "$sib" in -wt|-worktrees|-local*|-data*|-release*) len="$(( ${#root} + 1 ))" ;; *) continue ;; esac ;;
+            case "$sib" in -wt|-worktrees|-local|-local-*|-data|-data-*|-release|-release-*) len="$(( ${#root} + 1 ))" ;; *) continue ;; esac ;;
           *) continue ;;
         esac
         [ "$len" -gt "$best" ] && { best="$len"; bi="$i"; br="$repo"; }
