@@ -547,6 +547,26 @@ ws_repo_pr_owner() { # <wsdir> <repo> [default] -> the mailbox that owns <repo>'
   else printf '%s-orch' "$product"; fi
 }
 
+# WHOSE PRS A SOLO PRODUCT TREATS AS ITS OWN, BESIDES THE WORKSPACE'S ACCOUNT:
+#   repos: [{name: widget, pr_authors: [example-bot]}]
+# - forge logins (a bot that opens PRs for the product, say) whose PRs
+# `cel solo review` records verdicts on, `cel solo land` lands (every other
+# check unchanged, plus a `PR-author:` line in the squash body) and the
+# steward nudges about (lib/solo.sh solo_pr_author_ok, solo_owned_prs).
+# IT IS THE TEAM'S CONTRACT, like repos[].lane: read from workspace.yaml
+# alone, never the workspace.local.yaml overlay (whose merge keeps only
+# role_profiles inside a repos[] entry, and cel doctor names anything else
+# there). Only login-shaped strings count (_WS_LOGIN_RE), in the shape the
+# forge reports a PR's author, matched exactly: GitHub (gh) reports an App's
+# PRs as `app/<name>` (never `<name>[bot]`, the REST shape) and an account's
+# as its plain login; Forgejo reports a plain login. Anything else names
+# nobody, and cel doctor (doctor_repo_pr_authors_lines) says so.
+_WS_LOGIN_RE='^(app/)?[A-Za-z0-9][A-Za-z0-9._-]{0,38}$'
+ws_repo_pr_authors() { # <wsdir> <repo> -> each listed login, one a line
+  _yqr -r --arg n "$2" --arg re "$_WS_LOGIN_RE" '.repos // [] | map(select(.name == $n))[0].pr_authors // []
+    | if type == "array" then .[] | strings | select(test($re)) else empty end' "$1/workspace.yaml"
+}
+
 ws_product_declared() { # <wsdir> <product> - 0 declared, 1 implicit or unknown
   [ "$(_yqr -r --arg p "$2" '(.products // []) | map(select(.name == $p)) | length' \
     "$1/workspace.yaml")" != "0" ]

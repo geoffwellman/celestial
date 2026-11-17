@@ -183,9 +183,101 @@ solo_extra_gaps() { # <extra-approvals-json> <repo> <pr> <head>
       (.blocking[] | "\(.alias) (\(extra_what); started by hand, not required by policy) asked for changes at \($h) - a finding at the head being merged blocks it: address it, push, and ask it to re-review")'
 }
 
+# WHOSE PR THIS IS: the one answer to "is it ours to review and land".
+# `own` when the workspace's account on the forge (<me>) opened it, `listed`
+# when its author is one repos[].pr_authors names for <repo> (committed
+# workspace.yaml only, lib/workspace.sh ws_repo_pr_authors); else nothing and
+# status 1. EXACT MATCH, never normalised: GitHub reports an App's PRs as
+# `app/<name>`, and a human whose login is `<name>` must not pass as the App.
+# `cel solo review`, `cel solo land` and the steward's PR lists
+# (solo_owned_prs) all ask this, so none of them can disagree.
+solo_pr_author_ok() { # <wsdir> <repo> <author> <me> -> own|listed, or status 1
+  [ -n "$3" ] || return 1
+  if [ -n "$4" ] && [ "$3" = "$4" ]; then printf own; return 0; fi
+  local listed; listed="$(ws_repo_pr_authors "$1" "$2" 2>/dev/null)" || return 1
+  grep -qxF -- "$3" <<<"$listed" || return 1
+  printf listed
+}
+# What an unlisted author's refusal says to do about it.
+solo_pr_author_hint() { # <repo> <author>
+  printf "if this workspace should review and land %s's PRs, list it in workspace.yaml under the repo: repos: [{name: %s, pr_authors: [%s]}]" \
+    "${2:-that author}" "$1" "${2:-<login>}"
+}
+# The authors whose open PRs are ours, as a forge's PR list takes them: the
+# account as @me, then each listed login. Read into an array by the callers
+# (mapfile), never word-split: a login is data, not a pattern.
+solo_pr_list_authors() { # <wsdir> <repo> -> one author a line
+  printf '@me\n'
+  ws_repo_pr_authors "$1" "$2" 2>/dev/null || true
+}
+
+# OUR OPEN PRS ON A REPO: one list per author (solo_pr_list_authors), merged
+# by number, newest first (highest number first, as each forge lists them).
+# solo_owned_prs_load reads them into _SOLO_OWNED (lib/forge.sh's PR shape)
+# and, for a GitHub repo, _SOLO_OWNED_GH (gh's own fields, with the
+# reviewDecision, statusCheckRollup, reviews and createdAt the steward's
+# review sweep reads) - the same one gh call per author feeds both.
+# An author whose list cannot be read is skipped with a warning; the others
+# still count. Only when no list could be read is the repo unreadable
+# (status 1). A list is never what a land acts on: `cel solo land` re-reads
+# the PR it is given.
+# ONE LISTING PER REPO PER STEWARD TICK: the tick sets _SOLO_OWNED_REUSE=1
+# and clears the maps (solo_owned_prs_reset), and a load then answers from
+# what this shell already read - so it must run in the tick's own shell, not
+# in a $(...) or a <(...), for the reviews sweep, the ready-to-land list and
+# the changes nudges to share it. Without the flag every load reads afresh.
+declare -gA _SOLO_OWNED=() _SOLO_OWNED_GH=()
+_SOLO_GH_SWEEP_FIELDS=createdAt,reviewDecision,statusCheckRollup,reviews
+solo_owned_prs_reset() { _SOLO_OWNED=(); _SOLO_OWNED_GH=(); }
+solo_owned_prs_load() { # <wsdir> <repo> -> status 0 readable, 1 not
+  local wsdir="$1" repo="$2" key="$1|$2"
+  if [ "${_SOLO_OWNED_REUSE:-0}" = 1 ] && [ -n "${_SOLO_OWNED[$key]+set}" ]; then
+    [ -n "${_SOLO_OWNED[$key]}" ]; return
+  fi
+  local desc provider="" slug="" a one next all='[]' read=0
+  local -a authors=()
+  mapfile -t authors < <(solo_pr_list_authors "$wsdir" "$repo")
+  if desc="$(forge_repo "$wsdir" "$repo" "$wsdir/repos/$repo" 2>/dev/null)"; then
+    provider="$(jq -r '.provider // ""' <<<"$desc")" slug="$(jq -r '"\(.owner)/\(.repo)"' <<<"$desc")"
+  fi
+  for a in "${authors[@]}"; do
+    [ -n "$a" ] || continue
+    if [ "$provider" = github ]; then
+      one="$(_solo_forge _forge_gh "$wsdir" pr list --repo "$slug" --state open --author "$a" --limit 50 \
+        --json "$_FORGE_GH_PR_FIELDS,$_SOLO_GH_SWEEP_FIELDS" 2>/dev/null)"
+    else
+      one="$(_solo_forge forge_pr_list "$wsdir" "$repo" open --author "$a" --limit 50 2>/dev/null)"
+    fi && next="$(jq -c --argjson o "$one" 'if ($o | type) == "array" and all($o[]; (.number | type) == "number")
+        then . + $o else error("not a list of pull requests") end' <<<"$all" 2>/dev/null)" \
+      || { c_warn "cel: could not list $repo's open PRs by $a - skipped this time; the other authors' still count" >&2; continue; }
+    all="$next" read=1
+  done
+  _SOLO_OWNED[$key]="" _SOLO_OWNED_GH[$key]=""
+  [ "$read" = 1 ] || return 1
+  all="$(jq -c 'unique_by(.number) | reverse' <<<"$all")" || return 1
+  if [ "$provider" = github ]; then
+    _SOLO_OWNED[$key]="$(jq -c "$_FORGE_JQ_GH"' map(gh_pr)' <<<"$all")" || { _SOLO_OWNED[$key]=""; return 1; }
+    _SOLO_OWNED_GH[$key]="$all"
+  else
+    _SOLO_OWNED[$key]="$all"
+  fi
+}
+solo_owned_prs() { # <wsdir> <repo> -> JSON array (lib/forge.sh's PR shape)
+  solo_owned_prs_load "$1" "$2" || return 1
+  printf '%s\n' "${_SOLO_OWNED[$1|$2]}"
+}
+# gh's own fields for a GitHub repo's PRs, as solo_owned_prs_load last read
+# them in this shell; status 1 (nothing printed) for a repo it could not read
+# or that is not on GitHub. Load first.
+solo_owned_prs_github() { # <wsdir> <repo> -> JSON array
+  [ -n "${_SOLO_OWNED_GH[$1|$2]:-}" ] || return 1
+  printf '%s\n' "${_SOLO_OWNED_GH[$1|$2]}"
+}
+
 # A solo product's PRs that `cel solo land` would merge right now - by the
 # same rules, never looser, or the steward would nag about a PR land refuses:
-# merge: self, the PR opened by this workspace's account on its forge, open,
+# merge: self, the PR opened by this workspace's account on its forge or by
+# an author repos[].pr_authors lists (solo_owned_prs), open,
 # not a draft, not conflicting, every check concluded and none red, approved
 # at its exact current head by every reviewer the review policy requires (the
 # plain one - the forge's review decision or the recorded verdict - and each
@@ -194,13 +286,14 @@ solo_extra_gaps() { # <extra-approvals-json> <repo> <pr> <head>
 # head). GitHub and Forgejo repos alike, through lib/forge.sh. One
 # `<repo><TAB><pr><TAB><head>` line each. The steward nudges the product's
 # agent with these; it never lands them itself. A forge that cannot be read
-# yields nothing for that repo - silence, never a guess.
+# yields nothing for that repo (an author whose list cannot be read, nothing
+# for that author: solo_owned_prs_load) - silence, never a guess.
 solo_ready_prs() { # <wsdir> <product>
   local wsdir="$1" product="$2" repo prs pr num head checks
   [ "$(ws_policy "$wsdir" merge)" = self ] || return 0
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    prs="$(_solo_forge forge_pr_list "$wsdir" "$repo" open --author @me --limit 50 2>/dev/null)" || continue
+    prs="$(solo_owned_prs "$wsdir" "$repo" 2>/dev/null)" || continue
     while IFS= read -r pr; do
       [ -n "$pr" ] || continue
       num="$(printf '%s' "$pr" | jq -r .number)" head="$(printf '%s' "$pr" | jq -r .head_sha)"
@@ -366,7 +459,8 @@ cmd_solo_review() { # <ref> <approved|changes|blocked> --head <sha> --by <alias>
 
   if [ "$verdict" = approved ]; then
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, on a PR this
-    # workspace's account opened. The forge validates; it never supplies the SHA.
+    # workspace's account opened or an author repos[].pr_authors lists
+    # (solo_pr_author_ok). The forge validates; it never supplies the SHA.
     local pr me author state rhead
     me="$(_solo_forge forge_whoami "$SOLO_WSDIR" "$SOLO_REPO")" \
       || die "cel solo review: cannot establish the account this workspace acts as on $SOLO_REPO's forge (see above) - an approval is not recorded unverified"
@@ -375,8 +469,8 @@ cmd_solo_review() { # <ref> <approved|changes|blocked> --head <sha> --by <alias>
     author="$(printf '%s' "$pr" | jq -r '.author // ""')"
     state="$(printf '%s' "$pr" | jq -r '.state // ""')"
     rhead="$(printf '%s' "$pr" | jq -r '.head_sha // ""')"
-    [ -n "$me" ] && [ "$author" = "$me" ] \
-      || die "cel solo review: #$SOLO_PR was opened by '${author:-?}', not this workspace's account ('${me:-?}') - nothing recorded"
+    solo_pr_author_ok "$SOLO_WSDIR" "$SOLO_REPO" "$author" "$me" >/dev/null \
+      || die "cel solo review: #$SOLO_PR was opened by '${author:-?}', not this workspace's account ('${me:-?}') nor an author repos[].pr_authors lists - nothing recorded; $(solo_pr_author_hint "$SOLO_REPO" "$author")"
     [ "$state" = open ] || die "cel solo review: #$SOLO_PR is ${state:-in no known state}, not open - nothing recorded"
     [ "$rhead" = "$head" ] \
       || die "cel solo review: --head $head is not #$SOLO_PR's current head (${rhead:-unknown}) - re-review the current head. Nothing recorded"
@@ -521,11 +615,11 @@ cmd_solo_land() { # <ref> [--workspace W]
     || die "cel solo land: this workspace's policy.merge is humans-only - tell the owner #$num is ready; do not merge it"
 
   local pr; pr="$(_solo_forge forge_pr_view "$wsdir" "$SOLO_REPO" "$num")" || die "cel solo land: no PR #$num on $slug ($forge)"
-  local author head
+  local author head author_kind
   author="$(printf '%s' "$pr" | jq -r '.author // ""')"
   head="$(printf '%s' "$pr" | jq -r '.head_sha // ""')"
-  [ -n "$me" ] && [ "$author" = "$me" ] \
-    || die "cel solo land: #$num was opened by '$author', not this workspace's account ('$me') - someone else's PR is theirs to land"
+  author_kind="$(solo_pr_author_ok "$wsdir" "$SOLO_REPO" "$author" "$me")" \
+    || die "cel solo land: #$num was opened by '$author', not this workspace's account ('$me') nor an author repos[].pr_authors lists - someone else's PR is theirs to land; $(solo_pr_author_hint "$SOLO_REPO" "$author")"
   [ "$(printf '%s' "$pr" | jq -r .state)" = open ] || die "cel solo land: #$num is not open"
   [ "$(printf '%s' "$pr" | jq -r .draft)" = false ] || die "cel solo land: #$num is still a draft"
   [ -n "$head" ] || die "cel solo land: #$num reports no head commit - cannot pin the merge to a reviewed head. Nothing merged."
@@ -648,6 +742,9 @@ Nothing merged."
     trailers+="Reviewed-by: $name (approved, $w)"$'\n'
     [[ " ${who[*]} " == *" $name "* ]] || who+=("$name")
   done < <(printf '%s' "$extra" | jq -r "$_SOLO_JQ_WHAT"'.required[] | [.alias, extra_what] | @tsv')
+  # A PR the workspace's account did not open says whose it was, and why that
+  # was allowed (the login matched ws_repo_pr_authors' login shape already).
+  [ "$author_kind" != listed ] || trailers+="PR-author: $author (allowed by repos[].pr_authors)"$'\n'
   trailers+="Landed-by: $lander (cel solo land${by_hand:+, by hand})"$'\n'"$gate_body"
   local body="${review_note:+$review_note$'\n\n'}$trailers"
   local bad; bad="$(land_body_hygiene "$body")" || die "cel solo land: could not run the hygiene check on the commit body - nothing was merged"

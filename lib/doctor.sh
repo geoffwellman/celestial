@@ -330,6 +330,24 @@ doctor_repo_lane_lines() { # <wsdir> <workspace name> -> warning lines, or nothi
   done
 }
 
+# EXTRA PR AUTHORS (repos[].pr_authors, lib/workspace.sh ws_repo_pr_authors)
+# widen whose PRs `cel solo land` merges, so a malformed one is an error: a
+# value that is not a list, or an entry that is not a login-shaped string
+# (_WS_LOGIN_RE), names nobody and is ignored - and the owner meant someone.
+# One line per repo with a problem.
+doctor_repo_pr_authors_lines() { # <wsdir> <workspace name> -> error lines, or nothing
+  local wsdir="$1" n="$2" r bad
+  for r in $(ws_repo_names "$wsdir"); do
+    bad="$(_yqr -r --arg n "$r" --arg re "$_WS_LOGIN_RE" '.repos // [] | map(select(.name == $n))[0]
+      | if has("pr_authors") | not then empty
+        elif (.pr_authors | type) != "array" then "is not a list (\(.pr_authors | tojson))"
+        else [.pr_authors[] | select((type != "string") or (test($re) | not)) | tojson] as $b
+          | if $b == [] then empty else "has entries that are not forge logins: \($b | join(", "))" end end' \
+      "$wsdir/workspace.yaml" 2>/dev/null)" || bad=""
+    [ -z "$bad" ] || printf '%s/%s: repos[].pr_authors %s - ignored; list login-shaped strings, e.g. pr_authors: [example-bot]\n' "$n" "$r" "$bad"
+  done
+}
+
 # workspace.local.yaml is allowed to override role_profiles, add
 # worker_profiles, override env: keys, name me: and set a product's
 # orchestrator: manual (see lib/yaml.sh:_ws_effective_json; the allowed keys
@@ -613,6 +631,9 @@ check_workspaces() {
     while IFS= read -r setupline; do
       [ -z "$setupline" ] || c_warn "$setupline"
     done < <(doctor_repo_lane_lines "$path" "$n")
+    while IFS= read -r setupline; do
+      [ -z "$setupline" ] || { c_err "$setupline"; fail=1; }
+    done < <(doctor_repo_pr_authors_lines "$path" "$n")
 
     doctor_ws_local_summary "$path" "$n"
     doctor_ws_local_lines "$path" "$n" || fail=1

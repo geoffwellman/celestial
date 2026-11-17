@@ -32,7 +32,10 @@ body_to() { while [ \$# -gt 1 ]; do [ "\$1" != --body ] || { printf '%s\n' "\$2"
 case "\$1 \$2" in
   "api user") echo fleetbot;;
   "pr view")  view;;
-  "pr list")  echo "[\$(view)]";;
+  "pr list")  if [ -z "\${STUB_LIST_DIR:-}" ]; then echo "[\$(view)]"; exit 0; fi
+              a=""; p=""; for x in "\$@"; do [ "\$p" != --author ] || a="\$x"; p="\$x"; done
+              [ -f "\$STUB_LIST_DIR/\$a.json" ] || { echo "GraphQL: Could not resolve to a User with the login of '\$a'." >&2; exit 1; }
+              cat "\$STUB_LIST_DIR/\$a.json";;
   "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || { echo "\${STUB_MERGE_ERR:-GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)}" >&2; exit 1; }
               BODY_FILE="$T/merge-body" body_to "\$@"; exit 0;;
   "pr comment") [ -z "\${STUB_COMMENT_FAIL:-}" ] || { echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; }
@@ -1066,5 +1069,172 @@ test_solo_land_advisory_qa_changes_blocks_and_blocked_does_not() {
   _qa_as blocked "$H" --note "no browser on this box" >/dev/null || { rm -rf "$T"; return 1; }
   out="$(_land widget#7 2>&1)" || { echo "an advisory blocked held the land: $out"; rm -rf "$T"; return 1; }
   _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# EXTRA PR AUTHORS (repos[].pr_authors). A PR a listed bot opened is the
+# product's own: its reviewer records a verdict, and land merges it on every
+# check it always makes (approval of the exact head, green checks, the merge
+# pinned to the head), saying whose PR it was in the squash body.
+_solo_pr_authors() { # <json list> [file]
+  local f="${2:-$T/workspace.yaml}"
+  yq -y --argjson a "$1" '(.repos[] | select(.name == "widget")).pr_authors = $a' "$f" > "$T/w" && mv "$T/w" "$f"
+}
+test_solo_reviews_and_lands_a_pr_by_a_listed_author() {
+  _solo_setup example-bot
+  _solo_pr_authors '["example-bot"]'
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null || { echo "refused a listed author's PR"; rm -rf "$T"; return 1; }
+  ( export CEL_ROLE=solo CEL_INBOX_ME=widget-orch; _land widget#7 ) >/dev/null 2>&1 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7 --repo someone/widget --squash --delete-branch --match-head-commit $H" "$GH_LOG" \
+    || { echo "merge not pinned to the reviewed head"; cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(_solo_squash_trailers "$(cat "$T/merge-body")")" "Reviewed-by: widget-pr-7-review (approved)
+PR-author: example-bot (allowed by repos[].pr_authors)
+Landed-by: widget-orch (cel solo land)
+Gate: CI (suite) on $H" || { cat "$T/merge-body"; rm -rf "$T"; return 1; }
+  _solo_history_scan_accepts "$(cat "$T/merge-body")" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# Listing an author changes whose PR it is, nothing else: unapproved or red
+# stays refused.
+test_solo_land_of_a_listed_authors_pr_keeps_every_other_check() {
+  _solo_setup example-bot
+  _solo_pr_authors '["example-bot"]'
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged a listed author's unreviewed PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not approved" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _solo_setup example-bot APPROVED FAILURE
+  _solo_pr_authors '["example-bot"]'
+  ! _land widget#7 >/dev/null 2>&1 && ! _merged || { echo "merged a listed author's red PR"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# An author nobody listed is refused as before, and the refusal names the
+# key that would allow it.
+test_solo_refuses_an_unlisted_author_naming_the_key() {
+  _solo_setup example-bot APPROVED
+  _solo_pr_authors '["other-bot"]'
+  local out
+  out="$(_review widget#7 approved --head "$H" --by widget-pr-7-review 2>&1)" && { echo "recorded a verdict on an unlisted author's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not this workspace's account ('fleetbot')" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "repos: [{name: widget, pr_authors: [example-bot]}]" || { rm -rf "$T"; return 1; }
+  [ -z "$(solo_review_get "$T" widget 7)" ] || { echo "a verdict was recorded"; rm -rf "$T"; return 1; }
+  out="$(_land widget#7 2>&1)" && { echo "landed an unlisted author's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "someone else's PR is theirs to land" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "repos: [{name: widget, pr_authors: [example-bot]}]" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The list is the team's contract: workspace.local.yaml cannot add to it
+# (and doctor says the local key is ignored); an entry that is not a login
+# names nobody (and doctor says so, as an error).
+test_solo_pr_authors_come_from_workspace_yaml_only() {
+  _solo_setup example-bot APPROVED
+  printf 'repos:\n  - name: widget\n    pr_authors: [example-bot]\n' > "$T/workspace.local.yaml"
+  local out
+  out="$(_land widget#7 2>&1)" && { echo "a local overlay let a PR land"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "pr_authors: [example-bot]" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null 2>&1 && { echo "a local overlay let a verdict be recorded"; rm -rf "$T"; return 1; }
+  assert_eq "$(ws_repo_pr_authors "$T" widget)" "" || { rm -rf "$T"; return 1; }
+  source "$CEL_ROOT/lib/doctor.sh"
+  out="$(doctor_ws_local_lines "$T" demo 2>&1)" && { echo "doctor took a local pr_authors"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "repos 'widget' declares 'pr_authors'" || { echo "$out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_solo_pr_author_ok_and_doctor_read_only_login_shaped_entries() {
+  _solo_setup
+  source "$CEL_ROOT/lib/doctor.sh"
+  assert_eq "$(doctor_repo_pr_authors_lines "$T" demo)" "" || { rm -rf "$T"; return 1; }
+  _solo_pr_authors '["example-bot", "app/example-app", "example[bot]", "not a login", 7]'
+  assert_eq "$(ws_repo_pr_authors "$T" widget | paste -sd, -)" "example-bot,app/example-app" || { rm -rf "$T"; return 1; }
+  # exact, never normalised: an App and a person of the same name differ
+  assert_eq "$(solo_pr_author_ok "$T" widget app/example-app fleetbot)" listed || { rm -rf "$T"; return 1; }
+  assert_fails solo_pr_author_ok "$T" widget example-app fleetbot || { rm -rf "$T"; return 1; }
+  assert_fails solo_pr_author_ok "$T" widget "example[bot]" fleetbot || { rm -rf "$T"; return 1; }
+  assert_eq "$(solo_pr_author_ok "$T" widget fleetbot fleetbot)" own || { rm -rf "$T"; return 1; }
+  assert_eq "$(solo_pr_author_ok "$T" widget example-bot fleetbot)" listed || { rm -rf "$T"; return 1; }
+  assert_fails solo_pr_author_ok "$T" widget "not a login" fleetbot || { rm -rf "$T"; return 1; }
+  assert_fails solo_pr_author_ok "$T" gadget example-bot fleetbot || { rm -rf "$T"; return 1; }
+  assert_fails solo_pr_author_ok "$T" widget "" "" || { rm -rf "$T"; return 1; }
+  local out; out="$(doctor_repo_pr_authors_lines "$T" demo)"
+  assert_contains "$out" "demo/widget: repos[].pr_authors has entries that are not forge logins: \"example[bot]\", \"not a login\", 7" || { echo "$out"; rm -rf "$T"; return 1; }
+  _solo_pr_authors '"example-bot"'
+  assert_eq "$(ws_repo_pr_authors "$T" widget)" "" || { rm -rf "$T"; return 1; }
+  assert_contains "$(doctor_repo_pr_authors_lines "$T" demo)" "repos[].pr_authors is not a list" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The steward's nudges and its ready-to-land list ask the forge for the
+# account's PRs and each listed author's, one PR once.
+test_solo_owned_prs_lists_the_account_and_each_listed_author() {
+  _solo_setup example-bot
+  _solo_pr_authors '["example-bot"]'
+  local out; out="$(solo_owned_prs "$T" widget)" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '[.[].number] | join(",")' <<<"$out")" 7 || { echo "$out"; rm -rf "$T"; return 1; }
+  grep -q -- "^pr list .*--author @me" "$GH_LOG" && grep -q -- "^pr list .*--author example-bot" "$GH_LOG" \
+    || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(solo_pr_list_authors "$T" widget | paste -sd, -)" "@me,example-bot" || { rm -rf "$T"; return 1; }
+  assert_eq "$(solo_pr_list_authors "$T" gadget)" "@me" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# Per-author lists, as the stub serves them from $STUB_LIST_DIR/<author>.json
+# (an author with no file: the forge refuses that list). gh-shaped PRs.
+_solo_list() { # <author> <number>...
+  mkdir -p "$T/lists"; export STUB_LIST_DIR="$T/lists"
+  local a="$1" n; shift
+  for n in "$@"; do jq -nc --argjson n "$n" '{number: $n, state: "OPEN", headRefOid: "'"$H"'", isDraft: false, mergeable: "MERGEABLE", labels: []}'; done \
+    | jq -sc . > "$T/lists/$a.json"
+}
+# A login is data, never a glob: an author with pattern characters reaches
+# the forge as written, whatever files sit in the current directory.
+test_solo_owned_prs_never_glob_expands_an_author() {
+  _solo_setup
+  mkdir -p "$T/cwd" && touch "$T/cwd/exampleb" "$T/cwd/exampleo" "$T/cwd/a1"
+  _solo_list @me 3; _solo_list 'example[bot]' 5; _solo_list '?1' 6
+  local out
+  out="$(cd "$T/cwd" && solo_pr_list_authors() { printf '%s\n' @me 'example[bot]' '?1'; }; solo_owned_prs "$T" widget)" || { cat "$GH_LOG"; unset STUB_LIST_DIR; rm -rf "$T"; return 1; }
+  unset STUB_LIST_DIR
+  assert_eq "$(jq -r '[.[].number] | join(",")' <<<"$out")" "6,5,3" || { echo "$out"; rm -rf "$T"; return 1; }
+  grep -qF -- "--author example[bot]" "$GH_LOG" && grep -qF -- "--author ?1" "$GH_LOG" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  ! grep -qE -- "--author (exampleb|exampleo|a1)( |$)" "$GH_LOG" || { echo "an author was glob-expanded"; cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  # and a [bot] spelling in workspace.yaml is not a login gh reports: never listed
+  _solo_pr_authors '["example[bot]"]'
+  assert_eq "$(cd "$T/cwd" && solo_pr_list_authors "$T" widget | paste -sd, -)" "@me" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# Merged by number, newest (highest) first; an author whose list fails is
+# skipped with a warning, the others still listed; no list at all is no answer.
+test_solo_owned_prs_newest_first_and_a_failing_author_skips_only_itself() {
+  _solo_setup
+  _solo_pr_authors '["example-bot", "gone-bot"]'
+  _solo_list @me 3 9; _solo_list example-bot 5 9
+  local out err="$T/err"
+  out="$(solo_owned_prs "$T" widget 2>"$err")" || { cat "$err"; unset STUB_LIST_DIR; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '[.[].number] | join(",")' <<<"$out")" "9,5,3" || { echo "$out"; unset STUB_LIST_DIR; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$err")" "could not list widget's open PRs by gone-bot" || { cat "$err"; unset STUB_LIST_DIR; rm -rf "$T"; return 1; }
+  rm -f "$T/lists/"*.json
+  out="$(solo_owned_prs "$T" widget 2>/dev/null)" && { echo "answered with no list read: $out"; unset STUB_LIST_DIR; rm -rf "$T"; return 1; }
+  unset STUB_LIST_DIR; rm -rf "$T"
+}
+# ONE LISTING PER REPO PER TICK: loaded once in the tick's shell, the
+# ready-to-land list and the changes sweep (subshells) read it, and the
+# review sweep's gh fields come from the same call.
+test_solo_owned_prs_one_listing_per_repo_per_tick() {
+  _solo_setup fleetbot APPROVED
+  _solo_pr_authors '["example-bot"]'
+  local n
+  (
+    export _SOLO_OWNED_REUSE=1
+    solo_owned_prs_reset
+    solo_owned_prs_load "$T" widget || exit 1
+    solo_ready_prs "$T" bundle >/dev/null
+    solo_owned_prs "$T" widget >/dev/null
+    jq -e '.[0] | has("reviewDecision") and has("statusCheckRollup")' <<<"$(solo_owned_prs_github "$T" widget)" >/dev/null || exit 1
+  ) || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  n="$(grep -c '^pr list --repo someone/widget' "$GH_LOG")"
+  assert_eq "$n" 2 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  grep -q -- "--json .*reviewDecision.*statusCheckRollup" "$GH_LOG" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  # without the tick's flag, every read lists afresh
+  : > "$GH_LOG"
+  solo_owned_prs "$T" widget >/dev/null; solo_owned_prs "$T" widget >/dev/null
+  assert_eq "$(grep -c '^pr list --repo someone/widget' "$GH_LOG")" 4 || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }

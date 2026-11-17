@@ -1,0 +1,5 @@
+### Added
+- `repos[].pr_authors: [<forge login>, ...]` in `workspace.yaml` lists extra PR authors (a bot that opens the product's PRs) a solo product treats as its own: `cel solo review` records verdicts on their PRs, the steward nudges about them, and `cel solo land` lands them with every existing check unchanged, adding `PR-author: <login> (allowed by repos[].pr_authors)` to the squash body. Logins match exactly as the forge reports the author: a GitHub App as `app/<name>`, an account (GitHub or Forgejo) as its plain login. Read from `workspace.yaml` only, never `workspace.local.yaml`; `cel doctor` fails an entry that is not a login-shaped string. An unlisted author is still refused, and the refusal now names the line to add.
+
+### Changed
+- The steward lists a repo's open PRs once per tick (the account's and each listed author's) and its review sweep, ready-to-land list and changes nudges share that listing; an author whose list cannot be read is skipped with a warning instead of silencing the whole repo.
