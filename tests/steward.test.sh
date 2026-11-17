@@ -2820,8 +2820,11 @@ test_steward_says_an_unread_spent_week_is_spent_as_of_its_last_reading() {
   _steward_usage_pace >/dev/null 2>&1
   msg="$(jq -r 'select(.fp == "usage-pace") | .message' "$f")"
   assert_contains "$msg" "ana@alpha.test (claude 7d: 100% spent (last known, not read since $old))"
-  assert_contains "$msg" "(last known 7d 100% spent (last known, not read since $old))"
-  if printf '%s' "$msg" | grep -q 'at reset\|not forecast'; then echo "forecast or hedged a spent week: $msg"; return 1; fi
+  # said ONCE for the account - the not-read line names the week as spent and
+  # leaves the when to the line above
+  assert_contains "$msg" "ana@alpha.test (claude) not read since $old: needs login: cel gateway login claude (last known 7d 100% spent)"
+  assert_eq "$(printf '%s' "$msg" | grep -o '100% spent (last known' | wc -l)" 1
+  if printf '%s' "$msg" | grep -q 'at reset\|not forecast\|null'; then echo "forecast, hedged or null in a spent week: $msg"; return 1; fi
   rm -rf "$T"
 }
 

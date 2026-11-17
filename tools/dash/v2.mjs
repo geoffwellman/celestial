@@ -999,7 +999,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         const known = w.stale === true ? { last_known: true, read_at: isoOf(epochMs(w.read_at)), ...(unread ? { unread: true } : {}) } : {};
         return { ...base, ...known, used_pct: used, resets: isoOf(resets),
           projected_pct: projected, level: level(Math.max(used, projected >= 100 ? 75 : 0)),
-          at_risk: unread ? used >= 100 : (projected >= 100 || used >= 95) };
+          // unread: spent on the RAW reading (99.6% is not spent), as quota_at_risk
+          at_risk: unread ? (Number(w.used_pct) || 0) >= 100 : (projected >= 100 || used >= 95) };
       }).sort((a, b) => (a.len - b.len) || String(a.scope || '').localeCompare(String(b.scope || '')));
       for (const w of windows) {
         if (w.at_risk) atRisk.push({ who, provider: s.provider, window: w.label, used_pct: w.used_pct, projected_pct: w.projected_pct, resets: w.resets });

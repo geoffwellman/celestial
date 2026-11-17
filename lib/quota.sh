@@ -700,7 +700,8 @@ _cpa_gateway_states() {
   cache="$(_sub_cache_dir)/gateway-states.json"
   if [ -f "$cache" ] && [ ! -L "$cache" ]; then
     age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
-    if [ "$age" -lt "$_SUB_TTL" ] \
+    # a file from the future (a clock step, a touch) is not fresh forever
+    if [ "$age" -ge 0 ] && [ "$age" -lt "$_SUB_TTL" ] \
        && out="$(jq -ce --arg u "$url" 'select(.url == $u and (.states | type) == "object") | .states' "$cache" 2>/dev/null)"; then
       printf '%s' "$out"; return 0
     fi
@@ -714,7 +715,7 @@ _cpa_gateway_states() {
   key="$(tr -d '\r\n' < "$kf" 2>/dev/null || true)"
   [ -n "$key" ] || { printf '{}'; return 0; }
   out="$(printf 'Authorization: Bearer %s\n' "$key" \
-    | curl -sf -m 5 "$url/v0/management/auth-files" -H @- 2>/dev/null \
+    | curl_direct -sf -m 5 "$url/v0/management/auth-files" -H @- 2>/dev/null \
     | jq -c '[(.files // [])[]? | select(type == "object" and (.name | type) == "string")
               | {key: .name,
                  value: {status: ((.status // "") | tostring),
@@ -1399,7 +1400,7 @@ quota_at_risk() {
            used_pct: ($u | round), projected_pct: $p, resets: .resets_at, reset_epoch: ($r | if . == null then null else floor end),
            last_known: (.stale == true), read_at: (if .stale == true then .read_at else null end)}
           + (if .unread == true
-             then {unread: true, say: "\($u | round)% spent (last known, not read since \(.read_at))"}
+             then {unread: true, say: "\($u | round)% spent (last known, not read since \(.read_at // "unknown time"))"}
              else {} end) ]' 2>/dev/null || printf '[]'
 }
 
@@ -1408,7 +1409,9 @@ quota_at_risk() {
 # CEL_SUB_UNREAD_AFTER_H: {provider, who, read_at (the oldest such reading),
 # state, why (the row's reason, ending in what to do), last (its last known
 # windows, for context only)}. A pace alert built from a number that old is a
-# forecast from a floor, so the steward says this instead.
+# forecast from a floor, so the steward says this instead. A spent window is
+# `7d 100% spent` here and nothing more: quota_at_risk already says it with
+# when it was read, and one account is not told twice.
 quota_unread() {
   jq -c "$_SUB_RESET_JQ"'
     [ .[]? | select(type == "object") | sub_row_now | . as $s
@@ -1423,7 +1426,7 @@ quota_unread() {
                elif $st == "unreadable" then "unreadable: " + $r + " - see cel quota"
                else $r + " - see cel quota" end),
          last: ($u | map(.name + (if .scope then " " + .scope else "" end) + " " + ((.used_pct // 0) | round | tostring) + "%"
-                         + (if (.used_pct // 0) >= 100 then " spent (last known, not read since \(.read_at))" else " not forecast" end)))} ]' \
+                         + (if (.used_pct // 0) >= 100 then " spent" else " not forecast" end)))} ]' \
     2>/dev/null || printf '[]'
 }
 

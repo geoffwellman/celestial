@@ -786,6 +786,17 @@ test_v2_usage_keeps_an_unread_spent_window_at_risk() {
   _v2_down
 }
 
+# Spent on the RAW reading, as quota_at_risk: 99.6% draws as 100 but is not
+# spent, so unread it is not at risk.
+test_v2_usage_unread_spent_is_judged_on_the_raw_percentage() {
+  _v2_boot; _v2_quota_fixture; _v2_unread_fixture 99.6
+  local u; u="$(_v2_get "$(_v2_url usage)")"
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .windows[0] | [.unread, .used_pct, .at_risk]')" \
+    "[true,100,false]"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.summary.at_risk[].who] | join(",")')" "ana@alpha.test"
+  _v2_down
+}
+
 test_v2_usage_merges_a_shared_balance_and_counts_below_floor() {
   _v2_boot; _v2_quota_fixture
   local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"

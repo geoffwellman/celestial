@@ -93,6 +93,7 @@ case "\$url" in
     printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-5-5","context_length":1000000,"max_output_tokens":128000},{"id":"claude-opus-4-8","context_length":1000000,"max_output_tokens":128000},{"id":"claude-custom-unknown","context_length":200000,"max_output_tokens":64000}]}'; fi ;;
   */v0/management/auth-files/fields)
     prev=""; for a in "\$@"; do [ "\$prev" = -d ] && printf '%s\n' "\$a" >> "$T/curl.body"; prev="\$a"; done
+    printf '%s\n' "\${http_proxy:-}\${HTTP_PROXY:-}\${https_proxy:-}\${HTTPS_PROXY:-}\${all_proxy:-}\${ALL_PROXY:-}" >> "$T/curl.proxyenv"
     cat >/dev/null
     printf '{"status":"ok"}' ;;
   *) exit 7 ;;
@@ -788,7 +789,13 @@ test_gateway_omp_scope_apply_patches_only_pool_accounts_through_management() {
   cmd_gateway install --no-start >/dev/null
   _gw_omp_vault "$(gateway_auth_dir)"
   cel_config_set gateway omp_exclude "me@personal.invalid"
-  gateway_omp_scope_apply >/dev/null || { echo "apply failed"; _gw_teardown; return 1; }
+  # the management key never goes to a proxy: the variables are dropped and
+  # curl is told --noproxy '*'
+  http_proxy=http://proxy.example.invalid:3128 HTTPS_PROXY=http://proxy.example.invalid:3128 \
+    ALL_PROXY=http://proxy.example.invalid:3128 gateway_omp_scope_apply >/dev/null \
+    || { echo "apply failed"; _gw_teardown; return 1; }
+  assert_contains "$(grep 'auth-files/fields' "$T/curl.argv")" "--noproxy *"
+  assert_eq "$(sort -u "$T/curl.proxyenv")" ""
   local argv; argv="$(cat "$T/curl.argv")"
   assert_contains "$argv" "/v0/management/auth-files/fields"
   assert_eq "$(grep -c 'auth-files/fields' "$T/curl.argv")" 1

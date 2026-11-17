@@ -1589,7 +1589,7 @@ _steward_usage_pace() {
     map("\(.who) (\(.provider) \(.window)\(if .scope then " " + .scope else "" end): " + (.say // "\(.used_pct)% \(if .last_known then "at the last known reading (read \(.read_at // "?"))" else "now" end), ~\(.projected_pct)% at reset\(if .resets then " " + .resets else "" end)") + ")")
     | join("; ")' 2>/dev/null || true)"
   unread="$(printf '%s' "$subs" | quota_unread | jq -r '
-    map("\(.who) (\(.provider)) not read since \(.read_at): \(.why) (last known \(.last | join(", ")))")
+    map("\(.who) (\(.provider)) not read since \(.read_at // "unknown time"): \(.why) (last known \(.last | join(", ")))")
     | join("; ")' 2>/dev/null || true)"
   if [ -n "$risk" ] || [ -n "$unread" ]; then
     [ -z "$risk" ] || c_warn "usage on pace for a cap: $risk"

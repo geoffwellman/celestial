@@ -1065,8 +1065,11 @@ test_an_unread_spent_window_stays_at_risk_and_says_when_it_was_read() {
   assert_eq "$(printf '%s' "$a" | jq -c '[.[] | [.window, .scope, .used_pct, .projected_pct, .unread]]')" '[["7d",null,100,100,true]]'
   assert_eq "$(printf '%s' "$a" | jq -r '.[0].say')" "100% spent (last known, not read since $old)"
   u="$(printf '%s' "$subs" | quota_unread)"
-  assert_eq "$(printf '%s' "$u" | jq -c '.[0].last')" \
-    "[\"7d 100% spent (last known, not read since $old)\",\"7d Fable 37% not forecast\"]"
+  assert_eq "$(printf '%s' "$u" | jq -c '.[0].last')" '["7d 100% spent","7d Fable 37% not forecast"]'
+  # a read time nobody kept is said as unknown, never `null`
+  subs="$(jq -nc --arg r "$r" '[{provider: "claude", label: "ana", extra: {state: "stale"},
+    windows: [{name: "7d", used_pct: 100, resets_at: $r, stale: true, unread: true, read_at: null}]}]')"
+  assert_eq "$(printf '%s' "$subs" | quota_at_risk | jq -r '.[0].say')" '100% spent (last known, not read since unknown time)'
 }
 
 # THE GATEWAY IS ASKED ONCE A MINUTE, not once a list: a gateway that is down
@@ -1089,6 +1092,32 @@ test_the_gateway_states_read_is_cached_for_the_ttl() {
   subscription_list >/dev/null; subscription_list >/dev/null
   assert_eq "$(grep -c '^GET /v0/management/auth-files' "$T/hits")" 2
   assert_eq "$(subscription_list | jq -r '.[] | select(.account == "ant-one") | .extra.state')" stale
+  assert_eq "$(grep -c '^GET /v0/management/auth-files' "$T/hits")" 2
+  # a cache from the future (a clock step) is stale, never fresh forever
+  touch -d "@$(( $(date +%s) + 3600 ))" "$CEL_CACHE/gateway-states.json"
+  subscription_list >/dev/null
+  assert_eq "$(grep -c '^GET /v0/management/auth-files' "$T/hits")" 3
+  unset CEL_CPA_GATEWAY_URL CEL_GATEWAY_STATE
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# NOR THROUGH A PROXY. curl honours http_proxy even for 127.0.0.1, and the
+# proxy would be handed the management key. Here the "proxy" is the stub
+# itself: a request sent through it arrives in absolute form
+# (`GET http://...`) and is refused, so the account would read `stale`.
+test_the_management_key_never_goes_through_a_proxy() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  _cpa_gateway_fixture
+  . "$CEL_ROOT/lib/quota.sh"
+  local proxy; proxy="http://127.0.0.1:$(cat "$T/port")"
+  assert_eq "$(http_proxy="$proxy" HTTP_PROXY="$proxy" https_proxy="$proxy" HTTPS_PROXY="$proxy" \
+    ALL_PROXY="$proxy" all_proxy="$proxy" NO_PROXY= no_proxy= \
+    subscription_list | jq -r '.[] | select(.account == "ant-one") | .extra.state')" needs_login
+  if grep -q '^[A-Z]* http' "$T/hits"; then printf 'a request went through the proxy:\n%s\n' "$(cat "$T/hits")" >&2; return 1; fi
+  assert_eq "$(grep -c '^GET /v0/management/auth-files' "$T/hits")" 1
   unset CEL_CPA_GATEWAY_URL CEL_GATEWAY_STATE
   _quota_stub_stop
   _quota_teardown
