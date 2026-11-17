@@ -865,6 +865,35 @@ test_v2_cold_start_with_nothing_saved_answers_the_fast_feeds_and_marks_slow_load
   _v2_down
 }
 
+# "Since you last looked" is per browser - its own seen-cookie - so it is
+# never saved for a restart, nor replayed from a file that has one: a stale
+# answer says it is loading, and once live each browser gets its own. And a
+# saved snapshot is served only for a workspace the registry still names.
+test_v2_saved_snapshot_never_replays_since_or_a_removed_workspace() {
+  _v2_boot
+  local at d="$T/state/dash-saved" A='cel_v2_seen=aaaaaaaaaaaaaaaaaaaaaaaa' B='cel_v2_seen=bbbbbbbbbbbbbbbbbbbbbbbb'; at="$(_v2_ago 7200)"
+  mkdir -p "$d"
+  for f in all bundle gone; do
+    jq -n --arg at "$at" '{at: $at, v: {at: $at, feeds: {merges: {v: {marker: "saved"}, at: $at}, since: {v: {at: $at, marker: "browser-a"}, at: $at}}}}' > "$d/snapshot.$f.json"
+  done
+  local s; s="$(_v2_get -H "cookie: $B" "$(_v2_url 'snapshot?ws=all')")" || { _v2_down; return 1; }
+  assert_eq "$(printf '%s' "$s" | jq -c '[.stale, .feeds.merges.v.marker, (.feeds | has("since")), .loading]')" '[true,"saved",false,["since"]]' || { _v2_down; return 1; }
+  # a registered workspace's file is served; a removed one's is not - its
+  # filter is unknown, as it always was
+  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=bundle')" | jq -c '[.stale, .feeds.merges.v.marker]')" '[true,"saved"]' || { _v2_down; return 1; }
+  assert_eq "$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$(_v2_url 'snapshot?ws=gone')")" "400" || { _v2_down; return 1; }
+  # browser A has looked; browser B never has: live, each gets its own
+  assert_eq "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST -H "cookie: $A" -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" "$(_v2_url seen)")" "200" || { _v2_down; return 1; }
+  _v2_snap_built all >/dev/null || { _v2_down; return 1; }
+  assert_eq "$(jq '.v.feeds | has("since")' "$d/snapshot.all.json")" "false" || { _v2_down; return 1; }
+  local sa sb
+  sa="$(_v2_get -H "cookie: $A" "$(_v2_url 'snapshot?ws=all')" | jq -r .feeds.since.v.at)"
+  sb="$(_v2_get -H "cookie: $B" "$(_v2_url 'snapshot?ws=all')" | jq -r .feeds.since.v.at)"
+  assert_eq "$(jq -r --arg a "$sa" '.aaaaaaaaaaaaaaaaaaaaaaaa == $a' "$T/state/dash-seen.json")" "true" || { _v2_down; return 1; }
+  [ "$sa" != "$sb" ] || { echo "both browsers got since=$sa"; _v2_down; return 1; }
+  _v2_down
+}
+
 # A build made while an upstream failed is served (degraded, as always) but
 # never saved: the last good answer on disk stands for the next restart.
 test_v2_failed_build_keeps_the_last_good_saved_snapshot() {

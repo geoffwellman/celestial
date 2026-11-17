@@ -1278,9 +1278,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
   // A whole snapshot is saved for the next restart (saved.mjs: at most once
   // a minute unless `force`, and never over one built with fewer upstream
-  // reads failing)
+  // reads failing) - all but `since`: that card is "since THIS browser last
+  // looked", read from the asker's own cookie, so one browser's answer is
+  // never kept to be shown to another; a stale answer says it is loading.
   const keep = (filter, r, force = false) => {
-    if (!r.missing.length) saved.write('snapshot', filter, r.snap, Date.parse(r.snap.at), { force, failed: [...failing].sort() });
+    if (r.missing.length) return;
+    const { since, ...feeds } = r.snap.feeds;
+    saved.write('snapshot', filter, { ...r.snap, feeds }, Date.parse(r.snap.at), { force, failed: [...failing].sort() });
   };
   // A COLD START - this filter not yet answered whole since the server
   // started - never waits on the slow feeds (gh PR lists, merged counts, `cel
@@ -1291,13 +1295,25 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // services - and the rest named in `loading`. The page's own feed polls
   // pick up the build as each feed lands. Once a filter has been answered
   // whole, the file is never served again: what an act changed is read live.
+  // (`stale` here; /api/state, whose `stale` already lists stale worktrees,
+  // marks its saved answer `saved: true` - both carry `as_of`.)
   const FAST_FEEDS = ['load', 'teams', 'services'];
   const FAST_WAIT = () => Number(process.env.CEL_DASH_SNAPSHOT_FAST_MS) || 1000;
   const whole = new Set();
   const builds = new Map();
-  // filter -> the cookie of the browser that last asked (its `since`) and
-  // when a page last polled it: what a warm save rebuilds, while a page is open
+  // filter -> when a page last asked for it: what a warm save rebuilds, while
+  // a page is open
   const snapAsk = new Map();
+  // The workspaces the registry names, read once at start: a saved snapshot
+  // is served only for `all` or a workspace still registered, never for one
+  // removed since it was saved. Unreadable: none is served.
+  const registered = run('yq', ['-r', '.workspaces // {} | keys | .[]', REGISTRY()], 8000)
+    .then((out) => (out === null ? null : new Set(out.split('\n').filter(Boolean))), () => null);
+  const stillRegistered = async (filter) => {
+    if (filter === 'all') return true;
+    const names = await registered;
+    return !!names && names.has(filter);
+  };
   const build = (req, url, filter) => {
     if (builds.has(filter)) return builds.get(filter);
     const p = (async () => {
@@ -1315,7 +1331,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // the snapshot, or null for a filter that names no workspace
   const snapshot = async (req, url) => {
     const filter = filterOf(url);
-    snapAsk.set(filter, { cookie: String(req.headers.cookie || ''), at: Date.now() });
+    snapAsk.set(filter, Date.now());
     let wss = scopeNow(url);
     if (wss === null) return null;
     if (whole.has(filter)) {
@@ -1334,8 +1350,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         return r.snap;
       }
     }
-    const s = saved.read('snapshot', filter);
-    if (s) { build(req, url, filter); return { ...s.v, stale: true, as_of: s.at }; }
+    const s = (await stillRegistered(filter)) ? saved.read('snapshot', filter) : null;
+    if (s) {
+      build(req, url, filter);
+      const { since, ...feeds } = s.v.feeds || {};
+      return { ...s.v, feeds, stale: true, as_of: s.at, loading: ['since'] };
+    }
     if (!wss) wss = await scope(url);
     if (!wss) return null;
     // nothing saved: the roster (who is running, without the PR list) and
@@ -1359,13 +1379,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // now, written at most once a minute per filter, and only while a page is
   // polling it - so a restart's stale paint is at most that old.
   const saveWarm = async () => {
-    for (const [filter, ask] of snapAsk) {
-      if (Date.now() - ask.at > (Number(process.env.CEL_DASH_FEED_KEEP_WARM_MS) || 60000)) { snapAsk.delete(filter); continue; }
+    for (const [filter, at] of snapAsk) {
+      if (Date.now() - at > (Number(process.env.CEL_DASH_FEED_KEEP_WARM_MS) || 60000)) { snapAsk.delete(filter); continue; }
       if (!whole.has(filter) || !saved.due('snapshot', filter)) continue;
       const url = new URL(`http://localhost/?ws=${encodeURIComponent(filter)}`);
       const wss = scopeNow(url);
       if (!wss) continue;
-      keep(filter, await assemble({ headers: { cookie: ask.cookie } }, url, wss, true));
+      keep(filter, await assemble({ headers: {} }, url, wss, true));
     }
   };
 
@@ -1416,8 +1436,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const wss = await scope(url);
     if (!wss) { res.writeHead(400).end('unknown workspace'); return true; }
     if (!FEED_NAMES.has(name)) { res.writeHead(404).end('not found'); return true; }
-    const ask = snapAsk.get(filterOf(url));
-    if (ask) ask.at = Date.now();
+    if (snapAsk.has(filterOf(url))) snapAsk.set(filterOf(url), Date.now());
     const r = await answer(name, req, url, wss);
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-cel-computed-at': new Date(r.at).toISOString() })
       .end(JSON.stringify(r.v));

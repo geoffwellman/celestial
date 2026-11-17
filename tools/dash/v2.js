@@ -36,16 +36,27 @@ function wsOf(x){return x&&(x.ws||x.workspace)||(S&&S.workspace)||''}
 // A test drives a refresh with window.v2refresh()
 var REFRESH_MS=8000;
 window.V2REFRESHES=0;
-async function getJSON(u){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var e=new Error(u+' '+r.status);e.status=r.status;throw e}return r.json()}
+// EVERY READ HAS A DEADLINE: 3 refreshes (window.V2_FETCH_MS in a test), at
+// most a minute. A request the server never answers - a hung upstream, a
+// dropped connection - is aborted rather than left to hold its refresh round,
+// and with it every round after, open forever.
+function FETCH_MS(){return window.V2_FETCH_MS||Math.min(60000,3*REFRESH_MS)}
+async function fetchBy(u){var c=new AbortController(),t=setTimeout(function(){c.abort()},FETCH_MS());
+  try{var r=await fetch(u,{cache:'no-store',signal:c.signal});if(!r.ok){var e=new Error(u+' '+r.status);e.status=r.status;throw e}
+    return {r:r,body:await r.json()}}finally{clearTimeout(t)}}
+async function getJSON(u){return (await fetchBy(u)).body}
 // A feed that failed is told apart from one not yet loaded: "loading" before
 // the first answer, "unavailable (<status>) - retrying" after a failure, so a
 // broken feed never reads as a slow one. ERR holds the latest failure by feed
-// ('state' for /api/state) and clears on the next success.
+// ('state' for /api/state) and clears on the next success. A read past its
+// deadline is slow, not broken: it changes nothing - the card keeps what it
+// has, or says loading - and the next round asks again (a cold feed is still
+// being read on the server, and lands for whichever ask comes next).
 var ERR={};
-function failed(name){return function(e){ERR[name]=(e&&e.status)||'network'}}
+function failed(name){return function(e){if(e&&e.name==='AbortError')return;ERR[name]=(e&&e.status)||'network'}}
 // the server's x-cel-computed-at, so a card drawn from an old value says so
-async function getFeed(u,name){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var e=new Error(u+' '+r.status);e.status=r.status;throw e}
-  var at=Date.parse(r.headers.get('x-cel-computed-at')||'');FAT[name]=isNaN(at)?Date.now():at;return r.json()}
+async function getFeed(u,name){var x=await fetchBy(u);
+  var at=Date.parse(x.r.headers.get('x-cel-computed-at')||'');FAT[name]=isNaN(at)?Date.now():at;return x.body}
 // FIRST PAINT WITHOUT WAITING: one request for the last value of every card's
 // feed, drawn at once; the live refresh then replaces it feed by feed. A feed
 // the live refresh already answered is never overwritten by the snapshot.
@@ -81,12 +92,15 @@ function getState(again){return getJSON('/api/state').then(function(s){S=s;delet
   if((s.saved||s.loading)&&!again){paintSoon();return getState(true)}})}
 // One refresh at a time per filter: a feed still being read after a restart
 // holds its request open, and a new round every 8 s on top of it would only
-// queue behind it. Until a first refresh has landed - or while the page
-// still shows what was saved before a restart - each answer is drawn as it
-// arrives, so a slow feed never holds back the ones that are ready.
+// queue behind it. Every read in a round has its deadline, so a round always
+// settles; one that somehow has not after two deadlines (the state read asks
+// twice) is given up on and a new round replaces it. Until a first refresh
+// has landed - or while the page still shows what was saved before a restart
+// - each answer is drawn as it arrives, so a slow feed never holds back the
+// ones that are ready.
 var REFRESHING=null;
 function refresh(){
-  if(REFRESHING&&REFRESHING.ws===WSF)return REFRESHING.p;
+  if(REFRESHING&&REFRESHING.ws===WSF&&Date.now()-REFRESHING.at<2*FETCH_MS()+1000)return REFRESHING.p;
   var ws=WSF,q='ws='+encodeURIComponent(ws),early=!window.V2REFRESHES||!!UPD;
   var drew=function(){if(early)paintSoon()};
   var jobs=[getState().catch(failed('state')).then(drew)];
@@ -94,7 +108,7 @@ function refresh(){
     var extra=f==='activity'?'&limit=30':f==='merges'?'&days=14':f==='load'?'&hours=24':f==='lanes'?'&range=today':'';
     jobs.push(getFeed('/api/v2/'+f+'?'+q+extra,f).then(function(d){F[f]=d;delete ERR[f];updDone(f)}).catch(failed(f)).then(drew));
   });
-  var me={ws:ws,p:Promise.all(jobs).then(function(){
+  var me={ws:ws,at:Date.now(),p:Promise.all(jobs).then(function(){
     window.V2REFRESHES++;
     renderAll();
     $('updated').textContent='updated '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});

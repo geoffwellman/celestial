@@ -625,11 +625,14 @@ const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, ag
 // that would hide it, and the ask computes fresh.
 // A COLD START does not wait for the slow reads: the first ask for a
 // workspace since the server started gets the last good answer saved before
-// the restart (saved.mjs) - `saved: true` and `as_of` its time (`stale` is
-// already this answer's list of stale worktrees) - or, none saved, the fast
+// the restart (saved.mjs) - `saved: true` and `as_of` its time; not `stale`,
+// as the v2 snapshot marks its saved answer, because `stale` is already this
+// answer's list of stale worktrees - or, none saved, the fast
 // reads with the slow parts named in `loading`; the full read starts behind
 // it, and the next ask waits for that. Only that first ask: after a POST the
-// answer is read again, never served from the file.
+// answer is read again, never served from the file. Only for a workspace
+// this server carries (WORKSPACES, the registry as it was at launch): a
+// removed one is a 404, its old file never read.
 const coldServed = new Set();
 // the reads an answer is made of that have no value (failed, never read):
 // what saved.mjs weighs a build by
