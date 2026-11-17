@@ -772,11 +772,24 @@ test_v2_usage_merges_a_shared_balance_and_counts_below_floor() {
   _v2_down
 }
 
+# The snapshot once the build behind a cold start has landed: neither stale
+# nor still loading (prints it; fails after ~30 s)
+_v2_snap_built() { # <ws>
+  local s i
+  for i in $(seq 1 60); do
+    s="$(_v2_get "$(_v2_url "snapshot?ws=$1")")" || return 1
+    if printf '%s' "$s" | jq -e '(.stale // false) == false and (.loading // []) == []' >/dev/null; then printf '%s' "$s"; return 0; fi
+    sleep 0.5
+  done
+  echo "the snapshot never finished building" >&2; return 1
+}
+_v2_secs_under() { awk -v t="$1" -v max="$2" 'BEGIN { exit !(t < max) }'; }
+
 # A refresh paints from one snapshot of every card's feed, and a
 # feed answered from the warm cache says when it was computed
 test_v2_snapshot_carries_every_card_feed_with_its_age() {
   _v2_boot
-  local s; s="$(_v2_get "$(_v2_url 'snapshot?ws=all')")"
+  local s; s="$(_v2_snap_built all)" || { _v2_down; return 1; }
   local f
   for f in fleet services since activity stuck lanes load merges cycle heat usage teams; do
     assert_eq "$(printf '%s' "$s" | jq --arg f "$f" '.feeds[$f].v != null')" "true"
@@ -786,6 +799,118 @@ test_v2_snapshot_carries_every_card_feed_with_its_age() {
   assert_eq "$(printf '%s' "$s" | jq '.feeds.merges.v.days | length')" "14"
   local h; h="$(curl -sf -m 20 -D - -o /dev/null "$(_v2_url 'heat?ws=all')" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
   assert_contains "$h" "x-cel-computed-at"
+  _v2_down
+}
+
+# THE FIRST LOAD AFTER A RESTART NEVER WAITS ON THE SLOW FEEDS. With every gh
+# call taking 4 s, a cold start answers the snapshot and /api/state at once
+# from what was saved before the restart - marked stale, with its age - while
+# the build runs behind it; once that lands, the live answer replaces it and
+# is saved in its place, private. After that the file is never served again:
+# what an act changed is read live.
+test_v2_cold_start_serves_the_saved_snapshot_at_once_marked_stale() {
+  _v2_boot
+  sed -i 's|^esac$|esac; sleep 4|' "$T/bin/gh"
+  local at d="$T/state/dash-saved"; at="$(_v2_ago 7200)"
+  mkdir -p "$d"
+  jq -n --arg at "$at" '{at: $at, v: {at: $at, feeds: {merges: {v: {marker: "saved-before-restart"}, at: $at}}}}' > "$d/snapshot.all.json"
+  jq -n --arg at "$at" '{at: $at, v: {workspace: "alpha", needsYou: [], marker: "saved-state"}}' > "$d/state.alpha.json"
+  local t s
+  t="$(curl -sf -m 20 -o "$T/snap" -w '%{time_total}' "$(_v2_url 'snapshot?ws=all')")" || { _v2_down; return 1; }
+  _v2_secs_under "$t" 2 || { echo "cold snapshot took ${t}s"; _v2_down; return 1; }
+  assert_eq "$(jq -c '[.stale, .as_of, .feeds.merges.v.marker]' "$T/snap")" "[true,\"$at\",\"saved-before-restart\"]" || { _v2_down; return 1; }
+  t="$(curl -sf -m 20 -D "$T/st.h" -o "$T/st.json" -w '%{time_total}' "http://127.0.0.1:$DASH_PORT/api/state")" || { _v2_down; return 1; }
+  _v2_secs_under "$t" 2 || { echo "cold /api/state took ${t}s"; _v2_down; return 1; }
+  assert_eq "$(jq -c '[.saved, .as_of, .marker]' "$T/st.json")" "[true,\"$at\",\"saved-state\"]" || { _v2_down; return 1; }
+  assert_contains "$(tr -d '\r' < "$T/st.h" | grep -i '^x-cel-computed-at:')" "${at%Z}" || { _v2_down; return 1; }
+  # the next ask waits for the live read the first one started
+  assert_eq "$(_v2_get "http://127.0.0.1:$DASH_PORT/api/state" | jq -c '[.saved, .as_of, .marker, (.needsYou | type)]')" '[null,null,null,"array"]' || { _v2_down; return 1; }
+  sed -i 's|; sleep 4$||' "$T/bin/gh"
+  s="$(_v2_snap_built all)" || { _v2_down; return 1; }
+  assert_eq "$(printf '%s' "$s" | jq -c '[.as_of, .feeds.merges.v.marker, (.feeds.merges.v.days | length)]')" '[null,null,14]' || { _v2_down; return 1; }
+  # the build replaced what was saved, privately
+  assert_eq "$(jq -c --arg at "$at" '[(.v.feeds.merges.v.days | length), (.v.stale // false), (.at > $at)]' "$d/snapshot.all.json")" '[14,false,true]' || { _v2_down; return 1; }
+  assert_eq "$(jq -c '[.v.marker, .v.workspace]' "$d/state.alpha.json")" '[null,"alpha"]' || { _v2_down; return 1; }
+  assert_eq "$(stat -c '%a' "$d" "$d/snapshot.all.json" "$d/state.alpha.json" | paste -sd' ' -)" "700 600 600" || { _v2_down; return 1; }
+  # served once, at the cold start: an act forgets the answers, and they are
+  # read again live, never from the file
+  jq -n --arg at "$at" '{at: $at, v: {at: $at, feeds: {}}}' > "$d/snapshot.all.json"
+  jq -n --arg at "$at" '{at: $at, v: {workspace: "alpha", marker: "saved-state"}}' > "$d/state.alpha.json"
+  curl -s -m 20 -o /dev/null -X POST -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" -d '{"event":"test"}' "http://127.0.0.1:$DASH_PORT/api/client-log"
+  assert_eq "$(_v2_get "http://127.0.0.1:$DASH_PORT/api/state" | jq -c '[.saved, .marker]')" '[null,null]' || { _v2_down; return 1; }
+  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=all')" | jq -c '[.stale, (.feeds | length)]')" '[null,12]' || { _v2_down; return 1; }
+  _v2_down
+}
+
+# With nothing saved (a first start), a cold start still does not wait on
+# gh: the snapshot carries the roster (who is running, its PR list still
+# loading) and the feeds that need no gh, and names the rest `loading`;
+# /api/state carries decisions, inbox and agents, and names its slow parts.
+test_v2_cold_start_with_nothing_saved_answers_the_fast_feeds_and_marks_slow_loading() {
+  CEL_DASH_SNAPSHOT_FAST_MS=15000 _v2_boot
+  sed -i 's|^esac$|esac; sleep 8|' "$T/bin/gh"
+  local t
+  t="$(curl -sf -m 30 -o "$T/snap" -w '%{time_total}' "$(_v2_url 'snapshot?ws=all')")" || { _v2_down; return 1; }
+  _v2_secs_under "$t" 6 || { echo "cold snapshot took ${t}s"; _v2_down; return 1; }
+  assert_eq "$(jq -c '(.stale // false), ([.loading[] | select(IN("since", "activity", "stuck", "lanes", "merges", "cycle", "heat"))] | length)' "$T/snap" | paste -sd' ' -)" "false 7" || { _v2_down; return 1; }
+  assert_eq "$(jq -c '[.feeds.fleet.v.loading, (.feeds.fleet.v.orchestrators | type), (.feeds.fleet.v.prs | length)]' "$T/snap")" '[["prs"],"array",0]' || { _v2_down; return 1; }
+  assert_eq "$(jq -c '[(.feeds.load.v | type), (.feeds.teams.v.items | type), (.feeds.services.v.items | type)]' "$T/snap")" '["object","array","array"]' || { _v2_down; return 1; }
+  t="$(curl -sf -m 30 -o "$T/st.json" -w '%{time_total}' "http://127.0.0.1:$DASH_PORT/api/state")" || { _v2_down; return 1; }
+  _v2_secs_under "$t" 6 || { echo "cold /api/state took ${t}s"; _v2_down; return 1; }
+  assert_eq "$(jq -c '[(.loading | index("prs") != null), (.needsYou | type), (.inbox | length > 0), (.agents | type), (.saved // false)]' "$T/st.json")" '[true,"array",true,"array",false]' || { _v2_down; return 1; }
+  # and the build fills them in (gh answering at once again, so it does not
+  # wait out every slow call)
+  sed -i 's|; sleep 8$||' "$T/bin/gh"
+  assert_eq "$(_v2_snap_built all | jq -c '[(.feeds.fleet.v.prs | length), (.feeds.fleet.v.loading // null)]')" '[2,null]' || { _v2_down; return 1; }
+  _v2_down
+}
+
+# "Since you last looked" is per browser - its own seen-cookie - so it is
+# never saved for a restart, nor replayed from a file that has one: a stale
+# answer says it is loading, and once live each browser gets its own. And a
+# saved snapshot is served only for a workspace the registry still names.
+test_v2_saved_snapshot_never_replays_since_or_a_removed_workspace() {
+  _v2_boot
+  local at d="$T/state/dash-saved" A='cel_v2_seen=aaaaaaaaaaaaaaaaaaaaaaaa' B='cel_v2_seen=bbbbbbbbbbbbbbbbbbbbbbbb'; at="$(_v2_ago 7200)"
+  mkdir -p "$d"
+  for f in all bundle gone; do
+    jq -n --arg at "$at" '{at: $at, v: {at: $at, feeds: {merges: {v: {marker: "saved"}, at: $at}, since: {v: {at: $at, marker: "browser-a"}, at: $at}}}}' > "$d/snapshot.$f.json"
+  done
+  local s; s="$(_v2_get -H "cookie: $B" "$(_v2_url 'snapshot?ws=all')")" || { _v2_down; return 1; }
+  assert_eq "$(printf '%s' "$s" | jq -c '[.stale, .feeds.merges.v.marker, (.feeds | has("since")), .loading]')" '[true,"saved",false,["since"]]' || { _v2_down; return 1; }
+  # a registered workspace's file is served; a removed one's is not - its
+  # filter is unknown, as it always was
+  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=bundle')" | jq -c '[.stale, .feeds.merges.v.marker]')" '[true,"saved"]' || { _v2_down; return 1; }
+  assert_eq "$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$(_v2_url 'snapshot?ws=gone')")" "400" || { _v2_down; return 1; }
+  # browser A has looked; browser B never has: live, each gets its own
+  assert_eq "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST -H "cookie: $A" -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" "$(_v2_url seen)")" "200" || { _v2_down; return 1; }
+  _v2_snap_built all >/dev/null || { _v2_down; return 1; }
+  assert_eq "$(jq '.v.feeds | has("since")' "$d/snapshot.all.json")" "false" || { _v2_down; return 1; }
+  local sa sb
+  sa="$(_v2_get -H "cookie: $A" "$(_v2_url 'snapshot?ws=all')" | jq -r .feeds.since.v.at)"
+  sb="$(_v2_get -H "cookie: $B" "$(_v2_url 'snapshot?ws=all')" | jq -r .feeds.since.v.at)"
+  assert_eq "$(jq -r --arg a "$sa" '.aaaaaaaaaaaaaaaaaaaaaaaa == $a' "$T/state/dash-seen.json")" "true" || { _v2_down; return 1; }
+  [ "$sa" != "$sb" ] || { echo "both browsers got since=$sa"; _v2_down; return 1; }
+  _v2_down
+}
+
+# A build made while an upstream failed is served (degraded, as always) but
+# never saved: the last good answer on disk stands for the next restart.
+test_v2_failed_build_keeps_the_last_good_saved_snapshot() {
+  _v2_boot_failing_gh
+  local at d="$T/state/dash-saved"; at="$(_v2_ago 7200)"
+  mkdir -p "$d"
+  jq -n --arg at "$at" '{at: $at, v: {at: $at, feeds: {merges: {v: {marker: "last-good"}, at: $at}}}}' > "$d/snapshot.all.json"
+  jq -n --arg at "$at" '{at: $at, v: {workspace: "alpha", marker: "last-good"}}' > "$d/state.alpha.json"
+  local before; before="$(cat "$d/snapshot.all.json" "$d/state.alpha.json" | sha256sum)"
+  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=all')" | jq -c '[.stale, .feeds.merges.v.marker]')" '[true,"last-good"]' || { _v2_down; return 1; }
+  assert_eq "$(_v2_get "http://127.0.0.1:$DASH_PORT/api/state" | jq -r .marker)" "last-good" || { _v2_down; return 1; }
+  # the builds land - gh failed under them - and are what the page now gets
+  _v2_snap_built all >/dev/null || { _v2_down; return 1; }
+  assert_eq "$(_v2_get "http://127.0.0.1:$DASH_PORT/api/state" | jq -c '[.saved, .marker]')" '[null,null]' || { _v2_down; return 1; }
+  sleep 1
+  assert_eq "$(cat "$d/snapshot.all.json" "$d/state.alpha.json" | sha256sum)" "$before" || { _v2_down; return 1; }
+  assert_eq "$(find "$d" -name '*.tmp' | wc -l)" "0"
   _v2_down
 }
 
@@ -864,9 +989,11 @@ test_v2_feed_cache_serves_warm_and_sees_new_mail() {
 
 # The Needs-you card comes from /api/state, which must be
 # warm like the feeds, and before its first answer the page says loading -
-# never a count of 0 that reads as "nothing needs you"
+# never a count of 0 that reads as "nothing needs you". (A cold start's first
+# answer is its own - see test_v2_cold_start_*; warm means every ask after.)
 test_v2_state_is_served_warm_and_needs_you_never_paints_zero_before_data() {
   _v2_boot
+  curl -sf -m 20 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state"
   local a b
   a="$(curl -sf -m 20 -D - -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
   b="$(curl -sf -m 20 -D - -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"

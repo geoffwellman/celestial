@@ -37,11 +37,14 @@ const main = async () => {
   try {
     const { ws, send, on } = await connect(port);
     const missing = (process.env.V2_MISSING || '').split(',');
+    // V2_HANG: feeds whose requests are never answered at all
+    const hang = (process.env.V2_HANG || '').split(',').filter(Boolean);
     const fixture = (name) => { if (missing.includes(name)) return null; try { return readFileSync(join(fixDir, name + '.json'), 'utf8'); } catch { return null; } };
     on(async (ev) => {
       if (ev.method !== 'Fetch.requestPaused') return;
       const { requestId, request } = ev.params;
       const u = new URL(request.url);
+      if (request.method === 'GET' && hang.includes(u.pathname.replace(/^\/api\/v2\//, ''))) { sent.push({ path: u.pathname, query: u.search, hung: true }); return; }
       let body = '{}', code = 200;
       if (request.method === 'POST') {
         let pb = null; try { pb = JSON.parse(request.postData || 'null'); } catch { /* raw */ }
@@ -60,6 +63,8 @@ const main = async () => {
     await send('Fetch.enable', { patterns: [{ urlPattern: '*/api/*', requestStage: 'Request' }] });
     await send('Page.enable');
     await send('Runtime.enable');
+    // V2_FETCH_MS: the page's per-read deadline, short enough for a test
+    if (process.env.V2_FETCH_MS) await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.V2_FETCH_MS=${Number(process.env.V2_FETCH_MS)}` });
     const evaluate = async (expr) => {
       const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
       if (r.result.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 600));
@@ -281,6 +286,21 @@ const main = async () => {
       out.heat = await body('heat');
       out.cycle = await body('cycle');
       out.activity = await body('activity');
+    }
+
+    if (scenario === 'hang') {
+      // one feed never answers: every refresh round still settles and the
+      // page keeps refreshing - never one stuck round holding every later one
+      const body = (id) => evaluate(`(document.querySelector('#grid .w[data-id=${id}] .body')||{}).textContent||''`);
+      const r0 = await evaluate('window.V2REFRESHES');
+      const t0 = Date.now();
+      const round = () => evaluate(`Promise.race([window.v2refresh().then(function(){return 'settled'}),new Promise(function(r){setTimeout(function(){r('stuck')},15000)})])`);
+      out.rounds = [await round(), await round(), await round()];
+      out.secs = Math.round((Date.now() - t0) / 100) / 10;
+      out.refreshed = (await evaluate('window.V2REFRESHES')) - r0;
+      out.heat = await body('heat');
+      out.cycle = await body('cycle');
+      out.hungAsks = sent.filter((s) => s.hung).length;
     }
 
     if (scenario === 'usage') {

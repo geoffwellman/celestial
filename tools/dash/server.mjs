@@ -5,7 +5,9 @@
 // the default for every page that still shows one at a time).
 //
 // Reads live state by shelling out to the same CLIs the roles use (cel,
-// herdr, gh, yq) - no daemons, no state of its own. The CLI launcher defaults
+// herdr, gh, yq) - no daemons. Of its own it keeps only small files in the
+// dash state dir: the activity ring, seen marks, and the last good answer a
+// restart paints first (saved.mjs). The CLI launcher defaults
 // to the tailnet IP when available, otherwise loopback; --host overrides it.
 // This private control surface requires trusted Host/Origin and CSRF checks.
 import { createServer, request as httpRequest } from 'node:http';
@@ -21,6 +23,7 @@ import { controlSecurity, internalError } from '../http-security.mjs';
 import { createV2 } from './v2.mjs';
 import { store } from './store.mjs';
 import { createCached } from './cached.mjs';
+import { createSaved } from './saved.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
 // One server carries every workspace; a config without the list (an old
 // launcher, a test fixture) is a list of one.
@@ -44,6 +47,10 @@ const security = controlSecurity({
 // files the pages load by name; anything else under / is not served
 const STATIC_FILES = new Set(['/decisions.js', '/decisions.css', '/v2.js', '/v2.css']);
 const UPDATE_DIR = process.env.CEL_UPDATE_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/update');
+// the dashboard's own files (activity ring, seen marks, usage ring) and the
+// last good answers a restart serves first (saved.mjs), private to its user
+const STATE_DIR = process.env.CEL_DASH_STATE_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel');
+const saved = createSaved(join(STATE_DIR, 'dash-saved'));
 
 // The steward writes this file hours after the dashboard booted, so it is read
 // PER REQUEST and spliced into the shell below - a chip captured at startup
@@ -499,10 +506,28 @@ const decideOne = async ({ id, action, value, option }) => {
   return { code: 200 };
 };
 
-const state = async (req, w) => {
+// The reads behind /api/state that take seconds on a busy box - gh, Linear,
+// `cel quota`, `cel services`, `cel gateway panel` - against the ones that
+// answer at once: the roster, decisions, inbox, backlog. A cold start's first
+// answer (`fast`) does not wait for a slow read that has no value yet: it
+// answers that part empty and names it in `loading`.
+const hasValue = (key) => !!cache[key] && cache[key].v !== undefined;
+const state = async (req, w, fast = false) => {
+  const loading = [];
+  const slowRead = (name, key, read, empty) => {
+    const p = read();
+    if (!fast || hasValue(key)) return p;
+    p.catch(() => {});
+    loading.push(name);
+    return empty;
+  };
   const needsYou = orderDecisions(await decisions());
   const needsYouGroups = groupDecisions(needsYou);
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp, person] = await Promise.all([worktreeRows(w), prs(w), wsAgents(w), backlog(w), viewer(), inbox(w), linear(w), paneNames(), subscriptions(), services(w), gatewayPanel(), meOf(w)]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp, person] = await Promise.all([worktreeRows(w),
+    slowRead('prs', `prs:${w.name}`, () => prs(w), []), wsAgents(w), backlog(w), slowRead('viewer', 'viewer', viewer, ''),
+    inbox(w), slowRead('linear', `linear:${w.name}`, () => linear(w), null), paneNames(),
+    slowRead('subscriptions', 'subs', subscriptions, []), slowRead('services', `services:${w.name}`, () => services(w), []),
+    slowRead('gatewayPanel', 'gwpanel', gatewayPanel, null), meOf(w)]);
   // A partition, not a new query: `cel services --json` tags every row with
   // the workspace that owns it, and `box` is the tag for what belongs to
   // nobody. A workspace's panel lists its own rows only.
@@ -559,6 +584,7 @@ const state = async (req, w) => {
     subscriptions: subs,
     // the socket, never X-Forwarded-For: a header is whatever the client says
     gatewayPanel: gwp ? { ...gwp, loopback: isLoopback(req && req.socket && req.socket.remoteAddress) } : null,
+    ...(loading.length ? { loading } : {}),
   };
 };
 
@@ -587,7 +613,7 @@ const logReq = (req, code) => {
 };
 
 // the v2 page's feeds and its one named-action door
-const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents });
+const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents, STATE_DIR, saved });
 
 // /api/state is served warm, like the v2 feeds: the last answer at once, a
 // refresh behind it past CEL_DASH_STATE_TTL_MS (default the page refresh, at
@@ -597,6 +623,21 @@ const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, ag
 // A warm answer is only served while the inbox files it was read from are
 // unchanged: a new inbox line drops the warm answer and the upstream caches
 // that would hide it, and the ask computes fresh.
+// A COLD START does not wait for the slow reads: the first ask for a
+// workspace since the server started gets the last good answer saved before
+// the restart (saved.mjs) - `saved: true` and `as_of` its time; not `stale`,
+// as the v2 snapshot marks its saved answer, because `stale` is already this
+// answer's list of stale worktrees - or, none saved, the fast
+// reads with the slow parts named in `loading`; the full read starts behind
+// it, and the next ask waits for that. Only that first ask: after a POST the
+// answer is read again, never served from the file. Only for a workspace
+// this server carries (WORKSPACES, the registry as it was at launch): a
+// removed one is a 404, its old file never read.
+const coldServed = new Set();
+// the reads an answer is made of that have no value (failed, never read):
+// what saved.mjs weighs a build by
+const stateFailed = (w) => ['decisions', 'agents', `inbox:${w.name}`, `prs:${w.name}`, 'subs', `services:${w.name}`].filter((k) => !hasValue(k));
+const stateSaved = new Set();
 const states = new Map();
 const fileSig = (f) => { try { const st = statSync(f); return `${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
 const stateSig = () => WORKSPACES.map((x) => fileSig(join(INBOX_DIR, `${x.name}.jsonl`))).join('|');
@@ -614,17 +655,28 @@ const warmState = (w, warmer = false) => {
     const p = state(null, w).then((v) => {
       const r = { v, at: Date.now() };
       if (gen > f.have) { f.have = gen; f.v = v; f.at = r.at; f.sig = sig; }
+      // the first one after a start is written at once, then at most once a
+      // minute - and never one with a read failing that the saved one had not
+      if (saved.write('state', w.name, v, r.at, { force: !stateSaved.has(w.name), failed: stateFailed(w) })) stateSaved.add(w.name);
       return r;
     }).finally(() => { if (f.p === p) f.p = null; });
     f.p = p; f.psig = sig;
     return p;
   };
-  if (f.v !== undefined && f.sig !== sig) {
-    // the files moved: this ask waits for an answer read after the change,
-    // as it always did, and the caches that would hide the change go first
+  // the files moved since the last read began (warm, or still cold behind a
+  // cold start's first answer): the caches that would hide the change go
+  // first, and a warm ask waits for an answer read after the change
+  if (f.psig !== undefined && f.psig !== sig) {
     delete cache.decisions;
     for (const x of WORKSPACES) delete cache[`inbox:${x.name}`];
-    return refresh();
+  }
+  if (f.v !== undefined && f.sig !== sig) return refresh();
+  if (f.v === undefined && !warmer && !coldServed.has(w.name)) {
+    coldServed.add(w.name);
+    refresh().catch(() => {});
+    const s = saved.read('state', w.name);
+    if (s) return Promise.resolve({ v: { ...s.v, saved: true, as_of: s.at }, at: Date.parse(s.at) });
+    return state(null, w, true).then((v) => ({ v, at: Date.now() }));
   }
   if (f.v === undefined || warmer) return refresh();
   if (Date.now() - f.at >= STATE_TTL()) refresh().catch(() => {});

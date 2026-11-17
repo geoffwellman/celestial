@@ -29,8 +29,7 @@ const STUCK = {
   merge_conflict: 'has merge conflicts - rebase it',
 };
 
-export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents: agentsCold }) => {
-  const STATE_DIR = process.env.CEL_DASH_STATE_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel');
+export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents: agentsCold, STATE_DIR, saved }) => {
   const SAMPLES = () => process.env.CEL_SAMPLES_FILE || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/samples.jsonl');
   const ACTIVITY = () => join(STATE_DIR, 'dash-activity.jsonl');
   const SEEN = () => join(STATE_DIR, 'dash-seen.json');
@@ -101,13 +100,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return out;
   });
   // ?ws=<name>|all; unknown is an error, not an empty card that reads as calm
-  const scope = async (url) => {
-    const want = url.searchParams.get('ws') || cfg.name;
-    const all = await workspaces();
+  const filterOf = (url) => url.searchParams.get('ws') || cfg.name;
+  const pick = (all, want) => {
     if (want === 'all') return all;
     const one = all.filter((w) => w.name === want);
     return one.length ? one : null;
   };
+  const scope = async (url) => pick(await workspaces(), filterOf(url));
+  // the same, from the workspaces already read, without waiting: undefined
+  // when they have not been read yet
+  const scopeNow = (url) => (flights.v2ws && flights.v2ws.v !== undefined ? pick(flights.v2ws.v, filterOf(url)) : undefined);
 
   const inboxOf = (ws) => readJsonl(join(INBOX_DIR, `${ws.name}.jsonl`));
 
@@ -141,6 +143,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // and is retried at most once per CEL_DASH_DEGRADED_RETRY_MS (default 60 s)
   // so a repo gh can never resolve does not spawn gh on every ask.
   let upstreamFailures = 0;
+  // and by name, each upstream read (gh list, merged list, `cel quota`, `cel
+  // solo approvals`) that has no value - failed, and never answered since the
+  // start: what a saved snapshot is weighed by (saved.mjs)
+  const failing = new Set();
+  const note = (key, v) => { if (v === null || v === undefined) failing.add(key); else failing.delete(key); return v; };
   const compute = (f) => {
     const before = upstreamFailures;
     f.tried = Date.now();
@@ -153,9 +160,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const SLOW_FEEDS = /^(services|usage|lanes):/;
   const FEED_TTL = (key) => (key && SLOW_FEEDS.test(key) ? Number(process.env.CEL_DASH_SLOW_FEED_TTL_MS) || 30000 : Number(process.env.CEL_DASH_FEED_TTL_MS) || 5000);
   const due = (k, f) => (f.t ? Date.now() - f.t >= FEED_TTL(k) : Date.now() - (f.tried || 0) >= DEGRADED_RETRY());
-  // peek: any last value at once, however degraded (the snapshot's contract)
+  // peek: any last value at once, however degraded (the snapshot's contract);
+  // 'now': that, or null for a feed with no value yet - it neither waits nor
+  // starts one (what is there, as it is)
   const feed = (key, fn, peek = false) => {
     let f = feeds.get(key);
+    if (peek === 'now' && (!f || f.v === undefined)) return Promise.resolve(null);
     if (!f) { f = { v: undefined, t: 0, p: null, fn }; feeds.set(key, f); }
     f.fn = fn; f.asked = Date.now();
     const refresh = () => {
@@ -191,7 +201,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         await f.p;
         await new Promise((r) => setImmediate(r));
       }
-    } finally { feedWarming = false; }
+      await saveWarm();
+    } catch { /* a lost save costs a restart its first paint, never a feed */ } finally { feedWarming = false; }
   };
   // something changed by our own hand (an act): the next ask recomputes
   const feedDrop = () => feeds.clear();
@@ -213,7 +224,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       return out === null ? null : ghParse(out);
     });
     if (!v) upstreamFailures++;
-    return v;
+    return note(`gh:${st}:${slug}`, v);
   };
   // Merged PRs are fetched BY DATE, not by count, so a busy repo's oldest
   // days never quietly empty. Every card the page shows asks 90 days or less,
@@ -261,7 +272,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       return { rows: [...seen.values()] };
     });
     if (!v) upstreamFailures++;
-    return v;
+    return note(`gh:merged:${slug}:${days}`, v);
   };
   // per repo: merges, "no access" (GitHub refused), or "unavailable" (gh
   // failed and there is no earlier answer to stand on)
@@ -366,11 +377,15 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     writeFileSync(SEEN(), JSON.stringify(Object.fromEntries(keep)));
     return s[tok];
   };
-  const since = async (req, url, wss) => {
+  // null when `peek` is 'now' and either list has no value yet
+  const since = async (req, url, wss, peek = false) => {
     const tok = cookieToken(req);
     const at = iso(url.searchParams.get('at')) || (tok && iso(seenStore()[tok])) || new Date(Date.now() - DAY).toISOString();
-    const items = (await feed(`activity:${wsKey(wss)}`, () => activity(wss))).v.filter((i) => i.ts > at);
-    const st = (await feed(`stuck:${wsKey(wss)}`, () => stuck(wss))).v;
+    const a = await feed(`activity:${wsKey(wss)}`, () => activity(wss), peek);
+    const s = await feed(`stuck:${wsKey(wss)}`, () => stuck(wss), peek);
+    if (!a || !s) return null;
+    const items = a.v.filter((i) => i.ts > at);
+    const st = s.v;
     return {
       at,
       counts: {
@@ -592,19 +607,18 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     for (const ws of wss) {
       const refs = pulls.filter((p) => p.ws === ws.name).map((p) => `${p.repo}#${p.number}`);
       if (!refs.length) continue;
-      const v = await slow(`approvals:${ws.name}`, 60000, async () => {
+      const v = note(`approvals:${ws.name}`, await slow(`approvals:${ws.name}`, 60000, async () => {
         const raw = await run(CEL(), ['solo', 'approvals', '--workspace', ws.name, '--json', ...refs], 120000);
         try { const j = JSON.parse(raw || ''); return Array.isArray(j) ? j : null; } catch { return null; }
-      });
+      }));
       for (const a of v || []) if (a && a.ref) out.set(`${ws.name}:${a.ref}`, a);
     }
     return out;
   };
   const REVIEW_OF = { approved: 'APPROVED', changes: 'CHANGES_REQUESTED' };
-  const fleet = async (wss) => {
-    const id = await identities(wss);
-    const pulls = await open(wss);
-    const appr = await approvals(wss, pulls);
+  // who is running and what is open, from the reads already made: a roster
+  // with no PR list yet (a cold start's first paint) is `fleetOf(id, [], new Map())`
+  const fleetOf = (id, pulls, appr) => {
     // main agents and solo lanes: each restartable and mailable by its name;
     // a solo one says which branch and PR it is on where its pane shows it
     const orchestrators = [...id.mains, ...id.lanes].map(({ cwd, ...x }) => ({ ...x, ...(x.mode === 'solo' ? soloWork({ ...x, cwd }, pulls) : {}) }));
@@ -623,6 +637,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         ...(solo ? { waiting } : {}), mergeable: p.mergeable || '', draft: !!p.isDraft };
     });
     return { orchestrators, reviewers, prs };
+  };
+  const fleet = async (wss) => {
+    const id = await identities(wss);
+    const pulls = await open(wss);
+    return fleetOf(id, pulls, await approvals(wss, pulls));
   };
 
   // ---- feature teams --------------------------------------------------------
@@ -942,7 +961,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const isoOf = (ms) => (ms === null ? null : new Date(ms).toISOString());
   const level = (pct) => (pct >= 95 ? 'bad' : pct >= 75 ? 'warn' : 'ok');
   const usage = async (wss) => {
-    const q = (await quota()) || {};
+    const q = note('quota', await quota()) || {};
     const now = Date.now();
     const pool = q.orch_pool || {};
     const live = new Set((pool.live || []).map((x) => String(x).toLowerCase()));
@@ -1196,7 +1215,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // other feed is cached whole per (feed, query)
   const FEED_NAMES = new Set(['since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage', 'fleet', 'services', 'teams']);
   const answer = async (name, req, url, wss, peek = false) => {
-    if (name === 'since') return { v: await since(req, url, wss), at: Date.now() };
+    if (name === 'since') {
+      const v = await since(req, url, wss, peek === 'now' ? 'now' : false);
+      if (!v) return null;
+      return { v, at: Date.now() };
+    }
     // The cache key is built only from the parameters the feed reads, each
     // clamped as the feed clamps it, and the feed computes from that same
     // normalised query - so the map stays bounded whatever a client sends.
@@ -1215,11 +1238,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         const limit = Math.min(500, Math.max(1, Number(raw.searchParams.get('limit')) || 50));
         const before = iso(raw.searchParams.get('before'));
         const a = await feed(`activity:${wsKey(wss)}`, () => activity(wss), peek);
+        if (!a) return null;
         let items = a.v;
         if (before) items = items.filter((i) => i.ts < before);
         return { v: { items: items.slice(0, limit).map(({ sub, ...i }) => i) }, at: a.at };
       }
-      case 'stuck': { const st = await feed(`stuck:${wsKey(wss)}`, () => stuck(wss), peek); return { v: { items: st.v }, at: st.at }; }
+      case 'stuck': { const st = await feed(`stuck:${wsKey(wss)}`, () => stuck(wss), peek); return st && { v: { items: st.v }, at: st.at }; }
       case 'lanes': return feed(key, () => lanes(url, wss), peek);
       case 'load': return feed(key, () => load(url), peek);
       case 'merges': return feed(key, () => merges(url, wss), peek);
@@ -1235,15 +1259,134 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // asks it with, in one answer - warm values as they are, so a reload draws
   // at once and the live refresh updates it
   const PAGE_QUERY = { activity: 'limit=30', merges: 'days=14', load: 'hours=24', lanes: 'range=today' };
-  const snapshot = async (req, url, wss) => {
-    const names = ['fleet', 'services', 'since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage', 'teams'];
-    const out = {};
-    await Promise.all(names.map(async (n) => {
-      const u = new URL(`http://localhost/api/v2/${n}?${PAGE_QUERY[n] || ''}`);
-      if (url.searchParams.get('ws')) u.searchParams.set('ws', url.searchParams.get('ws'));
-      try { const r = await answer(n, req, u, wss, true); out[n] = { v: r.v, at: new Date(r.at).toISOString() }; } catch { /* the live refresh reports it */ }
+  const SNAP_FEEDS = ['fleet', 'services', 'since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage', 'teams'];
+  const pageUrl = (n, url) => {
+    const u = new URL(`http://localhost/api/v2/${n}?${PAGE_QUERY[n] || ''}`);
+    if (url.searchParams.get('ws')) u.searchParams.set('ws', url.searchParams.get('ws'));
+    return u;
+  };
+  // The snapshot of one ws filter: `now` takes each feed as it is - one with
+  // no value yet is `missing` - and otherwise each is awaited.
+  const assemble = async (req, url, wss, now) => {
+    const feedsOut = {};
+    await Promise.all(SNAP_FEEDS.map(async (n) => {
+      let r = null;
+      try { r = await answer(n, req, pageUrl(n, url), wss, now ? 'now' : true); } catch { /* the live refresh reports it */ }
+      if (r) feedsOut[n] = { v: r.v, at: new Date(r.at).toISOString() };
     }));
-    return { at: new Date().toISOString(), feeds: out };
+    return { snap: { at: new Date().toISOString(), feeds: feedsOut }, missing: SNAP_FEEDS.filter((n) => !feedsOut[n]) };
+  };
+  // A whole snapshot is saved for the next restart (saved.mjs: at most once
+  // a minute unless `force`, and never over one built with fewer upstream
+  // reads failing) - all but `since`: that card is "since THIS browser last
+  // looked", read from the asker's own cookie, so one browser's answer is
+  // never kept to be shown to another; a stale answer says it is loading.
+  const keep = (filter, r, force = false) => {
+    if (r.missing.length) return;
+    const { since, ...feeds } = r.snap.feeds;
+    saved.write('snapshot', filter, { ...r.snap, feeds }, Date.parse(r.snap.at), { force, failed: [...failing].sort() });
+  };
+  // A COLD START - this filter not yet answered whole since the server
+  // started - never waits on the slow feeds (gh PR lists, merged counts, `cel
+  // quota`, `cel solo approvals`): the snapshot is the last good one saved
+  // before the restart, `stale: true` and `as_of` its time, while a build
+  // runs behind it; with none saved, the feeds that answer within
+  // CEL_DASH_SNAPSHOT_FAST_MS (default 1 s) - the roster, load, teams,
+  // services - and the rest named in `loading`. The page's own feed polls
+  // pick up the build as each feed lands. Once a filter has been answered
+  // whole, the file is never served again: what an act changed is read live.
+  // (`stale` here; /api/state, whose `stale` already lists stale worktrees,
+  // marks its saved answer `saved: true` - both carry `as_of`.)
+  const FAST_FEEDS = ['load', 'teams', 'services'];
+  const FAST_WAIT = () => Number(process.env.CEL_DASH_SNAPSHOT_FAST_MS) || 1000;
+  const whole = new Set();
+  const builds = new Map();
+  // filter -> when a page last asked for it: what a warm save rebuilds, while
+  // a page is open
+  const snapAsk = new Map();
+  // The workspaces the registry names, read once at start: a saved snapshot
+  // is served only for `all` or a workspace still registered, never for one
+  // removed since it was saved. Unreadable: none is served.
+  const registered = run('yq', ['-r', '.workspaces // {} | keys | .[]', REGISTRY()], 8000)
+    .then((out) => (out === null ? null : new Set(out.split('\n').filter(Boolean))), () => null);
+  const stillRegistered = async (filter) => {
+    if (filter === 'all') return true;
+    const names = await registered;
+    return !!names && names.has(filter);
+  };
+  const build = (req, url, filter) => {
+    if (builds.has(filter)) return builds.get(filter);
+    const p = (async () => {
+      const wss = await scope(url);
+      if (!wss) return;
+      const r = await assemble(req, url, wss, false);
+      if (!r.missing.length) whole.add(filter);
+      // the first build after a start is written at once
+      keep(filter, r, true);
+    })().catch(() => {}).finally(() => builds.delete(filter));
+    builds.set(filter, p);
+    return p;
+  };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref());
+  // the snapshot, or null for a filter that names no workspace
+  const snapshot = async (req, url) => {
+    const filter = filterOf(url);
+    snapAsk.set(filter, Date.now());
+    let wss = scopeNow(url);
+    if (wss === null) return null;
+    if (whole.has(filter)) {
+      if (!wss) wss = await scope(url);
+      if (!wss) return null;
+      const r = await assemble(req, url, wss, false);
+      keep(filter, r);
+      return r.snap;
+    }
+    if (wss) {
+      // every feed already warm (a page polled them): that is whole
+      const r = await assemble(req, url, wss, true);
+      if (!r.missing.length) {
+        whole.add(filter);
+        keep(filter, r);
+        return r.snap;
+      }
+    }
+    const s = (await stillRegistered(filter)) ? saved.read('snapshot', filter) : null;
+    if (s) {
+      build(req, url, filter);
+      const { since, ...feeds } = s.v.feeds || {};
+      return { ...s.v, feeds, stale: true, as_of: s.at, loading: ['since'] };
+    }
+    if (!wss) wss = await scope(url);
+    if (!wss) return null;
+    // nothing saved: the roster (who is running, without the PR list) and
+    // the quick feeds, as far as they get within the wait - read before the
+    // build starts, so its gh and `cel` runs do not crowd them out
+    let roster = null;
+    const fast = Promise.all([
+      identities(wss).then((id) => { roster = { ...fleetOf(id, [], new Map()), loading: ['prs'] }; }, () => {}),
+      ...FAST_FEEDS.map((n) => answer(n, req, pageUrl(n, url), wss, true).catch(() => null)),
+    ]);
+    await Promise.race([fast, sleep(FAST_WAIT())]);
+    build(req, url, filter);
+    const r = await assemble(req, url, wss, true);
+    // still loading: every feed not read yet - the fleet too while only its
+    // roster stands in for it
+    if (!r.missing.length) return r.snap;
+    if (!r.snap.feeds.fleet && roster) r.snap.feeds.fleet = { v: roster, at: new Date().toISOString() };
+    return { ...r.snap, loading: r.missing };
+  };
+  // A warm save, after each keep-warm pass: the snapshot a page would load
+  // now, written at most once a minute per filter, and only while a page is
+  // polling it - so a restart's stale paint is at most that old.
+  const saveWarm = async () => {
+    for (const [filter, at] of snapAsk) {
+      if (Date.now() - at > (Number(process.env.CEL_DASH_FEED_KEEP_WARM_MS) || 60000)) { snapAsk.delete(filter); continue; }
+      if (!whole.has(filter) || !saved.due('snapshot', filter)) continue;
+      const url = new URL(`http://localhost/?ws=${encodeURIComponent(filter)}`);
+      const wss = scopeNow(url);
+      if (!wss) continue;
+      keep(filter, await assemble({ headers: {} }, url, wss, true));
+    }
   };
 
   const json = (res, code, v) => res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(v));
@@ -1284,10 +1427,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       if (!r) { res.writeHead(404, { 'cache-control': 'no-store' }).end('no such message'); return true; }
       json(res, 200, r); return true;
     }
+    // the snapshot answers a cold start without waiting for the workspace list
+    if (name === 'snapshot') {
+      const s = await snapshot(req, url);
+      if (!s) { res.writeHead(400).end('unknown workspace'); return true; }
+      json(res, 200, s); return true;
+    }
     const wss = await scope(url);
     if (!wss) { res.writeHead(400).end('unknown workspace'); return true; }
-    if (name === 'snapshot') { json(res, 200, await snapshot(req, url, wss)); return true; }
     if (!FEED_NAMES.has(name)) { res.writeHead(404).end('not found'); return true; }
+    if (snapAsk.has(filterOf(url))) snapAsk.set(filterOf(url), Date.now());
     const r = await answer(name, req, url, wss);
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-cel-computed-at': new Date(r.at).toISOString() })
       .end(JSON.stringify(r.v));

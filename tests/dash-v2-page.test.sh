@@ -198,6 +198,22 @@ test_dash_v2page_a_failing_feed_is_unavailable_and_the_rest_still_draw() {
   _vp_down
 }
 
+# A feed that never answers at all must not stop the page: each read has a
+# deadline, so every refresh round settles (in about that deadline, here
+# 1.5 s) and the next one runs - the hung card says loading, never an error,
+# and the cards around it still draw. Before, one hung request held its
+# round open, and every later round returned that same stuck round.
+test_dash_v2page_a_hung_feed_never_stops_the_refresh() {
+  _vp_boot
+  local rc=0; V2_HANG=heat V2_FETCH_MS=1500 _vp_run hang || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj '.rounds | join(",")')" "settled,settled,settled"
+  [ "$(_vpj .refreshed)" -ge 3 ] || { echo "only $(_vpj .refreshed) refreshes landed"; _vp_down; return 1; }
+  [ "$(_vpj .hungAsks)" -ge 3 ] || { echo "the hung feed was asked $(_vpj .hungAsks) times"; _vp_down; return 1; }
+  assert_contains "$(_vpj .heat)" "loading heat"
+  assert_contains "$(_vpj .cycle)" "widget"
+  _vp_down
+}
+
 test_dash_v2page_working_now_lists_only_working_and_blocked() {
   _vp_boot
   local rc=0; _vp_run working || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
