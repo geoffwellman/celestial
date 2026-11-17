@@ -4,10 +4,10 @@
 // triggerState}]; name/wsdir/repos at the top level are the first workspace,
 // the default for every page that still shows one at a time).
 //
-// Reads live state by shelling out to the same CLIs the roles use (herdr,
-// gh, yq) - no daemons, no state of its own. The CLI launcher defaults to the
-// tailnet IP when available, otherwise loopback; --host overrides it. This
-// private control surface requires trusted Host/Origin and CSRF checks.
+// Reads live state by shelling out to the same CLIs the roles use (cel,
+// herdr, gh, yq) - no daemons, no state of its own. The CLI launcher defaults
+// to the tailnet IP when available, otherwise loopback; --host overrides it.
+// This private control surface requires trusted Host/Origin and CSRF checks.
 import { createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { timingSafeEqual } from 'node:crypto';
@@ -86,9 +86,37 @@ const cached = (key, ttlMs, fn, empty) => {
   return e.p;
 };
 
+// WHO IS RUNNING, whichever terminal holds it: `cel sessions --json`, which
+// is lib/rex.sh's cel_agent_list - Herdr's agents plus every managed Rex
+// session, the one inventory launches, the budget and gc read. `herdr agent
+// list` alone left every Rex agent (most orchestrators, lanes, core and their
+// reviewers) off the dashboard. Each row keeps what the dashboard reads:
+//   name, runtime (omp, pi, claude, opencode), status, cwd;
+//   backend - 'herdr' or 'rex';
+//   pane - its address: a Herdr pane id (w1:p2), the only kind /api/focus
+//     focuses, or a Rex rex/<session>/<block>, never sent to a Herdr control;
+//   workspace - the Celestial workspace directory its record names (a Rex
+//     receipt does; Herdr records none), else null;
+//   herdrWs - the Herdr sidebar workspace its pane sits in, whose label is
+//     the name a person knows it by (null for Rex).
+// One read every 8 s at most, about a third of a second on this box (Herdr
+// answers in milliseconds; Rex receipts are each proven live); every page
+// reads it through a warm answer (/api/state's, v2's `slow`), never waiting.
+const agentRow = (a) => {
+  const backend = String(a.backend || 'herdr');
+  return {
+    name: String(a.name || ''), runtime: a.agent || null, status: a.agent_status || 'unknown',
+    cwd: String(a.cwd || ''), backend, pane: a.pane_id || null,
+    workspace: backend === 'rex' && typeof a.workspace === 'string' && a.workspace ? a.workspace : null,
+    herdrWs: backend === 'herdr' ? a.workspace_id || null : null,
+  };
+};
 const agents = () => cached('agents', 8000, async () => {
-  const out = await run('herdr', ['agent', 'list']);
-  try { return JSON.parse(out).result.agents || []; } catch { return undefined; }
+  const out = await run(join(CEL_ROOT, 'bin/cel'), ['sessions', '--json']);
+  try {
+    const list = JSON.parse(out).result.agents;
+    return Array.isArray(list) ? list.filter((a) => a && typeof a === 'object').map(agentRow) : undefined;
+  } catch { return undefined; }
 }, []);
 
 const wsLabels = () => cached('wslabels', 30000, async () => {
@@ -138,26 +166,29 @@ const worktreeRows = async (w) => {
       const a = ag.find((x) => x.cwd === path);
       rows.push({
         repo: r.name, branch, path,
-        agent: a ? a.agent : null,
-        pane: a ? a.pane_id : null,
-        status: a ? a.agent_status : null,
-        label: a ? labels[a.workspace_id] || branch : branch,
+        agent: a ? a.runtime : null,
+        pane: a ? a.pane : null,
+        status: a ? a.status : null,
+        label: (a && a.herdrWs && labels[a.herdrWs]) || branch,
       });
     }
   }
   return rows;
 };
 
-// Orchestrator-ish agents in this workspace's own dirs (root pane, repo
-// orchestrators, reviewers) - anything promptable that is not a worktree.
+// Orchestrator-ish agents of this workspace (root pane, repo orchestrators,
+// reviewers) - anything promptable that is not a worktree: standing in its
+// directory, or - a Rex agent - recorded as its own (a reviewer stands in its
+// review checkout). A Herdr pane is labelled as Herdr's sidebar names it, a
+// Rex block by its agent's name.
 const wsAgents = async (w) => {
   const ag = await agents();
   const labels = await wsLabels();
   return ag
-    .filter((a) => a.cwd && (a.cwd === w.wsdir || a.cwd.startsWith(w.wsdir + '/')))
+    .filter((a) => (w.wsdir && a.workspace === w.wsdir) || (a.cwd && (a.cwd === w.wsdir || a.cwd.startsWith(w.wsdir + '/'))))
     .map((a) => ({
-      agent: a.agent, status: a.agent_status, cwd: a.cwd, pane: a.pane_id,
-      label: labels[a.workspace_id] || a.pane_id,
+      agent: a.runtime, name: a.name, status: a.status, cwd: a.cwd, pane: a.pane, backend: a.backend,
+      label: a.backend === 'herdr' ? (a.herdrWs && labels[a.herdrWs]) || a.pane : a.name || a.pane,
     }));
 };
 
@@ -374,7 +405,7 @@ const paneNames = async () => {
   const ag = await agents();
   const labels = await wsLabels();
   const m = {};
-  for (const a of ag) m[a.pane_id] = a.name || labels[a.workspace_id] || a.pane_id;
+  for (const a of ag) if (a.pane) m[a.pane] = a.name || (a.herdrWs && labels[a.herdrWs]) || a.pane;
   return m;
 };
 
@@ -736,8 +767,11 @@ const server = createServer(async (req, res) => {
       res.writeHead(204).end();
     } else if (req.method === 'POST' && req.url === '/api/focus') {
       // right-click -> "focus pane": the dashboard says where to look, herdr
-      // does the looking
+      // does the looking - for a Herdr pane only. A Rex agent's
+      // rex/<session>/<block> is never sent to a Herdr control (lib/rex.sh);
+      // the page offers no focus for one, and this says why if asked anyway.
       const { pane } = await readBody(req, 500);
+      if (String(pane || '').startsWith('rex/')) { res.writeHead(400).end('a Rex session has no Herdr pane to focus - open it from Rex'); return; }
       if (!/^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(String(pane || ''))) { res.writeHead(400).end('bad pane id'); return; }
       const out = await run('herdr', ['pane', 'focus', String(pane)], 10000);
       res.writeHead(out === null ? 502 : 200).end(out === null ? 'focus failed' : 'ok');

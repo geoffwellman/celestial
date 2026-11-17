@@ -319,3 +319,27 @@ test_dash_v2page_feature_teams_card_renders_a_fixture_team() {
   if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T"/shots/teams-*.png "$CEL_DASH_SHOTS"/ 2>/dev/null || true; fi
   _vp_down
 }
+
+# Both backends on one page: the fixture fleet with a Rex orchestrator in a
+# workspace only Rex agents occupy (delta), a Rex lane and a Rex reviewer
+# beside the Herdr rows. Every workspace is in the filter and the tagline; a
+# Rex orchestrator opens its room like any other; the drawer offers "open
+# pane" (a Herdr focus) for a Herdr lane and never for a Rex one.
+test_dash_v2page_rex_agents_show_beside_herdr_ones_in_every_workspace() {
+  _vp_boot
+  cp -r "$CEL_ROOT/tests/fixtures/dash-v2" "$T/fx"
+  jq '.orchestrators += [
+      {name: "delta-orch", ws: "delta", status: "idle", backend: "rex", pane: "rex/session:d/block:d"},
+      {name: "widget-ui", ws: "alpha", status: "working", backend: "rex", pane: "rex/session:u/block:u", mode: "solo", product: "widget", lane: "ui"}]
+    | .reviewers = [{name: "widget-pr-12-review", ws: "alpha", status: "working", backend: "rex", pane: "rex/session:r/block:r", repo: "widget", pr: 12}]' \
+    "$CEL_ROOT/tests/fixtures/dash-v2/fleet.json" > "$T/fx/fleet.json"
+  local rc=0; _vp_run backends "$T/fx" || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj '.filter | join(",")')" "alpha,bundle,delta,plane"
+  assert_contains "$(_vpj .tagline)" "9 orchestrators · 4 workspaces"
+  assert_eq "$(_vpj '.rooms | join(",")')" "alpha-orch,bundle-orch,celestial-orch,delta-orch"
+  assert_contains "$(_vpj '.working | join(",")')" "widget-ui"
+  assert_contains "$(_vpj '.working | join(",")')" "widget-pr-12-review"
+  # [shown, enabled] for each drawer's "open pane"
+  assert_eq "$(_vpj '.pane | tostring')" '{"widget-abc-12-colour":[true,true],"widget-ui":[false,false],"widget-pr-12-review":[false,false]}'
+  _vp_down
+}

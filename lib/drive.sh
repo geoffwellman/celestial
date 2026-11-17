@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # `cel drive`: see and drive an orchestrator from one shared core.
 #
-# list/tail/receipt read herdr and the session files (tools/drive/cli.mjs).
+# list/tail/receipt read the agent inventory (`cel sessions --json`: Herdr and
+# managed Rex agents alike) and the session files (tools/drive/cli.mjs).
 # send is MAIL and only mail: `cel inbox send --kind owner --from owner`, then
 # the omp inbox hook delivers it at the next idle point with an empty
 # composer, or as soon as a busy turn ends. Never `herdr agent prompt`, never
@@ -28,8 +29,9 @@ _drive_usage() {
   cat <<'EOS'
 cel drive - see and talk to orchestrators without touching their panes
 
-  cel drive list [--json]                 orchestrators: name, status, runtime,
-                                          workspace, product, session file
+  cel drive list [--json]                 orchestrators, Herdr or Rex: name,
+                                          status, runtime, workspace, product,
+                                          session file (--json: and backend)
   cel drive tail <orch> [--json] [--follow] [--since <entry-id>]
                                           the conversation, normalised and
                                           redacted; --follow survives a restart
@@ -51,8 +53,8 @@ _drive_send() { # <orch> <message> [--workspace w] [--json]
       *) die "cel drive send: unknown argument '$1'" ;;
     esac
   done
-  # The target must be a live orchestrator herdr knows: a typo must not
-  # create a mailbox nobody will ever open.
+  # The target must be a live orchestrator the inventory knows, whichever
+  # backend holds it: a typo must not create a mailbox nobody will ever open.
   local info
   info="$(_drive_node find "$orch")" || die "cel drive send: refusing - '$orch' is not a running orchestrator"
   [ -n "$ws" ] || ws="$(jq -r '.workspace // ""' <<<"$info")"

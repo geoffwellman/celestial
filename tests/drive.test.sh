@@ -128,7 +128,9 @@ console.log([coldBytes <= 2.1e6, cold.every(l => l.startsWith("{")), more.length
   assert_eq "$out" "true true 1 $(( $(jq -nc '{type:"message",id:"x",parentId:null,message:{role:"assistant",content:[{type:"text",text:("y"*400)}]}}' | wc -c) ))"
 }
 
-# ---- CLI: list / tail / send / receipt against a stubbed herdr ----
+# ---- CLI: list / tail / send / receipt against a stubbed inventory ----
+# The roster is `cel sessions --json`: the stub herdr's agents plus the managed
+# Rex receipts under $T/rex (none unless a test records one).
 _drive_fixture() { # -> sets T; herdr stub prints canned agent+pane lists
   T="$(mktemp -d)"; mkdir -p "$T/bin" "$T/inbox" "$T/ws/alpha/repos/widget"
   cp "$FX/omp.jsonl" "$T/session.jsonl"
@@ -152,9 +154,9 @@ EOF
   chmod +x "$T/bin/herdr"
   printf 'workspaces:\n  alpha:\n    path: %s\n' "$T/ws/alpha" > "$T/registry.yaml"
 }
-_cel() { PATH="$T/bin:$PATH" CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$T/registry.yaml" "$CEL_ROOT/bin/cel" "$@"; }
+_cel() { PATH="$T/bin:$PATH" CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$T/registry.yaml" CEL_REX_STATE="$T/rex" "$CEL_ROOT/bin/cel" "$@"; }
 
-test_drive_list_reads_herdr_not_fleet() {
+test_drive_list_reads_the_inventory_not_fleet() {
   command -v node >/dev/null || return 0
   _drive_fixture
   local out; out="$(_cel drive list --json)"
@@ -198,7 +200,7 @@ _drive_fixture_procs() {
 # So the follower gets its own session (pid == process group) and teardown
 # stops and joins the whole group.
 _drive_follow_start() { # <tail args...> -> prints the group leader pid; output in $T/out
-  setsid env PATH="$T/bin:$PATH" CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$T/registry.yaml" CEL_DRIVE_POLL_MS=100 \
+  setsid env PATH="$T/bin:$PATH" CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$T/registry.yaml" CEL_REX_STATE="$T/rex" CEL_DRIVE_POLL_MS=100 \
     "$CEL_ROOT/bin/cel" drive tail widget-orch --json --follow "$@" > "$T/out" 2>&1 &
   printf '%s' "$!"
 }
@@ -250,6 +252,48 @@ test_drive_send_refuses_an_unknown_orchestrator() {
   assert_fails _cel drive send nobody-orch "hi"
   [ ! -s "$T/inbox/alpha.jsonl" ] || { echo "mailed a stranger"; rm -rf "$T"; return 1; }
   rm -rf "$T"
+}
+
+# A Rex orchestrator is a room like a Herdr one: listed from the one inventory
+# (`cel sessions --json`), its conversation read from the session its receipt
+# records, and owner mail to it accepted - never a keystroke into either.
+test_drive_lists_tails_and_mails_a_rex_orchestrator() {
+  command -v node >/dev/null || return 0
+  _drive_fixture
+  mkdir -p "$T/ws/alpha/repos/gadget" "$T/rex"
+  cp "$FX/omp.jsonl" "$T/rex-session.jsonl"
+  local start; start="$(. "$CEL_ROOT/lib/rex.sh" && _rex_pid_start "$$")"
+  jq -n --arg c "$T/ws/alpha/repos/gadget" --arg w "$T/ws/alpha" --arg s "$T/rex-session.jsonl" --argjson pid "$$" --arg ps "$start" \
+    '{name: "gadget-orch", agent: "omp", agent_status: "working", cwd: $c, workspace: $w, role: "solo", backend: "rex",
+      rex_session: "session:g", rex_block: "block:g", pane_id: "rex/session:g/block:g", pid: $pid, pid_start: $ps,
+      agent_session: {value: $s}}' > "$T/rex/gadget-orch.json"
+  local out; out="$(_cel drive list --json)"
+  assert_eq "$(jq -r '[.[] | "\(.name):\(.backend):\(.workspace):\(.product):\(.status)"] | sort | join(",")' <<<"$out")" \
+    "gadget-orch:rex:alpha:gadget:working,widget-orch:herdr:alpha:widget:idle"
+  assert_eq "$(jq -r '.[] | select(.name == "gadget-orch") | "\(.session) \(.pane)"' <<<"$out")" "$T/rex-session.jsonl rex/session:g/block:g"
+  # a Herdr pane's sidebar label is Herdr's; a Rex block has none
+  assert_eq "$(jq -r '[.[] | "\(.name)=\(.label)"] | sort | join(",")' <<<"$out")" "gadget-orch=null,widget-orch=widget orchestrator"
+  out="$(_cel drive tail gadget-orch --json)"
+  assert_eq "$(jq -sr 'map(.kind)|join(",")' <<<"$out")" "user,thinking,assistant,tool,compaction,system,assistant"
+  local id; id="$(_cel drive send gadget-orch "ship WG-10" --json 2>/dev/null | jq -r .id)"
+  [ -n "$id" ] && [ "$id" != null ] || { echo "no id"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r 'select(.id=="'"$id"'") | "\(.from) \(.kind) \(.to)"' "$T/inbox/alpha.jsonl")" "owner owner gadget-orch"
+  if grep -Eq 'prompt|send-keys|send-text' "$T/herdr.log"; then echo "typed into a pane"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+
+# A Rex receipt records a native session as its value alone: an absolute path
+# is the transcript, a Claude agent's id is under its project directory, and
+# any other id (an OpenCode ses_) names no file the drive reads.
+test_drive_session_path_of_a_rex_receipt() {
+  command -v node >/dev/null || return 0
+  local out
+  out="$(_tr 'console.log(JSON.stringify([
+  T.sessionPath({value: "/s/omp.jsonl"}, "/w/a", "omp", "/h"),
+  T.sessionPath({value: "0b0e1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d"}, "/w/a.b", "claude", "/h"),
+  T.sessionPath({value: "ses_abc"}, "/w/a", "opencode", "/h"),
+  T.sessionPath({kind: "path", value: "/s/herdr.jsonl"}, "/w/a", "omp", "/h")]));')"
+  assert_eq "$out" '["/s/omp.jsonl","/h/.claude/projects/-w-a-b/0b0e1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d.jsonl",null,"/s/herdr.jsonl"]'
 }
 
 # A secret cut in half by the 80-char tool summary must still
