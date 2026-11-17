@@ -714,6 +714,15 @@ root gets one summary. Reviewers never resume: they, and agents launched
 before relaunch lines were recorded, are listed in the summary with
 the command to run.
 
+A resume that only ran out of time - an OpenCode launcher refusing on one of
+its own timeouts (`server_not_ready`, `guard_not_loaded`, `admission_timeout`,
+`models_not_admitted`, a `*_request_timeout`), as a cold box after an upgrade
+can make it - is run once more after `CEL_REX_RESUME_RETRY_SECS` (60), unless
+the agent is live again by then or its retirement has begun. If the retry
+also fails, the summary reports it once and says it was retried. A refusal
+for any other reason (guard, auth, scope, session, a veto or a duplicate) is
+reported without a retry.
+
 Before resuming, the restore repairs what a restart leaves behind. The new
 server restores the old sessions as empty shells under the same labels: for
 each agent being resumed, the sessions with its label are closed only when at

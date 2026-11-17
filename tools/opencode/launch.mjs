@@ -10,6 +10,16 @@ import { validateConfig } from './config.mjs';
 import { catalogModels, selectionAllowed, validateNativeInventory, DEFAULT_SELECTION } from './model-contract.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Every request's own cap, but for the location boot below.
+const REQUEST_MS = 2000;
+// THE GUARD'S LOCATION BOOT. The first location-scoped request (the plugin
+// inventory) boots the location and loads every plugin inside it, answering
+// only then. After a Rex restart or upgrade every agent relaunches at once on
+// a cold box: that request outlasted the 2s request cap on 3 Nov, 4 Nov and
+// 17 Nov, and the same relaunch a minute later succeeded each time. So it may
+// take up to this long - one answer, however slow, or the guard seen active -
+// and refuses (fail-closed, no TUI) once it runs out.
+export const PLUGIN_WAIT_MS = 45000;
 const pluginDirectory = fileURLToPath(new URL('./plugin', import.meta.url));
 const exited = child => child.exitCode !== null || child.signalCode !== null;
 
@@ -149,13 +159,13 @@ export async function launch(binary, suppliedArgs, env = process.env) {
     const headers = { authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}` };
     // `name` is this file's name for the route, never the route itself: the
     // session route carries the native session ID.
-    const get = async (name, route, location = false) => {
+    const get = async (name, route, location = false, cap = REQUEST_MS) => {
       live();
       const url = new URL(route, endpoint);
       if (location) url.searchParams.set('location[directory]', directory);
       let response;
       try {
-        response = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(Math.max(1, Math.min(2000, deadline - Date.now()))) });
+        response = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(Math.max(1, Math.min(cap, deadline - Date.now()))) });
       } catch (error) {
         refuse(`${name}_request_${error?.name === 'TimeoutError' ? 'timeout' : 'failed'}`);
       }
@@ -167,8 +177,9 @@ export async function launch(binary, suppliedArgs, env = process.env) {
     const health = await get('info', '/api/info');
     if (health?.version !== '2.2.5' || health.pid !== server.pid) refuse('server_identity');
     waiting = 'guard_not_loaded';
+    deadline = Date.now() + PLUGIN_WAIT_MS;
     while (true) {
-      const inventory = await get('plugin', '/api/plugin', true);
+      const inventory = await get('plugin', '/api/plugin', true, PLUGIN_WAIT_MS);
       if (inventory?.location?.directory !== directory || !Array.isArray(inventory.data)) refuse('plugin_location');
       const matching = inventory.data.filter(plugin => plugin?.id === 'celestial' || plugin?.source?.path === pluginDirectory);
       if (matching.length > 1) refuse('guard_ambiguous');
@@ -180,6 +191,7 @@ export async function launch(binary, suppliedArgs, env = process.env) {
       live(); await sleep(100);
     }
     waiting = 'admission_timeout';
+    deadline = Date.now() + 15000;
     const migration = await get('migration', '/api/experimental/migration/v1');
     if (migration?.status !== 'completed') refuse('migration_incomplete');
     if (session !== undefined) {
