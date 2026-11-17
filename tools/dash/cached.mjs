@@ -7,10 +7,11 @@
 // - an answer older than ten budgets (a dashboard nobody asked for an hour)
 //   is too old to serve at once: the ask waits for the read, like a first.
 // A fetcher answers undefined when its upstream failed: that is never kept as
-// the answer - the last good value stands (`empty` when there is none) - and
-// it (or a throw) holds off the next try for the same budget, at most a
-// minute. A fetcher that throws keeps the last good answer too; only an ask
-// with no good answer at all sees the throw.
+// the answer - the last good value stands (`empty` when there is none). A
+// fetcher that throws keeps the last good answer too; only an ask with no
+// good answer at all sees the throw. While a last good value is served, a
+// failure holds off the next try for the same budget, at most a minute; with
+// none, nothing is held off - the next ask tries again at once.
 export const createCached = () => {
   const cache = {};
   const cached = (key, ttlMs, fn, empty) => {
@@ -18,7 +19,7 @@ export const createCached = () => {
     const answer = () => (e.v === undefined ? empty : e.v);
     const refresh = () => {
       if (!e.p) {
-        const failed = () => { e.t = Date.now(); e.hold = Math.min(ttlMs, 60000); };
+        const failed = () => { if (e.v !== undefined) { e.t = Date.now(); e.hold = Math.min(ttlMs, 60000); } };
         e.p = Promise.resolve().then(fn).then((v) => {
           if (v === undefined) { failed(); return answer(); }
           e.t = Date.now(); e.good = e.t; e.v = v; e.hold = ttlMs; return v;
@@ -27,7 +28,7 @@ export const createCached = () => {
       return e.p;
     };
     const due = Date.now() - e.t >= e.hold;
-    if (e.v === undefined) return due ? refresh() : Promise.resolve(empty);
+    if (e.v === undefined) return refresh();
     if (!due) return Promise.resolve(e.v);
     if (Date.now() - e.good >= 10 * ttlMs) return refresh().catch(() => answer());
     refresh().catch(() => {});

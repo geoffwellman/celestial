@@ -135,3 +135,21 @@ console.log(r.join('|'));
 ")"
   assert_eq "$out" "old|old|mid|new|new"
 }
+
+# With no last good value a failure holds nothing off: the next ask reads
+# again at once (a cold throw is the caller's 500, and the next ask survives).
+test_dash_cached_cold_failure_retries_at_once() {
+  local out; out="$(_df_node "
+import { createCached } from '$CEL_ROOT/tools/dash/cached.mjs';
+const { cached } = createCached();
+let mode = 'throw', calls = 0;
+const fn = async () => { calls++; if (mode === 'throw') throw new Error('x'); if (mode === 'undef') return undefined; return 'good'; };
+const ask = () => cached('k', 60000, fn, 'empty');
+const r = [];
+try { await ask(); r.push('no-throw'); } catch { r.push('threw'); }
+mode = 'undef'; r.push(await ask());
+mode = 'ok'; r.push(await ask(), calls);
+console.log(r.join('|'));
+")"
+  assert_eq "$out" "threw|empty|good|3"
+}
