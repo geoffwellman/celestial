@@ -197,6 +197,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const feedDrop = () => feeds.clear();
   const wsKey = (wss) => wss.map((w) => w.name).join(',');
 
+  // the roster (server.mjs `agents`: Herdr and Rex, one row shape), served
+  // warm: past 8 s a refresh runs behind the last answer
   const agents = async () => (await slow('agents', 8000, agentsCold)) || [];
   const ghParse = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
   const ghList = async (slug, st, fields) => {
@@ -378,7 +380,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
 
   // ---- who each live agent is ---------------------------------------------
   // By the identity cel gave it - a directory and a cel_alias_norm name -
-  // never by a name's shape alone:
+  // never by a name's shape alone, and never by which terminal holds it (a
+  // row says its backend, Herdr or Rex, and keeps its own address):
   //  - a solo LANE (cel run solo --lane) stands in
   //    <ws>/.cel/solo/<product>/lane-<lane> and is named <product>-<lane>;
   //  - a reviewer (cel run reviewer) stands in its review checkout of
@@ -415,8 +418,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const ag = await agents();
     const mains = []; const lanes = []; const reviewers = []; const rest = []; const keys = [];
     for (const a of ag) {
-      const cwd = a.cwd || '';
-      const me = { name: String(a.name || ''), status: a.agent_status || 'unknown', pane: a.pane_id || null, cwd };
+      const cwd = a.cwd;
+      const me = { name: a.name, status: a.status, pane: a.pane, backend: a.backend, cwd };
       if (!me.name) continue;
       // a pane whose directory was deleted is no live lane (lib/mode.sh)
       const lane = [];
@@ -706,7 +709,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return { ...row, product: t.product, lead, state, repos: Array.isArray(t.repos) ? t.repos : [], created: iso(t.created), members, candidates, verdicts, owes };
   };
   const teams = async (wss) => {
-    const live = new Map((await agents()).map((a) => [String(a.name || ''), a.agent_status || 'unknown']));
+    const live = new Map((await agents()).map((a) => [a.name, a.status]));
     const now = Date.now();
     const items = [];
     for (const w of wss) {
@@ -1014,13 +1017,14 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
 
   // ---- drive: an orchestrator's room ---------------------------------------
   // The room reads the conversation itself, through the drive core: who is
-  // running from `cel drive list` (herdr, never `cel fleet`, whose cold read
-  // is slow under load), the transcript from a per-file offset tailer kept
-  // in this process. A poll reads only the bytes written since the last one;
-  // a large session is never reparsed. A room nobody has looked at for ten
-  // minutes is forgotten, so this costs nothing while nobody watches.
+  // running from `cel drive list` (the one inventory, Herdr and Rex alike;
+  // never `cel fleet`, whose cold read is slow under load), the transcript
+  // from a per-file offset tailer kept in this process. A poll reads only the
+  // bytes written since the last one; a large session is never reparsed. A
+  // room nobody has looked at for ten minutes is forgotten, so this costs
+  // nothing while nobody watches.
   const driveList = () => slow('drive:list', 4000, async () => {
-    const out = await run(CEL(), ['drive', 'list', '--json'], 10000);
+    const out = await run(CEL(), ['drive', 'list', '--json'], 20000);
     if (out === null) return null;
     try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; }
   });
@@ -1255,7 +1259,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       return true;
     }
     if (req.method !== 'GET') { res.writeHead(404).end('not found'); return true; }
-    if (name === 'drive/list') { const l = await driveList(); if (!l) { res.writeHead(502).end('herdr did not answer'); return true; } json(res, 200, l); return true; }
+    if (name === 'drive/list') { const l = await driveList(); if (!l) { res.writeHead(502).end('the agent inventory did not answer'); return true; } json(res, 200, l); return true; }
     if (name === 'drive/tail') {
       const orch = url.searchParams.get('orch') || '';
       if (!NAME.test(orch)) { res.writeHead(400).end('bad orch'); return true; }

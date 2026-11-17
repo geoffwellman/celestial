@@ -470,14 +470,18 @@ function renderThread(){
 }
 
 // ---- agent drawer ----------------------------------------------------------
+// "open pane" is a Herdr focus (/api/focus): offered for a Herdr row only. A
+// Rex agent's address is a Rex block, which no Herdr control is ever sent; the
+// drawer says it is a Rex session instead.
 var DRAWER=null;
 function findAgent(name){
   var o=orchs().filter(function(x){return x.name===name})[0];
-  if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,pr:prOf(o),now:o.mode==='solo'?o.status+' · solo '+soloWhat(o):o.status};
+  if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,backend:o.backend||'herdr',pr:prOf(o),now:o.mode==='solo'?o.status+' · solo '+soloWhat(o):o.status};
   var r=revs().filter(function(x){return x.name===name})[0];
-  if(r)return {name:name,ws:r.ws,status:r.status,pane:r.pane,pr:prOf(r),now:'reviewing '+r.repo+'#'+r.pr};
-  return {name:name,ws:'',status:'unknown',pane:null,pr:null,now:''};
+  if(r)return {name:name,ws:r.ws,status:r.status,pane:r.pane,backend:r.backend||'herdr',pr:prOf(r),now:'reviewing '+r.repo+'#'+r.pr};
+  return {name:name,ws:'',status:'unknown',pane:null,backend:'',pr:null,now:''};
 }
+function herdrPane(a){return a.backend==='herdr'&&!!a.pane}
 function openDrawer(name){
   // an orchestrator is opened as its room, wherever it is named; a solo lane
   // has no room, so it opens here like any other agent
@@ -487,18 +491,18 @@ function renderDrawer(){
   if(!DRAWER)return;var a=findAgent(DRAWER);
   var mail=((S&&S.inbox)||[]).filter(function(x){return x.to===a.name||x.toName===a.name});
   var lines=feedItems('activity').filter(function(x){return x.text.indexOf(a.name)>=0||(a.pr&&x.text.indexOf('#'+a.pr.number)>=0)}).slice(0,5);
-  var html='<div class="sub">'+esc(a.ws)+'</div><h4>Now</h4><div>'+esc(a.status||'')+(a.now&&a.now!==a.status?' · '+esc(a.now):'')+'</div>'+
+  var html='<div class="sub">'+esc(a.ws)+(a.backend==='rex'?' · a Rex session':'')+'</div><h4>Now</h4><div>'+esc(a.status||'')+(a.now&&a.now!==a.status?' · '+esc(a.now):'')+'</div>'+
     '<h4>Last lines</h4><pre class="mono tail">'+(lines.length?lines.map(function(x){return hhmm(x.ts)+' '+esc(x.text)}).join('\n'):'nothing recorded yet')+'</pre>'+
     '<h4>PR</h4><div>'+(a.pr?'<a href="'+esc(a.pr.url)+'" target="_blank" rel="noopener">'+esc(a.pr.repo+'#'+a.pr.number)+'</a> '+esc(a.pr.title)+' <span class="sub">'+esc(a.pr.review||'')+'</span>':'no PR yet')+'</div>'+
     '<h4>Inbox</h4><div>'+(mail.length?mail.slice(-3).map(function(x){return '<div class="sub">'+hhmm(x.ts)+' '+esc(x.fromName||x.from)+': '+esc(String(x.message).slice(0,140))+'</div>'}).join(''):'<span class="sub">nothing addressed to it</span>')+'</div>';
   $('dname').textContent=a.name;
   var di=$('dinfo');if(di._html!==html){di._html=html;di.innerHTML=html}
-  $('dpane').disabled=!a.pane;
+  var dp=$('dpane');dp.style.display=a.backend==='rex'?'none':'';dp.disabled=!herdrPane(a);
 }
 $('dclose').onclick=function(){DRAWER=null;$('drawer').classList.remove('open')};
 $('dsend').onclick=async function(){var v=$('dmsg').value.trim();if(!v){toast('type a message',false);return}
   var a=findAgent(DRAWER);var r=await act('message',a.name,{text:v,kind:'task',urgent:false,ws:a.ws});if(r.ok)$('dmsg').value=''};
-$('dpane').onclick=async function(){var a=findAgent(DRAWER);if(!a.pane)return;var r=await post('/api/focus',{pane:a.pane});toast(r.ok?'focused '+a.name:r.text,r.ok)};
+$('dpane').onclick=async function(){var a=findAgent(DRAWER);if(!herdrPane(a))return;var r=await post('/api/focus',{pane:a.pane});toast(r.ok?'focused '+a.name:r.text,r.ok)};
 
 // ---- expanded views ----------------------------------------------------------
 var OV=null;          // id of the expanded card

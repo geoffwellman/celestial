@@ -199,10 +199,15 @@ export class Tailer {
 
 // ---- where a pane's session lives -------------------------------------
 // omp/pi: herdr gives the path. claude: only an id; the file sits under the
-// project dir named by the cwd with / and . turned into -.
-export function sessionPath(agentSession, cwd, home = os.homedir()) {
-  if (!agentSession || !agentSession.value) return null;
-  if (agentSession.kind === "path") return agentSession.value;
-  if (agentSession.kind === "id" && cwd) return path.join(home, ".claude", "projects", cwd.replace(/[\/.]/g, "-"), agentSession.value + ".jsonl");
+// project dir named by the cwd with / and . turned into -. A Rex receipt
+// records the value alone ({value}, lib/rex.sh), so its kind is read off the
+// value: an absolute path, or a claude agent's id. Any other id (an OpenCode
+// ses_) names no file the drive reads.
+export function sessionPath(agentSession, cwd, runtime, home = os.homedir()) {
+  const v = agentSession && agentSession.value;
+  if (!v || typeof v !== "string") return null;
+  const kind = agentSession.kind || (path.isAbsolute(v) ? "path" : runtime === "claude" ? "id" : null);
+  if (kind === "path") return v;
+  if (kind === "id" && cwd) return path.join(home, ".claude", "projects", cwd.replace(/[\/.]/g, "-"), v + ".jsonl");
   return null;
 }

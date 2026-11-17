@@ -3,17 +3,22 @@
 // `cel inbox send` and nothing else, so the delivery rules stay in the omp
 // inbox hook - the only code that can see isIdle() and the composer.
 //
-// Who is running comes from `herdr agent list` + `herdr pane list`, never
-// `cel fleet`: a cold fleet read can take tens of seconds under load, and a
-// chat view cannot wait on the whole fleet to show one conversation.
+// Who is running comes from `cel sessions --json` - lib/rex.sh's
+// cel_agent_list, Herdr's agents and every managed Rex session, the one
+// inventory - with `herdr pane list` only for what a Herdr pane adds (its
+// sidebar label, anything its agent row leaves out). Never `cel fleet`: a
+// cold fleet read can take tens of seconds under load, and a chat view cannot
+// wait on the whole fleet to show one conversation.
 import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Tailer, Normaliser, parseLines, sessionPath } from "./transcript.mjs";
 
 const die = (m, rc = 1) => { process.stderr.write(`cel drive: ${m}\n`); process.exit(rc); };
-const herdr = (...args) => new Promise((res) => {
-  execFile("herdr", args, { timeout: 5000, maxBuffer: 64 << 20 }, (err, out) => {
+const CEL = path.join(process.env.CEL_ROOT || path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".."), "bin", "cel");
+const readJson = (cmd, args, timeout) => new Promise((res) => {
+  execFile(cmd, args, { timeout, maxBuffer: 64 << 20 }, (err, out) => {
     if (err) return res(null);
     try { res(JSON.parse(out)); } catch { res(null); }
   });
@@ -37,24 +42,28 @@ function placeOf(cwd, wss) {
 const isOrch = (n) => typeof n === "string" && (/-orch$/.test(n) || n === "root");
 
 async function list() {
-  const [agents, panes] = await Promise.all([herdr("agent", "list"), herdr("pane", "list")]);
+  const [agents, panes] = await Promise.all([readJson(CEL, ["sessions", "--json"], 15000), readJson("herdr", ["pane", "list"], 5000)]);
   const arr = agents && agents.result && Array.isArray(agents.result.agents) ? agents.result.agents : null;
   if (!arr) return null;
   const byPane = new Map(((panes && panes.result && panes.result.panes) || []).map((p) => [p.pane_id, p]));
   const wss = workspaces();
-  return arr.filter((a) => isOrch(a.name)).map((a) => {
-    const p = byPane.get(a.pane_id) || {};
+  return arr.filter((a) => a && isOrch(a.name)).map((a) => {
+    const backend = a.backend || "herdr";
+    // a Rex block (rex/<session>/<block>) is no Herdr pane
+    const p = (backend === "herdr" && byPane.get(a.pane_id)) || {};
+    const runtime = a.agent || p.agent || null;
+    const cwd = a.cwd || p.cwd || null;
     return {
-      name: a.name, pane: a.pane_id, runtime: a.agent || p.agent || null,
+      name: a.name, backend, pane: a.pane_id, runtime,
       status: a.agent_status || p.agent_status || null,
-      session: sessionPath(a.agent_session || p.agent_session, a.cwd || p.cwd),
-      cwd: a.cwd || p.cwd || null, label: p.label || null, ...placeOf(a.cwd || p.cwd, wss),
+      session: sessionPath(a.agent_session || p.agent_session, cwd, runtime),
+      cwd, label: p.label || null, ...placeOf(cwd, wss),
     };
   });
 }
 async function find(name) {
   const all = await list();
-  if (!all) die("herdr did not answer `agent list` - unknown, not empty", 3);
+  if (!all) die("the agent inventory (cel sessions) did not answer - unknown, not empty", 3);
   const o = all.find((x) => x.name === name);
   if (!o) die(`no orchestrator named '${name}' (cel drive list)`, 2);
   return o;
@@ -80,7 +89,7 @@ async function tail(args) {
   const si = args.indexOf("--since"); let since = si >= 0 ? args[si + 1] : null;
   const emit = (e) => process.stdout.write((json ? JSON.stringify(e) : fmt(e)) + "\n");
   let o = await find(name);
-  if (!o.session) die(`${name}: herdr names no session file`, 3);
+  if (!o.session) die(`${name}: its inventory row names no session file`, 3);
   let t = new Tailer(o.session);
   const first = parseLines(t.poll(), o.runtime);
   let start = 0;
@@ -156,7 +165,7 @@ async function receipt(args) {
 const [cmd, ...rest] = process.argv.slice(2);
 if (cmd === "list") {
   const all = await list();
-  if (!all) die("herdr did not answer `agent list` - unknown, not empty", 3);
+  if (!all) die("the agent inventory (cel sessions) did not answer - unknown, not empty", 3);
   if (rest.includes("--json")) process.stdout.write(JSON.stringify(all) + "\n");
   else for (const o of all) process.stdout.write(`${o.name}\t${o.status}\t${o.runtime}\t${o.workspace || "-"}\t${o.session || "-"}\n`);
 } else if (cmd === "find") {

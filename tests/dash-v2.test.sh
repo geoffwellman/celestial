@@ -60,7 +60,10 @@ EOF
     printf '{"ts":"%s","load":1.5,"mem_pct":40,"swap_pct":2,"panes":[{"cwd":"%s/wt/widget-ok","status":"working"}]}\n' "$(_v2_ago 7000)" "$T"
     printf '{"ts":"%s","load":2.5,"mem_pct":50,"swap_pct":3,"panes":[{"cwd":"%s/wt/widget-ok","status":"idle"}]}\n' "$(_v2_ago 600)" "$T"
   } > "$T/state/samples.jsonl"
-  export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_REVIEW_DIR="$T/reviews"
+  # CEL_REX_STATE: this fixture's own managed-Rex receipts (none until a test
+  # adds one), so the roster - `cel sessions --json` - is the stub herdr's
+  # plus exactly what the test records
+  export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_REVIEW_DIR="$T/reviews" CEL_REX_STATE="$T/rex"
   if [ -n "${_V2_FAIL_GH:-}" ]; then cp "$T/bin/gh" "$T/bin/gh.ok"; printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/gh"; chmod +x "$T/bin/gh"; fi
   export CEL_DASH_ACTIVITY_KEEP=5
   export CEL_SAMPLES_FILE="$T/state/samples.jsonl" CEL_DASH_STATE_DIR="$T/state" CEL_DASH_CEL="$T/bin/cel"
@@ -430,6 +433,77 @@ test_v2_fleet_lists_orchestrators_and_prs_across_workspaces() {
   f="$(_v2_get "$(_v2_url 'fleet?ws=bundle')")"
   assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[].name] | join(",")')" "bundle-orch"
   assert_eq "$(printf '%s' "$f" | jq '.prs | length')" "0"
+  _v2_down
+}
+
+# A managed Rex agent exactly as lib/rex.sh records one: a receipt naming a
+# live process (this test's own shell, by pid and start time), so
+# cel_agent_list - `cel sessions --json` - lists it beside Herdr's agents.
+_v2_rex() { # <name> <runtime> <status> <cwd> <wsdir> <role> [extra json object]
+  local start x="${7:-}"
+  [ -n "$x" ] || x='{}'
+  start="$(. "$CEL_ROOT/lib/rex.sh" && _rex_pid_start "$$")" || return 1
+  mkdir -p "$CEL_REX_STATE"
+  jq -n --arg n "$1" --arg a "$2" --arg s "$3" --arg c "$4" --arg w "$5" --arg r "$6" \
+    --argjson pid "$$" --arg ps "$start" --argjson x "$x" \
+    '{name: $n, agent: $a, agent_status: $s, cwd: $c, workspace: $w, role: $r, backend: "rex",
+      rex_session: ("session:" + $n), rex_block: "block:1", pane_id: ("rex/session:" + $n + "/block:1"),
+      pid: $pid, pid_start: $ps} + $x' > "$CEL_REX_STATE/$1.json"
+}
+
+# The roster is every live agent whatever terminal holds it - Herdr's and each
+# managed Rex session's, `cel sessions --json` - never `herdr agent list`
+# alone, which left every Rex agent off the dashboard. A Rex orchestrator, lane
+# and reviewer are listed beside a Herdr orchestrator, each in its own
+# workspace and saying which backend holds it; a Herdr-only control (focus a
+# pane) is refused for a Rex address and still works for a Herdr one.
+test_v2_rex_agents_are_orchestrators_lanes_reviewers_and_workspaces() {
+  _v2_boot
+  mkdir -p "$T/alpha/.cel/solo/widget/lane-ui" "$T/reviews/widget-pr-9" "$T/core" "$T/alpha/.cel/teams/feat"
+  cat > "$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/herdr.argv"
+printf '%s\n' '{"result":{"agents":[{"name":"alpha-orch","agent":"omp","agent_status":"working","cwd":"$T/alpha","pane_id":"w0:p1","workspace_id":"w0"}],"workspaces":[]}}'
+EOF
+  _v2_rex bundle-orch omp idle "$T/bundle" "$T/bundle" orchestrator
+  _v2_rex widget-ui claude working "$T/alpha/.cel/solo/widget/lane-ui" "$T/alpha" solo
+  _v2_rex widget-pr-9-review pi working "$T/reviews/widget-pr-9" "$T/alpha" reviewer '{"repo":"widget","pr":"9"}'
+  _v2_rex core omp idle "$T/core" "$T/core" core
+  local f l
+  f="$(_v2_get "$(_v2_url 'fleet?ws=all')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[] | "\(.name)@\(.ws):\(.backend):\(.lane // "-"):\(.status)"] | sort | join(",")')" \
+    "alpha-orch@alpha:herdr:-:working,bundle-orch@bundle:rex:-:idle,widget-ui@alpha:rex:ui:working"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.reviewers[] | "\(.name)@\(.ws):\(.backend):\(.repo)#\(.pr):\(.branch)"] | join(",")')" \
+    "widget-pr-9-review@alpha:rex:widget#9:ABC-3-clash"
+  # each keeps its own address: a Herdr pane id, or its Rex block
+  assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[] | select(.name == "alpha-orch" or .name == "bundle-orch") | .pane] | sort | join(" ")')" \
+    "rex/session:bundle-orch/block:1 w0:p1"
+  # every workspace has its agents; core belongs to none
+  assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[].ws] | unique | join(",")')" "alpha,bundle"
+  assert_eq "$(printf '%s' "$f" | jq '[.orchestrators[], .reviewers[] | select(.name == "core")] | length')" "0"
+  # one workspace: only its own, whichever backend
+  assert_eq "$(_v2_get "$(_v2_url 'fleet?ws=bundle')" | jq -r '[.orchestrators[].name] | join(",")')" "bundle-orch"
+  # Today: the Rex lane is a row of its own, and every workspace is listed
+  l="$(_v2_get "$(_v2_url 'lanes?ws=all')")"
+  assert_eq "$(printf '%s' "$l" | jq -r '[.workspaces[] | .ws + ":" + ([.lanes[].agent] | join("+"))] | join(",")')" "alpha:widget-ui,bundle:"
+  # a team member is live when a Rex agent of its alias runs
+  jq -n '{feature: "feat", product: "widget", members: [{alias: "widget-ui", role: "builder", state: "working"}]}' > "$T/alpha/.cel/teams/feat/team.json"
+  assert_eq "$(_v2_get "$(_v2_url 'teams?ws=alpha')" | jq -r '.items[0].members[0].live')" "working"
+  # /api/state's agents of a workspace: in its directory, or a Rex agent
+  # whose receipt names it (a reviewer stands in its review checkout)
+  assert_eq "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state" | jq -r '[.agents[] | "\(.name):\(.backend)"] | sort | join(",")')" \
+    "alpha-orch:herdr,widget-pr-9-review:rex,widget-ui:rex"
+  # focus is Herdr's: a Rex address never reaches herdr, a Herdr pane does
+  local code
+  code="$(curl -s -m 20 -o "$T/focus.out" -w '%{http_code}' -X POST -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" \
+    -d '{"pane":"rex/session:widget-ui/block:1"}' "http://127.0.0.1:$DASH_PORT/api/focus")"
+  assert_eq "$code" "400"
+  assert_contains "$(cat "$T/focus.out")" "Rex"
+  code="$(curl -s -m 20 -o "$T/focus.out" -w '%{http_code}' -X POST -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" \
+    -d '{"pane":"w0:p1"}' "http://127.0.0.1:$DASH_PORT/api/focus")"
+  assert_eq "$code" "200"
+  assert_contains "$(cat "$T/herdr.argv")" "pane focus w0:p1"
+  if grep -q 'rex/' "$T/herdr.argv"; then echo "a Rex address reached herdr"; _v2_down; return 1; fi
   _v2_down
 }
 

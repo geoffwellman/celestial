@@ -377,6 +377,18 @@ const main = async () => {
       await shot('teams-1400.png', 1400);
     }
 
+    if (scenario === 'backends') {
+      // what the page makes of Herdr and Rex rows together
+      out.filter = await evaluate(`[].slice.call(document.getElementById('wsf').options).map(function(o){return o.value}).filter(function(v){return v!=='all'})`);
+      out.tagline = await evaluate(`document.getElementById('tagline').textContent`);
+      out.rooms = await evaluate(`[].slice.call(document.querySelectorAll('#grid .w[data-id=orchs] b[data-room]')).map(function(e){return e.dataset.room}).sort()`);
+      out.working = await evaluate(`[].slice.call(document.querySelectorAll('#grid .w[data-id=working] [data-agent]')).map(function(e){return e.dataset.agent})`);
+      out.pane = {};
+      for (const name of ['widget-abc-12-colour', 'widget-ui', 'widget-pr-12-review']) {
+        out.pane[name] = await evaluate(`(function(){openDrawer(${JSON.stringify(name)});var b=document.getElementById('dpane');var r=[b.offsetParent!==null,!b.disabled];document.getElementById('dclose').click();return r})()`);
+      }
+    }
+
     if (scenario === 'shots') {
       await shot('v2-1400.png', 1400);
       await shot('v2-390.png', 390);
