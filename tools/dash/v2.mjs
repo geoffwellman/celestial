@@ -990,11 +990,14 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         const used = Math.round(Number(w.used_pct) || 0);
         const projected = project(used, len, resets, now);
         // a last-known window (the read failed, the window still running)
-        // keeps its number and counts: it is said to be last known, not fresh
-        const known = w.stale === true ? { last_known: true, read_at: isoOf(epochMs(w.read_at)) } : {};
+        // keeps its number and counts: it is said to be last known, not fresh.
+        // Once it is `unread` (lib/quota.sh: last read longer ago than
+        // CEL_SUB_UNREAD_AFTER_H) the number is a floor, not a pace - drawn,
+        // never flagged at risk, the same rule as quota_at_risk.
+        const known = w.stale === true ? { last_known: true, read_at: isoOf(epochMs(w.read_at)), ...(w.unread === true ? { unread: true } : {}) } : {};
         return { ...base, ...known, used_pct: used, resets: isoOf(resets),
           projected_pct: projected, level: level(Math.max(used, projected >= 100 ? 75 : 0)),
-          at_risk: projected >= 100 || used >= 95 };
+          at_risk: w.unread !== true && (projected >= 100 || used >= 95) };
       }).sort((a, b) => (a.len - b.len) || String(a.scope || '').localeCompare(String(b.scope || '')));
       for (const w of windows) {
         if (w.at_risk) atRisk.push({ who, provider: s.provider, window: w.label, used_pct: w.used_pct, projected_pct: w.projected_pct, resets: w.resets });

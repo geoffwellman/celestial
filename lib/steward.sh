@@ -1565,9 +1565,14 @@ _steward_orch_pool() {
 # at once with what is still at risk, or comes down - and a fresh reading of
 # the new window over the line raises it again without waiting out the
 # repeat window.
+#
+# AN ACCOUNT NOBODY CAN READ IS NOT FORECAST (AH-261118). Its last known
+# number, hours old, is a floor and not a pace: the item says instead that it
+# has not been read since then, why, and what to do (quota_unread) - and stays
+# open on that alone until a reading comes back.
 _steward_usage_pace() {
   # shellcheck source=lib/quota.sh
-  command -v quota_at_risk >/dev/null 2>&1 || . "$CEL_ROOT/lib/quota.sh"
+  command -v quota_unread >/dev/null 2>&1 || . "$CEL_ROOT/lib/quota.sh"
   local ws; ws="$(registry_names | head -n1)"
   [ -n "$ws" ] || return 0
   local gone; gone="$(_steward_cite_passed usage-pace)" || gone=""
@@ -1578,16 +1583,22 @@ _steward_usage_pace() {
     [ -n "$gone" ] && _steward_clear "$ws" usage-pace "the window it named has reset, with no fresh reading since"
     return 0
   fi
-  local at risk
+  local at risk unread msg
   at="$(printf '%s' "$subs" | quota_at_risk)"
   risk="$(printf '%s' "$at" | jq -r '
     map("\(.who) (\(.provider) \(.window)\(if .scope then " " + .scope else "" end): \(.used_pct)% \(if .last_known then "at the last known reading (read \(.read_at // "?"))" else "now" end), ~\(.projected_pct)% at reset\(if .resets then " " + .resets else "" end))")
     | join("; ")' 2>/dev/null || true)"
-  if [ -n "$risk" ]; then
-    c_warn "usage on pace for a cap: $risk"
+  unread="$(printf '%s' "$subs" | quota_unread | jq -r '
+    map("\(.who) (\(.provider)) not read since \(.read_at): \(.why) (last known \(.last | join(", ")), not forecast)")
+    | join("; ")' 2>/dev/null || true)"
+  if [ -n "$risk" ] || [ -n "$unread" ]; then
+    [ -z "$risk" ] || c_warn "usage on pace for a cap: $risk"
+    [ -z "$unread" ] || c_warn "usage not read: $unread"
     if _steward_due "usage-pace"; then
-      _steward_raise "$ws" usage-pace status \
-        "steward: on this week's pace an account hits its cap before it resets - $risk. Move work off it or expect refusals."
+      msg="steward:"
+      [ -z "$risk" ] || msg="$msg on this week's pace an account hits its cap before it resets - $risk. Move work off it or expect refusals."
+      [ -z "$unread" ] || msg="$msg $unread."
+      _steward_raise "$ws" usage-pace status "$msg"
       _steward_cite usage-pace "$(printf '%s' "$at" | jq -r '[.[].reset_epoch | numbers] | min // empty' 2>/dev/null || true)"
     fi
   else

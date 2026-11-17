@@ -201,6 +201,19 @@ _sub_cache_locked() { # <cmd...>
 # `sub_epoch`: an ISO-8601 time - fraction and offset optional, `Z` or
 # `+hh:mm` - or epoch seconds or milliseconds, as epoch seconds; null when it
 # is none of those (no reset known, which is not a reset).
+#
+# A LAST-KNOWN NUMBER HAS A SHELF LIFE (AH-261118). A window the reads keep
+# failing on keeps its last number (_sub_carry_last), and for a few minutes
+# that is the best answer there is. Hours on it is a floor, not a reading - a
+# week only climbs until it resets - and an account whose refresh token was
+# refused stays unread until a human signs it in again. So a last-known window
+# read more than CEL_SUB_UNREAD_AFTER_H hours ago (default 2) is also
+# `unread: true`: it is still drawn and still vetoes at 100%, but nothing
+# forecasts from it - the steward says the account has not been read since
+# then, why, and what to do instead (quota_unread).
+_SUB_UNREAD_SECS="${CEL_SUB_UNREAD_AFTER_H:-2}"
+case "$_SUB_UNREAD_SECS" in ''|*[!0-9]*) _SUB_UNREAD_SECS=2 ;; esac
+_SUB_UNREAD_SECS=$(( _SUB_UNREAD_SECS * 3600 ))
 _SUB_RESET_JQ='
 def sub_epoch:
   if type == "number" then (if . > 100000000000 then . / 1000 else . end)
@@ -214,7 +227,11 @@ def sub_epoch:
 def sub_window_now:
   if type == "object" and .reset != true
      and (((.resets_at // null) | sub_epoch) as $r | $r != null and $r <= now)
-  then del(.stale, .read_at) + {used_pct: null, resets_at: null, reset: true} else . end;
+  then del(.stale, .read_at, .unread) + {used_pct: null, resets_at: null, reset: true}
+  elif type == "object" and .stale == true
+     and (((.read_at // null) | sub_epoch) as $t | $t != null and $t <= now - '"$_SUB_UNREAD_SECS"')
+  then . + {unread: true}
+  else . end;
 def sub_row_now:
   if type == "object" and ((.windows // null) | type) == "array"
   then .windows |= map(sub_window_now) else . end;
@@ -612,25 +629,27 @@ _cpa_map_usage() { # <provider> <account> <label> <source>  (body on stdin)
 #   stale        the vault's token has expired and CLIProxyAPI - the only
 #                thing that may refresh it - has not. Nothing is broken: it
 #                refreshes when the gateway next runs this account.
-#   needs_login  the provider REJECTED a token the vault calls live. That
-#                credential is finished and only a human can replace it.
+#   needs_login  the provider REJECTED a token the vault calls live, or the
+#                gateway's own refresh of an expired one was refused (an
+#                invalid grant: the refresh token is dead). That credential is
+#                finished and only a human can replace it.
 #   unreadable   the endpoint itself could not be read.
-_cpa_needs_login_row() { # <provider> <account> <label>
-  jq -nc --arg p "$1" --arg a "$2" --arg l "$3" \
+_cpa_needs_login_row() { # <provider> <account> <label> [why]
+  jq -nc --arg p "$1" --arg a "$2" --arg l "$3" --arg w "${4:-}" \
     '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
       extra: {state: "needs_login",
-              reason: ("needs login: cel gateway login " + $p)}}'
+              reason: ("needs login: cel gateway login " + $p + (if $w == "" then "" else " - " + $w end))}}'
 }
 
 # NOT A FAULT, AND NOT A LOGIN. An idle account whose access token has aged out
 # is waiting for the refresher that owns it, and telling the owner to log in
 # again would send them to a browser to fix nothing - while breaking the
 # credential is exactly what this reader refuses to do.
-_cpa_stale_row() { # <provider> <account> <label>
+_cpa_stale_row() { # <provider> <account> <label> [reason]
   jq -nc --arg p "$1" --arg a "$2" --arg l "$3" \
+    --arg r "${4:-token stale - refreshed next time this account serves traffic}" \
     '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
-      extra: {state: "stale",
-              reason: "token stale - refreshed next time this account serves traffic"}}'
+      extra: {state: "stale", reason: $r}}'
 }
 
 _cpa_unreadable_row() { # <provider> <account> <label>
@@ -638,6 +657,64 @@ _cpa_unreadable_row() { # <provider> <account> <label>
     '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
       extra: {state: "unreadable",
               reason: "the usage endpoint could not be read - it may be down"}}'
+}
+
+# WHY A TOKEN IS STALE IS THE GATEWAY'S TO SAY (AH-261118). An expired token
+# is usually a refresh the gateway has not got to yet - but CLIProxyAPI keeps
+# the outcome of its last refresh of each credential (`status`,
+# `status_message` on GET /v0/management/auth-files), and `error` with an
+# `invalid grant` there is a refresh token the provider refused. No amount of
+# waiting brings that account back; only a human signing in again does. An
+# account whose refresh token had expired read "token stale - refreshed next
+# time this account serves traffic" for fifteen hours while its last known
+# week sat in the pace alert as if it were current.
+#
+# ONE read-only GET, loopback, with the management secret that already exists
+# - never minted here, never in argv, and only a 0600-style file the caller
+# owns. Any failure is no answer, and the row stays plain `stale`. Prints
+# {"<file name>": {status, message}}; only the fields named, the message cut
+# to printable text.
+#
+# CEL_CPA_GATEWAY_URL is the test seam. A vault named by CEL_CPA_AUTH_DIR is
+# not known to be the gateway's own, so it is asked about only when the seam
+# names a gateway too.
+_cpa_gateway_states() {
+  local url="${CEL_CPA_GATEWAY_URL:-}" kf="" key mode out
+  if [ -z "$url" ]; then
+    [ -z "${CEL_CPA_AUTH_DIR:-}" ] && [ -f "${BASH_SOURCE[0]%/*}/gateway.sh" ] || { printf '{}'; return 0; }
+    # shellcheck source=lib/gateway.sh
+    command -v gateway_url >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/gateway.sh"
+    url="$(gateway_url 2>/dev/null || true)"
+  fi
+  if command -v _gateway_mgmt_key_file >/dev/null 2>&1; then kf="$(_gateway_mgmt_key_file)"
+  else kf="${CEL_GATEWAY_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/gateway}/management-key"; fi
+  [ -n "$url" ] && [ -f "$kf" ] && [ ! -L "$kf" ] && [ -r "$kf" ] \
+    && [ "$(stat -c %u "$kf" 2>/dev/null)" = "$(id -u)" ] || { printf '{}'; return 0; }
+  mode="$(stat -c %a "$kf" 2>/dev/null)"
+  case "$mode" in *00) ;; *) printf '{}'; return 0 ;; esac
+  key="$(tr -d '\r\n' < "$kf" 2>/dev/null || true)"
+  [ -n "$key" ] || { printf '{}'; return 0; }
+  out="$(printf 'Authorization: Bearer %s\n' "$key" \
+    | curl -sf -m 5 "$url/v0/management/auth-files" -H @- 2>/dev/null \
+    | jq -c '[(.files // [])[]? | select(type == "object" and (.name | type) == "string")
+              | {key: .name,
+                 value: {status: ((.status // "") | tostring),
+                         message: ((.status_message // "") | tostring | gsub("[^ -~]"; " ") | .[0:120])}}]
+             | from_entries' 2>/dev/null || true)"
+  [ -n "$out" ] || out='{}'
+  printf '%s' "$out"
+}
+
+# What the gateway's last refresh of one expired file says: `login<TAB>why`
+# when the provider refused the refresh token, `stale<TAB>reason` when the
+# refresh failed some other way, nothing when the gateway reported no error.
+_cpa_stale_verdict() { # <states-json> <file-name>
+  jq -r --arg n "$2" '.[$n] // empty | select(.status == "error")
+    | (if .message == "" then "error" else .message end) as $m
+    | if ($m | test("invalid.?grant|unauthori[sz]ed|revoked|refresh token"; "i"))
+      then "login\tthe gateway cannot refresh it (\($m))"
+      else "stale\ttoken stale - the gateway refresh is failing (\($m)); see cel gateway status" end' \
+    <<< "$1" 2>/dev/null || true
 }
 
 # One row per account in the vault, and NOTHING HERE REFRESHES ANYTHING.
@@ -648,14 +725,22 @@ _cpa_unreadable_row() { # <provider> <account> <label>
 # file can claim a live token and be wrong; the answer to that is a
 # `needs_login` row, never a retry through a token endpoint.
 _sub_cliproxy_rows() {
-  local p a label f tok
+  local p a label f tok states="" v
   while IFS=$'\t' read -r p a label f; do
     [ -n "$p" ] || continue
     tok="$(_cpa_access_token "$f")"
     # A file that says its token has already expired is not worth a call: the
-    # only thing that could refresh it is CLIProxyAPI, and it has not.
+    # only thing that could refresh it is CLIProxyAPI, and it has not - so it
+    # is asked (once per list) whether it tried and was refused.
     if [ -z "$tok" ] || _cpa_expired "$f"; then
-      _cpa_stale_row "$p" "$a" "$label"; continue
+      [ -n "$states" ] || states="$(_cpa_gateway_states)"
+      v="$(_cpa_stale_verdict "$states" "${f##*/}")"
+      case "$v" in
+        login$'\t'*) _cpa_needs_login_row "$p" "$a" "$label" "${v#*$'\t'}" ;;
+        stale$'\t'*) _cpa_stale_row "$p" "$a" "$label" "${v#*$'\t'}" ;;
+        *) _cpa_stale_row "$p" "$a" "$label" ;;
+      esac
+      continue
     fi
     # A REJECTED TOKEN IS NOT MET WITH A REFRESH: see the note above
     # _cpa_access_token. The vault called this token live and the provider
@@ -1254,7 +1339,9 @@ quota_orch_pool() {
 # such a window has no number and is never quoted, and the reset each entry
 # names comes with its epoch (`reset_epoch`) for the steward to keep. A
 # last-known window (the read failed, it is still running) counts at its last
-# number and says so: `last_known`, `read_at`.
+# number and says so: `last_known`, `read_at` - until it is `unread` (read
+# longer ago than CEL_SUB_UNREAD_AFTER_H), when it is not projected at all:
+# quota_unread says that account instead.
 quota_at_risk() {
   jq -c "$_SUB_RESET_JQ"'
     def len: if . == "5h" then 18000 elif . == "1d" or . == "daily" then 86400
@@ -1262,7 +1349,7 @@ quota_at_risk() {
              else (capture("^(?<n>[0-9]+)(?<u>[hd])$") | (.n | tonumber) * (if .u == "h" then 3600 else 86400 end))? // null end;
     now as $now
     | [ .[]? | select(type == "object") | sub_row_now | . as $s
-        | (.windows // [])[] | select(type == "object" and .reset != true)
+        | (.windows // [])[] | select(type == "object" and .reset != true and .unread != true)
         | (.used_pct // 0) as $u
         | ((.name // "") | len) as $l
         | ((.resets_at // null) | sub_epoch) as $r
@@ -1272,6 +1359,29 @@ quota_at_risk() {
         | {provider: $s.provider, who: ($s.label // $s.account), window: .name, scope: .scope,
            used_pct: ($u | round), projected_pct: $p, resets: .resets_at, reset_epoch: ($r | if . == null then null else floor end),
            last_known: (.stale == true), read_at: (if .stale == true then .read_at else null end)} ]' 2>/dev/null || printf '[]'
+}
+
+# NOT READ, AND WHY. Reads a subscription list on stdin and prints one entry
+# per account with a window nobody has managed to read for longer than
+# CEL_SUB_UNREAD_AFTER_H: {provider, who, read_at (the oldest such reading),
+# state, why (the row's reason, ending in what to do), last (its last known
+# windows, for context only)}. A pace alert built from a number that old is a
+# forecast from a floor, so the steward says this instead.
+quota_unread() {
+  jq -c "$_SUB_RESET_JQ"'
+    [ .[]? | select(type == "object") | sub_row_now | . as $s
+      | [(.windows // [])[] | select(type == "object" and .unread == true)] as $u
+      | select(($u | length) > 0)
+      | (.extra.state // "") as $st
+      | ((.extra.reason // "") | if . == "" then "the read failed" else . end) as $r
+      | {provider: $s.provider, who: ($s.label // $s.account), state: $st,
+         read_at: ($u | map(.read_at) | sort | first),
+         why: (if $st == "needs_login" then $r
+               elif $st == "stale" then $r + " - stale for hours, so the gateway is not refreshing it: see cel gateway status, and sign in again (cel gateway login " + $s.provider + ") if it shows an error"
+               elif $st == "unreadable" then "unreadable: " + $r + " - see cel quota"
+               else $r + " - see cel quota" end),
+         last: ($u | map(.name + (if .scope then " " + .scope else "" end) + " " + ((.used_pct // 0) | round | tostring) + "%"))} ]' \
+    2>/dev/null || printf '[]'
 }
 
 # The providers `cel quota` reports a balance for: one named, or every
