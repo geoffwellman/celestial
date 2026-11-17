@@ -128,7 +128,8 @@ _svc_shell_value() { # <declared value> -> the value, expanded if it is such a f
 #
 # The declaration may be a path OR a whole URL, and it may name a bearer: the
 # broker and the gateway answer 401 to an unauthenticated read. The token
-# rides stdin, never argv - a bearer in a command line is a bearer in `ps`.
+# rides stdin, never argv - a bearer in a command line is a bearer in `ps` -
+# and a bearer for a loopback URL never goes through a proxy (curl_direct).
 svc_health_ok() { # <port> <health path or url> [auth: "bearer <value-or-$(cmd)>"]
   local p="${1:-0}" h="${2:-}" auth="${3:-}" url tok
   [ -n "$h" ] || return 1
@@ -140,8 +141,13 @@ svc_health_ok() { # <port> <health path or url> [auth: "bearer <value-or-$(cmd)>
   if [ -n "$auth" ]; then
     tok="$(_svc_shell_value "${auth#bearer }")"
     if [ -n "$tok" ]; then
-      printf 'Authorization: Bearer %s\n' "$tok" \
-        | curl -sf -m 2 -o /dev/null "$url" -H @- 2>/dev/null
+      if url_is_loopback "$url"; then
+        printf 'Authorization: Bearer %s\n' "$tok" \
+          | curl_direct -sf -m 2 -o /dev/null "$url" -H @- 2>/dev/null
+      else
+        printf 'Authorization: Bearer %s\n' "$tok" \
+          | curl -sf -m 2 -o /dev/null "$url" -H @- 2>/dev/null
+      fi
       return $?
     fi
   fi
