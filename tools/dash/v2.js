@@ -49,29 +49,58 @@ async function getFeed(u,name){var r=await fetch(u,{cache:'no-store'});if(!r.ok)
 // FIRST PAINT WITHOUT WAITING: one request for the last value of every card's
 // feed, drawn at once; the live refresh then replaces it feed by feed. A feed
 // the live refresh already answered is never overwritten by the snapshot.
+// After a dashboard restart the snapshot is the last one saved before it
+// (stale, as_of) and /api/state's first answer its own saved one (saved,
+// as_of): UPD holds what on the page is still that old - feed names and
+// 'state' - and the oldest as_of, and the top bar says "updating, as of
+// HH:MM" until a live answer has replaced each.
+var UPD=null;
+function updMark(name,asOf){var t=Date.parse(asOf);if(!UPD)UPD={at:t,wait:{}};UPD.wait[name]=1;if(!(UPD.at<=t))UPD.at=t}
+function updDone(name){if(UPD&&UPD.wait[name]){delete UPD.wait[name];if(!Object.keys(UPD.wait).length)UPD=null}}
+function updNote(){var el=$('stalenote'),t=UPD?(isNaN(UPD.at)?'updating…':'updating, as of '+hhmm(new Date(UPD.at).toISOString())):'';
+  if(el.textContent!==t)el.textContent=t;el.hidden=!t}
 async function snapshot(){
   try{var d=await getJSON('/api/v2/snapshot?ws='+encodeURIComponent(WSF));
-    Object.keys(d.feeds||{}).forEach(function(f){if(F[f]===undefined){F[f]=d.feeds[f].v;FAT[f]=Date.parse(d.feeds[f].at)||Date.now()}});
+    Object.keys(d.feeds||{}).forEach(function(f){if(F[f]===undefined){F[f]=d.feeds[f].v;FAT[f]=Date.parse(d.feeds[f].at)||Date.now();if(d.stale)updMark(f,d.as_of)}});
     renderAll()}catch(e){/* the live refresh draws, or reports, every card */}
 }
 function ageNote(id){
   var src=NEEDS[id]||[],old=Infinity;
-  src.forEach(function(n){if(FAT[n]!==undefined)old=Math.min(old,FAT[n])});
+  src.forEach(function(n){n=srcOf(n);if(FAT[n]!==undefined)old=Math.min(old,FAT[n])});
   if(old===Infinity)return '';var s=Math.round((Date.now()-old)/1000);
   if(s*1000<=REFRESH_MS*3)return '';
   return '<div class="sub age" title="this card is showing the last value the server computed">as of '+(s<120?s+'s':Math.round(s/60)+'m')+' ago</div>';
 }
-async function refresh(){
-  var q='ws='+encodeURIComponent(WSF);
-  var jobs=[getJSON('/api/state').then(function(s){S=s;delete ERR.state}).catch(failed('state'))];
+function paintSoon(){if(!paintSoon.t)paintSoon.t=setTimeout(function(){paintSoon.t=0;renderAll()},50)}
+// /api/state's answer to a cold start - saved before the restart, or without
+// its slow parts (loading) - is asked again at once: that ask waits for the
+// full read the first one started, so the live answer replaces it as soon
+// as it exists, not a refresh later
+function getState(again){return getJSON('/api/state').then(function(s){S=s;delete ERR.state;
+  if(s.saved&&s.as_of)updMark('state',s.as_of);else updDone('state');
+  if((s.saved||s.loading)&&!again){paintSoon();return getState(true)}})}
+// One refresh at a time per filter: a feed still being read after a restart
+// holds its request open, and a new round every 8 s on top of it would only
+// queue behind it. Until a first refresh has landed - or while the page
+// still shows what was saved before a restart - each answer is drawn as it
+// arrives, so a slow feed never holds back the ones that are ready.
+var REFRESHING=null;
+function refresh(){
+  if(REFRESHING&&REFRESHING.ws===WSF)return REFRESHING.p;
+  var ws=WSF,q='ws='+encodeURIComponent(ws),early=!window.V2REFRESHES||!!UPD;
+  var drew=function(){if(early)paintSoon()};
+  var jobs=[getState().catch(failed('state')).then(drew)];
   FEEDS.forEach(function(f){
     var extra=f==='activity'?'&limit=30':f==='merges'?'&days=14':f==='load'?'&hours=24':f==='lanes'?'&range=today':'';
-    jobs.push(getFeed('/api/v2/'+f+'?'+q+extra,f).then(function(d){F[f]=d;delete ERR[f]}).catch(failed(f)));
+    jobs.push(getFeed('/api/v2/'+f+'?'+q+extra,f).then(function(d){F[f]=d;delete ERR[f];updDone(f)}).catch(failed(f)).then(drew));
   });
-  await Promise.all(jobs);
-  window.V2REFRESHES++;
-  renderAll();
-  $('updated').textContent='updated '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  var me={ws:ws,p:Promise.all(jobs).then(function(){
+    window.V2REFRESHES++;
+    renderAll();
+    $('updated').textContent='updated '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }).finally(function(){if(REFRESHING===me)REFRESHING=null})};
+  REFRESHING=me;
+  return me.p;
 }
 window.v2refresh=function(){return refresh()};
 
@@ -198,14 +227,19 @@ var BODY={
  teams:function(){var it=feedItems('teams');
   return it.map(teamHtml).join('')||none('no feature teams')},
 };
-// what each card is drawn from; a card waits for, or reports, its sources
+// what each card is drawn from; a card waits for, or reports, its sources.
+// A source <feed>.<part> waits for that part too: a cold start's first fleet
+// is the roster alone, `loading: ['prs']` until the PR list is read
 var NEEDS={needs:['state'],since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],usage:['usage'],lanes:['lanes'],
-  heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['fleet'],prs:['fleet'],orchs:['fleet'],
-  services:['services'],funnel:['fleet','merges'],afk:[],teams:['teams']};
+  heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['fleet'],prs:['fleet.prs'],orchs:['fleet'],
+  services:['services'],funnel:['fleet.prs','merges'],afk:[],teams:['teams']};
+function srcOf(n){return n.split('.')[0]}
 function cardStatus(id){
   var src=NEEDS[id]||[];
-  for(var i=0;i<src.length;i++){var n=src[i];if(ERR[n]!==undefined)return n+' unavailable ('+ERR[n]+') - retrying'}
-  for(var j=0;j<src.length;j++){var m=src[j];if(m==='state'?!S:F[m]===undefined)return 'loading '+m+'…'}
+  for(var i=0;i<src.length;i++){var n=srcOf(src[i]);if(ERR[n]!==undefined)return n+' unavailable ('+ERR[n]+') - retrying'}
+  for(var j=0;j<src.length;j++){var m=srcOf(src[j]),part=src[j].slice(m.length+1);
+    if(m==='state'?!S:F[m]===undefined)return 'loading '+m+'…';
+    if(part&&((F[m]||{}).loading||[]).indexOf(part)>=0)return 'loading '+part+'…'}
   return '';
 }
 // ---- feature teams -----------------------------------------------------------
@@ -365,6 +399,7 @@ function renderAll(){
   $('tagline').textContent=o.length+' orchestrators · '+Object.keys(wsn).length+' workspaces'+(p?' · box at '+Math.round(p.mem_pct)+'% memory':'');
   if(S){$('wsname').textContent=S.workspace||'';document.title='celestial · '+(S.workspace||'')}
   fillWsFilter(Object.keys(wsn));
+  updNote();
   window.V2READY=true;
 }
 function fillWsFilter(list){

@@ -153,3 +153,53 @@ console.log(r.join('|'));
 ")"
   assert_eq "$out" "threw|empty|good|3"
 }
+
+# The answer a restart serves first (tools/dash/saved.mjs) holds inbox text
+# and decisions: its directory is 0700 and every file 0600 whatever the
+# umask, and a file is replaced whole - a reader in another process, parsing
+# it while it is rewritten hundreds of times, never sees a torn one. Nothing
+# is left behind but the file, a name that is not a plain key writes nothing,
+# and a warm answer is rewritten at most once per CEL_DASH_SAVE_EVERY_MS. A
+# build with a read failing that the saved one did not have never replaces
+# it - until that read has failed for CEL_DASH_SAVED_SETTLE_MS straight.
+test_dash_saved_answer_is_private_and_replaced_whole() {
+  local T; T="$(mktemp -d)"
+  mkdir -m 0755 "$T/saved"
+  node --input-type=module -e "
+import { readFileSync, existsSync } from 'node:fs';
+let reads = 0, torn = 0;
+while (!existsSync('$T/stop')) {
+  let t; try { t = readFileSync('$T/saved/snapshot.all.json', 'utf8'); } catch { continue; }
+  reads++;
+  try { const d = JSON.parse(t); if (!d.v || !Array.isArray(d.v.rows)) torn++; } catch { torn++; }
+}
+console.log(reads + ' ' + torn);
+" > "$T/reader.out" &
+  local reader=$!
+  local out; out="$(CEL_DASH_SAVE_EVERY_MS=60000 _df_node "
+import { createSaved } from '$CEL_ROOT/tools/dash/saved.mjs';
+process.umask(0);
+const s = createSaved('$T/saved');
+const big = Array.from({ length: 40000 }, (_, i) => ({ i, text: 'row ' + i }));
+let ok = 0;
+for (let n = 0; n < 300; n++) if (s.write('snapshot', 'all', { n, rows: n % 2 ? big : [] }, Date.now(), { force: true })) ok++;
+const last = s.read('snapshot', 'all');
+const warm = s.write('snapshot', 'all', { rows: [], warm: true }, Date.now());
+const bad = s.write('snapshot', '../escape', { rows: [] }, Date.now(), { force: true });
+const worse = s.write('snapshot', 'all', { rows: [], worse: true }, Date.now(), { force: true, failed: ['gh:open:alpha/widget'] });
+process.env.CEL_DASH_SAVED_SETTLE_MS = '50';
+await new Promise((r) => setTimeout(r, 80));
+const settled = s.write('snapshot', 'all', { n: 'settled', rows: [] }, Date.now(), { force: true, failed: ['gh:open:alpha/widget'] });
+console.log([ok, last.v.n, typeof last.at, warm, bad, s.read('snapshot', 'none'), s.read('snapshot', '../escape'), worse, settled,
+  s.read('snapshot', 'all').v.n, s.read('snapshot', 'all').failed.join(',')].join('|'));
+")"
+  : > "$T/stop"; wait "$reader"
+  assert_eq "$out" "300|299|string|false|false|||false|true|settled|gh:open:alpha/widget"
+  local reads torn; read -r reads torn < "$T/reader.out"
+  [ "${reads:-0}" -gt 0 ] || { echo "the reader never read the file"; rm -rf "$T"; return 1; }
+  assert_eq "$torn" "0" || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/saved")" "700"
+  assert_eq "$(stat -c %a "$T/saved/snapshot.all.json")" "600"
+  assert_eq "$(cd "$T" && find . -mindepth 1 -not -name reader.out -not -name stop | LC_ALL=C sort | paste -sd' ' -)" "./saved ./saved/snapshot.all.json"
+  rm -rf "$T"
+}
