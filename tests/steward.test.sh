@@ -2781,6 +2781,31 @@ test_steward_keeps_alerting_on_a_spent_week_a_failed_read_cannot_refresh() {
   rm -rf "$T"
 }
 
+# BUT HOURS UNREAD IS NOT A PACE (AH-261118). An account whose gateway refresh
+# was refused sat in the pace item as "73% at the last known reading, ~X% at
+# reset" for fifteen hours. Past CEL_SUB_UNREAD_AFTER_H it is said as not read
+# since then, why and what to do - never forecast - and the item stays open on
+# that alone until a reading comes back.
+test_steward_says_an_account_unread_for_hours_instead_of_forecasting_it() {
+  _pace_fixture 10 172800
+  local f="$CEL_INBOX_DIR/alpha.jsonl" old r msg
+  old="$(date -u -d "@$(( $(date +%s) - 15 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  r="$(date -u -d "@$(( $(date +%s) + 172800 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  jq --arg o "$old" --arg r "$r" '.[0] |= (.windows = [{name: "7d", scope: null, used_pct: 73, resets_at: $r, stale: true, read_at: $o}]
+      | .extra = {state: "needs_login", reason: "needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant)"})' \
+    "$T/subs.json" > "$T/s.json" && mv "$T/s.json" "$T/subs.json"
+  _steward_usage_pace >/dev/null 2>&1
+  msg="$(jq -r 'select(.fp == "usage-pace") | .message' "$f")"
+  assert_contains "$msg" "ana@alpha.test (claude) not read since $old: needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant) (last known 7d 73%, not forecast)"
+  if printf '%s' "$msg" | grep -q 'at reset'; then echo "forecast an unread account: $msg"; return 1; fi
+  [ -n "$(_inbox_open_fp alpha usage-pace steward root)" ] || { echo "no open usage-pace item"; return 1; }
+  # a fresh reading under the line takes it down
+  _pace_set 10 172800
+  _steward_usage_pace >/dev/null 2>&1
+  assert_eq "$(_inbox_open_fp alpha usage-pace steward root)" ""
+  rm -rf "$T"
+}
+
 # Ticks never overlap. A tick that finds one running exits at once,
 # before it touches herdr, gc or anything else.
 test_steward_tick_exits_when_another_holds_the_lock() {

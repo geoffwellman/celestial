@@ -778,6 +778,13 @@ const s = createServer((req, res) => {
       writeFileSync(`${dir}/fresh`, fresh().concat([t]).join('\n') + '\n');
       return json(200, { access_token: t, refresh_token: 'fixture-refresh-rotated', expires_in: 3600 });
     }
+    // CLIProxyAPI's management listing, answered from `auth-files.json` when
+    // a test writes one; the bearer it was asked with is recorded.
+    if (req.url.startsWith('/v0/management/auth-files')) {
+      appendFileSync(`${dir}/mgmt-auth`, `${req.headers.authorization || ''}\n`);
+      const f = read('auth-files.json');
+      return f ? json(200, f) : json(404, { error: 'not found' });
+    }
     // `codes`: `<token> <status> [body]` per line answers that bearer with
     // exactly that status and body, before any other rule.
     const coded = read('codes').split('\n').map((x) => x.trim().split(' '))
@@ -934,6 +941,112 @@ test_a_stale_vault_token_reads_as_stale_not_unreadable() {
   assert_contains "$(cmd_quota 2>/dev/null)" 'token stale'
   _quota_stub_stop
   _quota_teardown
+}
+
+# A STALE TOKEN THE GATEWAY ALREADY FAILED TO REFRESH IS A LOGIN (AH-261118).
+# A refresh token the provider refused (`invalid grant`) never comes back on
+# its own, and the account read "refreshed next time this account serves
+# traffic" for fifteen hours. CLIProxyAPI keeps the outcome of its last
+# refresh per file; the reader asks for it once per list, read-only, with the
+# management secret that already exists - and still never refreshes.
+_cpa_gateway_fixture() { # [key-mode]
+  export CEL_GATEWAY_STATE="$T/gw" CEL_CPA_GATEWAY_URL="http://127.0.0.1:$(cat "$T/port")"
+  mkdir -p "$CEL_GATEWAY_STATE"; chmod 700 "$CEL_GATEWAY_STATE"
+  printf 'fixture-mgmt-secret\n' > "$CEL_GATEWAY_STATE/management-key"
+  chmod "${1:-600}" "$CEL_GATEWAY_STATE/management-key"
+  jq -nc '{files: [
+    {name: "claude-aaaa1111-one@example.invalid.json", status: "error",
+     status_message: "invalid grant (retrying)", unavailable: true, access_token: "fixture-gw-leak"},
+    {name: "claude-bbbb2222-two@example.invalid.json", status: "active", status_message: ""},
+    {name: "codex-cccc3333-three@example.invalid-plus.json", status: "error",
+     status_message: "network unreachable"}]}' > "$T/auth-files.json"
+}
+
+test_a_vault_token_the_gateway_cannot_refresh_reads_as_needs_login() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  _cpa_gateway_fixture
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  local one; one="$(printf '%s' "$out" | jq -c '.[] | select(.account == "ant-one") | .extra')"
+  assert_eq "$(printf '%s' "$one" | jq -r .state)" needs_login
+  assert_eq "$(printf '%s' "$one" | jq -r .reason)" \
+    'needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant (retrying))'
+  # a refresh that has not failed is still only stale; one that failed some
+  # other way is stale and says how
+  assert_contains "$(printf '%s' "$out" | jq -r '.[] | select(.account == "ant-two") | .extra.reason')" 'serves traffic'
+  assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.account == "cx-three") | .extra | "\(.state): \(.reason)"')" \
+    'stale: token stale - the gateway refresh is failing (network unreachable); see cel gateway status'
+  assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.account == "cx-four") | .extra.state')" stale
+  # asked once, with the existing secret; nothing refreshed, nothing leaked
+  assert_eq "$(grep -c '^GET /v0/management/auth-files' "$T/hits")" 1
+  assert_eq "$(cat "$T/mgmt-auth")" 'Bearer fixture-mgmt-secret'
+  [ ! -s "$T/refreshes" ] || { printf 'the reader refreshed a token\n' >&2; return 1; }
+  case "$out" in *fixture-gw-leak*|*fixture-mgmt-secret*|*fixture-cpa-*)
+    printf 'the reader printed a secret\n' >&2; return 1;; esac
+  assert_contains "$(cmd_quota 2>/dev/null)" 'needs login: cel gateway login claude - the gateway cannot refresh it'
+  unset CEL_CPA_GATEWAY_URL CEL_GATEWAY_STATE
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# The secret is read, never made, and only from a file nobody else can read;
+# a vault the gateway is not named for is never asked about.
+test_the_gateway_is_asked_only_with_a_private_existing_secret() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  _cpa_gateway_fixture 644
+  . "$CEL_ROOT/lib/quota.sh"
+  assert_eq "$(subscription_list | jq -r '[.[] | select(.extra.state == "stale")] | length')" 4
+  rm -f "$CEL_GATEWAY_STATE/management-key"
+  assert_eq "$(subscription_list | jq -r '[.[] | select(.extra.state == "stale")] | length')" 4
+  [ ! -e "$CEL_GATEWAY_STATE/management-key" ] || { printf 'the reader minted a management key\n' >&2; return 1; }
+  _cpa_gateway_fixture
+  unset CEL_CPA_GATEWAY_URL
+  assert_eq "$(subscription_list | jq -r '[.[] | select(.extra.state == "stale")] | length')" 4
+  if grep -q '/v0/management' "$T/hits" 2>/dev/null; then printf 'the gateway was asked\n' >&2; return 1; fi
+  unset CEL_GATEWAY_STATE
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# HOURS ON A LAST-KNOWN NUMBER IS A FLOOR, NOT A PACE (AH-261118). The window
+# is still drawn, but it is `unread`: never projected, and quota_unread names
+# the account, when it was last read, why, and what to do.
+test_a_last_known_window_read_hours_ago_is_unread_and_not_forecast() {
+  . "$CEL_ROOT/lib/quota.sh"
+  local r old recent subs
+  r="$(_reset_iso 86400)"
+  old="$(date -u -d "@$(( $(date +%s) - 3 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  recent="$(date -u -d "@$(( $(date +%s) - 600 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  # 90% with a day of seven left is on pace for ~105%
+  subs="$(jq -nc --arg r "$r" --arg o "$old" --arg n "$recent" '[
+    {provider: "claude", account: "ana", label: "ana@alpha.test",
+     windows: [{name: "7d", used_pct: 90, resets_at: $r, stale: true, read_at: $o},
+               {name: "7d", scope: "Fable", used_pct: 37, resets_at: $r, stale: true, read_at: $o}],
+     extra: {state: "needs_login", reason: "needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant)"}},
+    {provider: "claude", account: "ben", label: "ben@alpha.test",
+     windows: [{name: "7d", used_pct: 90, resets_at: $r, stale: true, read_at: $n}],
+     extra: {state: "unreadable", reason: "the usage endpoint could not be read - it may be down"}},
+    {provider: "claude", account: "cy", label: "cy@alpha.test",
+     windows: [{name: "7d", used_pct: 50, resets_at: $r, stale: true, read_at: $o}],
+     extra: {state: "stale", reason: "token stale - refreshed next time this account serves traffic"}}]')"
+  assert_eq "$(printf '%s' "$subs" | jq -c '.[0]' | sub_row_now | jq -c '[.windows[].unread]')" '[true,true]'
+  assert_eq "$(printf '%s' "$subs" | jq -c '.[1]' | sub_row_now | jq -c '[.windows[].unread]')" '[null]'
+  # ben's ten-minute-old reading still forecasts; ana's three-hour-old one does not
+  assert_eq "$(printf '%s' "$subs" | quota_at_risk | jq -r '[.[].who] | join(",")')" 'ben@alpha.test'
+  local u; u="$(printf '%s' "$subs" | quota_unread)"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.[].who] | join(",")')" 'ana@alpha.test,cy@alpha.test'
+  assert_eq "$(printf '%s' "$u" | jq -c '.[0] | [.read_at, .state, .last]')" "[\"$old\",\"needs_login\",[\"7d 90%\",\"7d Fable 37%\"]]"
+  assert_eq "$(printf '%s' "$u" | jq -r '.[0].why')" \
+    'needs login: cel gateway login claude - the gateway cannot refresh it (invalid grant)'
+  assert_contains "$(printf '%s' "$u" | jq -r '.[1].why')" 'the gateway is not refreshing it: see cel gateway status, and sign in again (cel gateway login claude)'
+  # a window whose reset has passed is reset, never unread
+  subs="$(jq -nc --arg r "$(_reset_iso -60)" --arg o "$old" '[{provider: "claude", label: "ana",
+    windows: [{name: "5h", used_pct: 97, resets_at: $r, stale: true, read_at: $o}], extra: {state: "stale"}}]')"
+  assert_eq "$(printf '%s' "$subs" | quota_unread | jq length)" 0
 }
 
 # A token the vault calls LIVE and the provider rejects anyway is the other

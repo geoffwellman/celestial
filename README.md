@@ -2082,7 +2082,16 @@ provider on every draw. A window whose reset time has passed shows as
 everywhere these numbers appear, including after a read that failed. When a
 read fails, a window that has not reset keeps its last percentage, marked
 `last known` with the time it was read: a spent window stays spent — still
-alerted on and still vetoed — until a reading says otherwise.
+alerted on and still vetoed — until a reading says otherwise. Once that
+reading is more than `CEL_SUB_UNREAD_AFTER_H` hours old (default 2) the
+window is `unread`: still drawn, never forecast. The steward's pace item says
+instead that the account has `not read since <time>`, why, and what to do.
+
+A gateway account whose access token has expired is asked about once, read
+only, through CLIProxyAPI's management listing: when the gateway's own refresh
+was refused (`invalid grant` — the refresh token is dead) the row says
+`needs login: cel gateway login <provider>`, because only a person at a
+browser can bring it back. Celestial never refreshes a credential itself.
 
 The steward checks the windows once a tick and raises **one rolled-up item per
 account** — a status over `CEL_SUB_WARN_PCT` (80), a blocker at 100 — and
