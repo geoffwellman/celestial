@@ -51,6 +51,10 @@ _suite_clear_caller_env() {
     esac
   done
 }
+# Who is running this suite is still read once, before it is dropped: the
+# holder record beside the suite lock (below) names the caller's mailbox, so
+# the steward can tell that agent its run is holding the box.
+_suite_caller_me="${CEL_INBOX_ME:-}" _suite_caller_ws="${CEL_INBOX_WS:-}"
 _suite_clear_caller_env
 FILTER="" FILE_FILTER="" NO_LOCK=0
 for arg in "$@"; do
@@ -150,9 +154,46 @@ _suite_lock_take() {
   # pid, start time and CWD: with many agent sessions on the box a pid alone
   # does not say which of them is in front of you.
   printf '%s %s %s\n' "$$" "$(date +%H:%M)" "$PWD" > "$path"
+  _suite_holder_write "$path.holder"
   # The path as well as the fact: a child that resolved it differently (a
   # different TMPDIR, say) would otherwise queue on a second lock nobody holds.
   export CEL_SUITE_LOCK="$path" CEL_SUITE_LOCK_HELD=1
+}
+
+# THE HOLDER RECORD: who holds the lock, in a private file beside it - pid and
+# its kernel start time (so a later process given the same pid is not taken
+# for this run), the caller's mailbox and workspace, the checkout's top level,
+# the files asked for and when. The steward reads it to name the holder and
+# tell it; it is written whole (temporary file, then rename) so a reader never
+# sees half of one, and removed on exit. One a killed run leaves behind names a
+# pid/start that the lock's current holder does not have, and is ignored.
+SUITE_HOLDER=""
+_suite_holder_write() { # <record-path>
+  local rec="$1" stat top files="${FILE_FILTER:-all}" v
+  local -a f
+  { IFS= read -r stat < "/proc/$$/stat"; } 2>/dev/null || stat=""
+  read -r -a f <<< "${stat##*) }"
+  top="$(_suite_spawn "$SUITE_LOCK_FD" git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" || top=""
+  [ -n "$top" ] || top="$PWD"
+  [ -z "$FILTER" ] || files="$files matching $FILTER"
+  v="pid=$$
+start=${f[19]:-}
+agent=${_suite_caller_me//$'\n'/ }
+workspace=${_suite_caller_ws//$'\n'/ }
+worktree=${top//$'\n'/ }
+files=${files//$'\n'/ }
+since=$(date +%s)"
+  ( umask 077 && printf '%s\n' "$v" > "$rec.$$" ) 2>/dev/null && mv -f -- "$rec.$$" "$rec" 2>/dev/null \
+    || { rm -f -- "$rec.$$" 2>/dev/null; return 0; }
+  SUITE_HOLDER="$rec"
+  trap '_suite_holder_drop' EXIT
+}
+_suite_holder_drop() { # removes the record only while it is still this run's
+  [ -n "$SUITE_HOLDER" ] || return 0
+  local first=""
+  { IFS= read -r first < "$SUITE_HOLDER"; } 2>/dev/null || return 0
+  [ "$first" = "pid=$$" ] && rm -f -- "$SUITE_HOLDER"
+  return 0
 }
 _suite_lock_take
 
@@ -328,8 +369,8 @@ _kill_runners() {
   local r; for r in "${RUNNERS[@]:-}"; do [ -n "$r" ] && kill -TERM "$r" 2>/dev/null; done
   return 0
 }
-trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"' EXIT
-trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"; exit 130' INT TERM
+trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"; _suite_holder_drop' EXIT
+trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"; _suite_holder_drop; exit 130' INT TERM
 
 FILES=() ORDER=()
 for f in "$CEL_ROOT"/tests/*.test.sh; do
