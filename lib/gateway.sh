@@ -846,8 +846,9 @@ gateway_omp_scope_apply() {
     file="$(jq -r .file <<<"$row")"; id="$(jq -r .id <<<"$row")"; action="$(jq -r .action <<<"$row")"
     case "$action" in add) want="$GATEWAY_OMP_PREFIX" ;; remove) want="" ;; *) continue ;; esac
     body="$(jq -nc --arg n "$file" --arg p "$want" '{name: $n, prefix: $p}')"
+    # curl_direct (lib/common.sh): the management key never goes to a proxy
     if printf 'Authorization: Bearer %s\n' "$mk" \
-        | curl -sf -m 10 -X PATCH -H @- -H 'Content-Type: application/json' \
+        | curl_direct -sf -m 10 -X PATCH -H @- -H 'Content-Type: application/json' \
             -d "$body" "$(gateway_url)/v0/management/auth-files/fields" >/dev/null 2>&1; then
       c_ok "claude $id: $action prefix '$GATEWAY_OMP_PREFIX'"
     else

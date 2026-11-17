@@ -16,6 +16,16 @@ c_hd()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
 die()    { c_err "$*"; exit 1; }
 
+# A REQUEST CARRYING A LOOPBACK-ONLY SECRET NEVER GOES THROUGH A PROXY. curl
+# honours http_proxy / HTTPS_PROXY / ALL_PROXY even for 127.0.0.1 and
+# localhost unless told otherwise, and the proxy would be handed the bearer -
+# the gateway management key opens every credential in the vault. So the
+# proxy variables are dropped for this one curl AND it is told --noproxy '*'.
+curl_direct() { # <curl args...>
+  env -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
+    curl --noproxy '*' "$@"
+}
+
 # IS THIS PROCESS UNDER ITS OWN CHECKOUT'S TEST SUITE? The test seams that
 # redirect what cel trusts - CEL_PROC_DIR (whose /proc an identity is proven
 # from), CEL_FORGE_CURL (which binary the forge token goes to) and the gh

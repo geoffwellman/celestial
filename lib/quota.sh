@@ -675,34 +675,69 @@ _cpa_unreadable_row() { # <provider> <account> <label>
 # {"<file name>": {status, message}}; only the fields named, the message cut
 # to printable text.
 #
+# THE SECRET GOES TO LOOPBACK ONLY: a URL whose host is not 127.0.0.1, ::1 or
+# localhost is refused before the key is read - the management secret opens
+# every credential in the vault.
+#
+# CACHED FOR _SUB_TTL, the answer and the failure alike (gateway-states.json
+# in the subscription cache dir, 0600, published whole): a gateway that is
+# down costs one five-second timeout a minute, not one per steward tick and
+# per `cel quota`. The URL travels with the answer, so a cache another gateway
+# wrote is never read as this one's.
+#
 # CEL_CPA_GATEWAY_URL is the test seam. A vault named by CEL_CPA_AUTH_DIR is
 # not known to be the gateway's own, so it is asked about only when the seam
 # names a gateway too.
 _cpa_gateway_states() {
-  local url="${CEL_CPA_GATEWAY_URL:-}" kf="" key mode out
+  local url="${CEL_CPA_GATEWAY_URL:-}" kf="" key mode out cache age
   if [ -z "$url" ]; then
     [ -z "${CEL_CPA_AUTH_DIR:-}" ] && [ -f "${BASH_SOURCE[0]%/*}/gateway.sh" ] || { printf '{}'; return 0; }
     # shellcheck source=lib/gateway.sh
     command -v gateway_url >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/gateway.sh"
     url="$(gateway_url 2>/dev/null || true)"
   fi
+  _cpa_loopback_url "$url" || { printf '{}'; return 0; }
+  cache="$(_sub_cache_dir)/gateway-states.json"
+  if [ -f "$cache" ] && [ ! -L "$cache" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+    # a file from the future (a clock step, a touch) is not fresh forever
+    if [ "$age" -ge 0 ] && [ "$age" -lt "$_SUB_TTL" ] \
+       && out="$(jq -ce --arg u "$url" 'select(.url == $u and (.states | type) == "object") | .states' "$cache" 2>/dev/null)"; then
+      printf '%s' "$out"; return 0
+    fi
+  fi
   if command -v _gateway_mgmt_key_file >/dev/null 2>&1; then kf="$(_gateway_mgmt_key_file)"
   else kf="${CEL_GATEWAY_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/gateway}/management-key"; fi
-  [ -n "$url" ] && [ -f "$kf" ] && [ ! -L "$kf" ] && [ -r "$kf" ] \
+  [ -f "$kf" ] && [ ! -L "$kf" ] && [ -r "$kf" ] \
     && [ "$(stat -c %u "$kf" 2>/dev/null)" = "$(id -u)" ] || { printf '{}'; return 0; }
   mode="$(stat -c %a "$kf" 2>/dev/null)"
   case "$mode" in *00) ;; *) printf '{}'; return 0 ;; esac
   key="$(tr -d '\r\n' < "$kf" 2>/dev/null || true)"
   [ -n "$key" ] || { printf '{}'; return 0; }
   out="$(printf 'Authorization: Bearer %s\n' "$key" \
-    | curl -sf -m 5 "$url/v0/management/auth-files" -H @- 2>/dev/null \
+    | curl_direct -sf -m 5 "$url/v0/management/auth-files" -H @- 2>/dev/null \
     | jq -c '[(.files // [])[]? | select(type == "object" and (.name | type) == "string")
               | {key: .name,
                  value: {status: ((.status // "") | tostring),
                          message: ((.status_message // "") | tostring | gsub("[^ -~]"; " ") | .[0:120])}}]
              | from_entries' 2>/dev/null || true)"
   [ -n "$out" ] || out='{}'
+  _sub_cache_put "$cache" "$(jq -nc --arg u "$url" --argjson s "$out" '{url: $u, states: $s}')" || true
   printf '%s' "$out"
+}
+
+# Is <url> an http(s) URL whose host is this machine's loopback - 127.0.0.1,
+# ::1 or localhost, nothing that merely resolves there?
+_cpa_loopback_url() { # <url>
+  local rest host
+  case "$1" in http://*|https://*) ;; *) return 1 ;; esac
+  rest="${1#*://}"; rest="${rest%%/*}"; rest="${rest%%\?*}"; rest="${rest%%#*}"
+  case "$rest" in *@*) return 1 ;; esac
+  case "$rest" in
+    \[*\]|\[*\]:*) host="${rest#\[}"; host="${host%%\]*}" ;;
+    *) host="${rest%%:*}" ;;
+  esac
+  case "${host,,}" in 127.0.0.1|::1|localhost) return 0 ;; *) return 1 ;; esac
 }
 
 # What the gateway's last refresh of one expired file says: `login<TAB>why`
@@ -1341,7 +1376,10 @@ quota_orch_pool() {
 # last-known window (the read failed, it is still running) counts at its last
 # number and says so: `last_known`, `read_at` - until it is `unread` (read
 # longer ago than CEL_SUB_UNREAD_AFTER_H), when it is not projected at all:
-# quota_unread says that account instead.
+# quota_unread says that account instead. EXCEPT A SPENT ONE: a week only
+# climbs until it resets, so an unread window at 100% is still spent - at
+# risk, never projected, and its entry carries what to say about it
+# (`say`: "100% spent (last known, not read since <time>)").
 quota_at_risk() {
   jq -c "$_SUB_RESET_JQ"'
     def len: if . == "5h" then 18000 elif . == "1d" or . == "daily" then 86400
@@ -1349,16 +1387,21 @@ quota_at_risk() {
              else (capture("^(?<n>[0-9]+)(?<u>[hd])$") | (.n | tonumber) * (if .u == "h" then 3600 else 86400 end))? // null end;
     now as $now
     | [ .[]? | select(type == "object") | sub_row_now | . as $s
-        | (.windows // [])[] | select(type == "object" and .reset != true and .unread != true)
+        | (.windows // [])[] | select(type == "object" and .reset != true)
+        | select(.unread != true or (.used_pct // 0) >= 100)
         | (.used_pct // 0) as $u
         | ((.name // "") | len) as $l
         | ((.resets_at // null) | sub_epoch) as $r
         | (if $l != null and $r != null then (($l - ($r - $now)) / $l) else null end) as $f
-        | (if $f != null and $f > 0.05 and $f <= 1 then ([999, ($u / $f)] | min | round) else ($u | round) end) as $p
+        | (if .unread == true then ($u | round)
+           elif $f != null and $f > 0.05 and $f <= 1 then ([999, ($u / $f)] | min | round) else ($u | round) end) as $p
         | select($p >= 100 or $u >= 95)
         | {provider: $s.provider, who: ($s.label // $s.account), window: .name, scope: .scope,
            used_pct: ($u | round), projected_pct: $p, resets: .resets_at, reset_epoch: ($r | if . == null then null else floor end),
-           last_known: (.stale == true), read_at: (if .stale == true then .read_at else null end)} ]' 2>/dev/null || printf '[]'
+           last_known: (.stale == true), read_at: (if .stale == true then .read_at else null end)}
+          + (if .unread == true
+             then {unread: true, say: "\($u | round)% spent (last known, not read since \(.read_at // "unknown time"))"}
+             else {} end) ]' 2>/dev/null || printf '[]'
 }
 
 # NOT READ, AND WHY. Reads a subscription list on stdin and prints one entry
@@ -1366,7 +1409,9 @@ quota_at_risk() {
 # CEL_SUB_UNREAD_AFTER_H: {provider, who, read_at (the oldest such reading),
 # state, why (the row's reason, ending in what to do), last (its last known
 # windows, for context only)}. A pace alert built from a number that old is a
-# forecast from a floor, so the steward says this instead.
+# forecast from a floor, so the steward says this instead. A spent window is
+# `7d 100% spent` here and nothing more: quota_at_risk already says it with
+# when it was read, and one account is not told twice.
 quota_unread() {
   jq -c "$_SUB_RESET_JQ"'
     [ .[]? | select(type == "object") | sub_row_now | . as $s
@@ -1380,7 +1425,8 @@ quota_unread() {
                elif $st == "stale" then $r + " - stale for hours, so the gateway is not refreshing it: see cel gateway status, and sign in again (cel gateway login " + $s.provider + ") if it shows an error"
                elif $st == "unreadable" then "unreadable: " + $r + " - see cel quota"
                else $r + " - see cel quota" end),
-         last: ($u | map(.name + (if .scope then " " + .scope else "" end) + " " + ((.used_pct // 0) | round | tostring) + "%"))} ]' \
+         last: ($u | map(.name + (if .scope then " " + .scope else "" end) + " " + ((.used_pct // 0) | round | tostring) + "%"
+                         + (if (.used_pct // 0) >= 100 then " spent" else " not forecast" end)))} ]' \
     2>/dev/null || printf '[]'
 }
 
