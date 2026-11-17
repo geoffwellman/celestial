@@ -338,7 +338,8 @@ rex_agent_stop() { # pane id, stop only an exact owned terminal
 # after its receipt is published, so every refusal comes after _rex_launch
 # returns: an OpenCode launcher refuses after starting its private server
 # (server_exited, guard_inactive, models_not_admitted ...) within its own
-# deadlines (15s to readiness, 15s to model admission). So it is waited for -
+# deadlines (15s to readiness, 45s for the guard's location boot, 15s each to
+# the session check and to model admission). So it is waited for -
 # its TUI started, or the runtime gone. Other runtimes have no admission to
 # wait for: alive after a second is up. A runtime gone takes its terminal with
 # it (_rex_launch_reap): --keep-open would otherwise leave a dead session.
@@ -347,10 +348,11 @@ rex_agent_stop() { # pane id, stop only an exact owned terminal
 rex_launch_settle() { # <name> <runtime>
   local f pid i polls=10 lock rc=0
   f="$(_rex_file "$1")"
-  pid="$(jq -r .pid "$f" 2>/dev/null)" || return 2
-  [ "$2" != opencode ] || polls="${CEL_REX_ADMIT_POLLS:-450}"
+  [ "$2" != opencode ] || polls="${CEL_REX_ADMIT_POLLS:-1000}"
   for ((i = 0; i < polls; i++)); do
     _rex_live "$f" || break
+    # The receipt's own pid each time: a relaunch mid-wait replaces it.
+    pid="$(jq -r .pid "$f" 2>/dev/null)" || return 2
     [ "$2" != opencode ] || ! opencode_launch_admitted "$pid" || return 0
     sleep 0.1
   done
@@ -538,8 +540,13 @@ rex_session_note() { # pid state [native session file/id]
 # is resumed ONCE through the `cel run` line its own launch recorded: the
 # canonical door, with all its refusals, into its saved session, with its
 # explicit profile/model/thinking (a lane keeps its remembered choices). The
-# new generation is committed BEFORE any resume, so a failed or interrupted
-# resume is reported, never retried behind anyone's back.
+# new generation is committed BEFORE any resume, so a later tick never
+# resumes it again. The one exception is in the restore itself: a resume that
+# ran out of TIME - an OpenCode launcher refusing on one of its own timeouts
+# (_rex_resume_transient), as a cold box after an upgrade makes it - is run
+# once more, after CEL_REX_RESUME_RETRY_SECS (60s, past the 60s session claim
+# a failed launch can leave), and only if nothing of that agent is live by
+# then. A refusal (guard, auth, a veto, a duplicate) is reported, never retried.
 #
 # The server that answers after a restart is not the one that went away: a
 # client-autostarted server runs with --exit-empty and without the tailnet,
@@ -551,7 +558,8 @@ rex_session_note() { # pid state [native session file/id]
 #
 # Rows: <outcome>\t<name>\t<workspace>\t<detail>, outcome one of
 #   resumed        running again; detail is the session it resumed
-#   failed         its relaunch ran and did not leave a live runtime
+#   failed         its relaunch ran and did not leave a live runtime (and, when
+#                  it was retried, says so)
 #   held           not resumed: no recorded relaunch line (reviewers never
 #                  resume; older receipts), no saved session, a
 #                  session record that disagrees with its receipt, no server
@@ -680,17 +688,93 @@ _rex_resume_check() { # <name> <pid> <pid-start>
   [ -z "$veto" ] || printf 'held\t%s\t%s\t%s\n' "$name" "$ws" "$(_rex_one_line <<<"$veto")"
 }
 
-_rex_relaunch_one() { # <name> <old-pid> -> resumed|failed row
-  local name="$1" pid="$2" f ws out rc=0
-  f="$(_rex_file "$name")"; ws="$(jq -r '.workspace // ""' "$f")"
-  out="$(_rex_relaunch "$f" 2>&1)" || rc=$?
+# The OpenCode launcher's one refusal line (fixed vocabulary) in some output.
+_rex_refusal_line() { grep -o 'OpenCode guarded private launch refused (reason=[A-Za-z0-9_]*)' <<<"$1" | tail -n 1; }
+
+# A RESUME THAT RAN OUT OF TIME, not one that was refused: the OpenCode
+# launcher gave up waiting on its own server (readiness, the guard's location
+# boot, a request, model admission). A cold box after an upgrade, with every
+# agent relaunching at once, does that; the same line a minute later works.
+# Anything else - a guard, auth, scope or session refusal, a veto, a duplicate,
+# an unacknowledged Rex launch - is not this.
+_rex_resume_transient() { # <detail>
+  local re='OpenCode guarded private launch refused \(reason=(server_not_ready|admission_timeout|guard_not_loaded|models_not_admitted|[a-z]+_request_timeout)\)'
+  [[ "$1" =~ $re ]]
+}
+
+# <line-receipt>: whose recorded line to run (default the live receipt).
+_rex_relaunch_one() { # <name> <old-pid> [line-receipt] -> resumed|failed row
+  local name="$1" pid="$2" f src ws out refusal rc=0
+  f="$(_rex_file "$name")"; src="${3:-$f}"; ws="$(jq -r '.workspace // ""' "$src")"
+  out="$(_rex_relaunch "$src" 2>&1)" || rc=$?
   if [ "$rc" = 0 ] && [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f" \
      && [ "$(jq -r '.pid | tostring' "$f")" != "$pid" ]; then
     printf 'resumed\t%s\t%s\t%s\n' "$name" "$ws" "$(jq -r '.agent_session.value // ""' "$f" | _rex_one_line)"
   else
-    out="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | _rex_one_line)"
+    refusal="$(_rex_refusal_line "$out")"
+    out="$(printf '%s\n' "${refusal:-$out}" | grep -v '^[[:space:]]*$' | tail -n 1 | _rex_one_line)"
     printf 'failed\t%s\t%s\t%s\n' "$name" "$ws" "${out:-its relaunch left no live runtime (exit $rc)}"
   fi
+}
+
+# A runtime that starts and then dies is a failure, not a resume. An OpenCode
+# launcher refuses AFTER `cel run` returns, so it is waited for until it
+# admits its TUI or exits (rex_launch_settle, which closes a dead launch's
+# terminal and repeats its refusal line, kept here as the detail).
+_rex_resume_confirm() { # <rows> -> rows
+  local row outcome name ws detail f out src checked=""
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r outcome name ws detail <<<"$row"
+    f="$(_rex_file "$name")"
+    if [ "$outcome" = resumed ] && [ "$(jq -r '.agent // ""' "$f" 2>/dev/null)" = opencode ]; then
+      src=0; out="$(rex_launch_settle "$name" opencode 2>&1 >/dev/null)" || src=$?
+      if [ "$src" != 0 ]; then
+        out="$(_rex_refusal_line "$out")"
+        row="$(printf 'failed\t%s\t%s\t%s' "$name" "$ws" "${out:-its OpenCode launcher exited before admitting a TUI}")"
+        [ "$src" = 1 ] || row+="; its Rex terminal $(jq -r '.pane_id // "?"' "$f" 2>/dev/null) could not be closed (close it before resuming it)"
+      fi
+    fi
+    checked+="$row"$'\n'
+  done <<<"$1"
+  if grep -q '^resumed' <<<"$checked"; then sleep "${CEL_REX_RESUME_SETTLE_SECS:-15}"; fi
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r outcome name ws detail <<<"$row"
+    f="$(_rex_file "$name")"
+    if [ "$outcome" = resumed ] && ! { [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f"; }; then
+      row="$(printf 'failed\t%s\t%s\tit started, then exited within %ss' "$name" "$ws" "${CEL_REX_RESUME_SETTLE_SECS:-15}")"
+    fi
+    printf '%s\n' "$row"
+  done <<<"$checked"
+}
+
+# THE ONE RETRY of a resume that ran out of time, through the same recorded
+# line, read from the receipt as it was before the first attempt (closing a
+# dead launch's terminal removes its receipt). Never a duplicate, never into
+# another conversation: it is left alone when it is live again, when its
+# receipt is no longer the failed attempt's (<after>: its pid then, or "-"
+# for none - a relaunch or stop since), when its retirement has begun, or
+# when its resume would now be vetoed (its saved session changed). The line's
+# own duplicate and session-claim refusals still stand behind this.
+_rex_resume_retry() { # <name> <receipt-before-first-attempt> <after> -> one row
+  local name="$1" snap="$2" after="$3" f ws now="-" veto
+  f="$(_rex_file "$name")"; ws="$(jq -r '.workspace // ""' "$snap")"
+  if [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f"; then
+    printf 'skipped\t%s\t%s\trunning again before its retry, so not relaunched\n' "$name" "$ws"; return 0
+  fi
+  [ ! -f "$f" ] || now="$(jq -r '.pid // "?" | tostring' "$f" 2>/dev/null || printf '?')"
+  if [ "$now" != "$after" ]; then
+    printf 'skipped\t%s\t%s\trelaunched or stopped since its failed attempt, so not retried\n' "$name" "$ws"; return 0
+  fi
+  if compgen -G "$(_rex_state)/retirements/$name-[0-9]*-*.json" >/dev/null; then
+    printf 'skipped\t%s\t%s\tits retirement had begun before its retry\n' "$name" "$ws"; return 0
+  fi
+  veto="$(_rex_resume_veto "$snap")"
+  if [ -n "$veto" ]; then
+    printf 'held\t%s\t%s\tnot retried: %s\n' "$name" "$ws" "$(_rex_one_line <<<"$veto")"; return 0
+  fi
+  _rex_relaunch_one "$name" "$(jq -r '.pid | tostring' "$snap")" "$snap"
 }
 
 # RESTORED SHELLS: sessions labelled <name> in which no block runs a program.
@@ -758,10 +842,11 @@ _rex_server_ready() { # <tailscale-state-before>
 # (<name> <pid> <pid-start>); <old> its generation record. Classifies them,
 # closes the dead restored shells of the ones to resume, makes sure a server
 # answers (again: closing the last shell ends an exit-empty server), commits
-# the new generation, then resumes each one and confirms it stayed alive. With
+# the new generation, then resumes each one and confirms it stayed alive,
+# retrying once a resume that only ran out of time (_rex_resume_transient). With
 # no server, nothing is committed, so the launches wait for the next one.
 _rex_restore() { # <old-generation-json>
-  local old="$1" name pid start row todo="" closed n attempt rows="" f ws outcome detail
+  local old="$1" name pid start row todo="" closed n attempt rows="" f ws outcome detail snap retry="" first
   while IFS=$'\t' read -r name pid start; do
     [ -n "$name" ] || continue
     row="$(_rex_resume_check "$name" "$pid" "$start")"
@@ -799,21 +884,59 @@ _rex_restore() { # <old-generation-json>
     done <<<"$todo"
     return 0
   fi
+  # The receipts as they are before any attempt, for a retry's line.
+  snap="$(mktemp -d "$(_rex_state)/.resume.XXXXXX")" || snap=""
   while IFS=$'\t' read -r name pid; do
     [ -n "$name" ] || continue
+    [ -z "$snap" ] || cp -- "$(_rex_file "$name")" "$snap/$name.json" 2>/dev/null || true
     rows+="$(_rex_relaunch_one "$name" "$pid")"$'\n'
   done <<<"$todo"
-  # A runtime that starts and then dies is a failure, not a resume.
-  if grep -q '^resumed' <<<"$rows"; then sleep "${CEL_REX_RESUME_SETTLE_SECS:-15}"; fi
+  rows="$(_rex_resume_confirm "$rows")"
+  # A first attempt whose dead terminal stayed open is never retried: a retry
+  # would open a second one.
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     IFS=$'\t' read -r outcome name ws detail <<<"$row"
-    f="$(_rex_file "$name")"
-    if [ "$outcome" = resumed ] && ! { [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f"; }; then
-      row="$(printf 'failed\t%s\t%s\tit started, then exited within %ss' "$name" "$ws" "${CEL_REX_RESUME_SETTLE_SECS:-15}")"
+    if [ "$outcome" = failed ] && _rex_resume_transient "$detail" && [[ "$detail" != *'could not be closed'* ]] \
+       && [ -n "$snap" ] && [ -f "$snap/$name.json" ]; then
+      f="$(_rex_file "$name")"; pid="-"
+      [ ! -f "$f" ] || pid="$(jq -r '.pid // "?" | tostring' "$f" 2>/dev/null || printf '?')"
+      retry+="$row"$'\t'"$pid"$'\n'
+    else
+      printf '%s\n' "$row"
     fi
-    printf '%s\n' "$row"
   done <<<"$rows"
+  # THE COST to the steward tick: one wait (CEL_REX_RESUME_RETRY_SECS, 60s),
+  # then at most CEL_REX_RESUME_RETRY_MAX (3) relaunches started within
+  # CEL_REX_RESUME_RETRY_BUDGET_SECS (300s) of it, then their confirmation
+  # (each OpenCode launcher up to ~100s, mostly overlapping, plus the 15s
+  # settle) - about 3 minutes, at worst about 7. A retry past the cap is
+  # reported as failed.
+  if [ -n "$retry" ]; then
+    sleep "${CEL_REX_RESUME_RETRY_SECS:-60}"
+    local started="$SECONDS" count=0 after
+    rows=""
+    while IFS=$'\t' read -r outcome name ws detail after; do
+      [ -n "$name" ] || continue
+      if [ "$count" -ge "${CEL_REX_RESUME_RETRY_MAX:-3}" ] \
+         || [ $((SECONDS - started)) -ge "${CEL_REX_RESUME_RETRY_BUDGET_SECS:-300}" ]; then
+        printf 'failed\t%s\t%s\t%s - retry skipped: restore time cap\n' "$name" "$ws" "$detail"
+        continue
+      fi
+      count=$((count + 1))
+      rows+="$(_rex_resume_retry "$name" "$snap/$name.json" "$after")"$'\n'
+    done <<<"$retry"
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      IFS=$'\t' read -r outcome name ws detail <<<"$row"
+      if [ "$outcome" = failed ]; then
+        first="$(awk -F '\t' -v n="$name" '$2 == n { print $4; exit }' <<<"$retry")"
+        row+=" - retried once, ${CEL_REX_RESUME_RETRY_SECS:-60}s after its first attempt also failed ($first)"
+      fi
+      printf '%s\n' "$row"
+    done <<<"$(_rex_resume_confirm "$rows")"
+  fi
+  [ -z "$snap" ] || rm -rf -- "$snap"
 }
 
 # THE SAFETY NET, for restarts nobody announced. Prints nothing unless the

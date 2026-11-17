@@ -90,12 +90,21 @@ for (const [mode, reason] of [['missing', 'session_response_404'], ['wrong-mediu
 
 // The first relaunch after a Rex restart: the first location-scoped request
 // boots the location and loads every plugin inside it, and on a box busy with
-// every agent relaunching it outlasts the 2s request cap.
-test('a plugin inventory slower than the request cap refuses as a plugin request timeout', async () => {
+// every agent relaunching it outlasts the 2s every other request is capped at.
+// It is awaited for its own bounded wait, and the guard is still proven.
+test('a plugin inventory slower than the request cap is awaited, then admitted', async () => {
   const result = await run({ CEL_FIXTURE_PLUGIN: 'slow' });
-  assert.notEqual(result.code, 0);
-  assert.ok(!result.rows.some(row => row.event === 'tui'));
-  assert.equal(reasonOf(result), 'plugin_request_timeout', result.output);
+  assert.equal(result.code, 0, result.output);
+  assert.ok(result.rows.some(row => row.event === 'tui'));
+  assert.equal(reasonOf(result), undefined, result.output);
+});
+
+// Fail-closed and bounded: the wait ends (refusing, as guard_not_loaded or
+// plugin_request_timeout) well inside the time a Rex relaunch waits for the
+// launcher to admit a TUI (rex_launch_settle, 1000 polls of 0.1s).
+test('the location boot wait is longer than the request cap and bounded', async () => {
+  const { PLUGIN_WAIT_MS } = await import('./launch.mjs');
+  assert.ok(PLUGIN_WAIT_MS >= 30000 && PLUGIN_WAIT_MS <= 45000, String(PLUGIN_WAIT_MS));
 });
 
 test('a native server that exits before readiness refuses as server_exited', async () => {

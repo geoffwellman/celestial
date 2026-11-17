@@ -8,7 +8,7 @@ _rg_setup() {
   RT="$(mktemp -d)"
   export CEL_REX_STATE="$RT/state" CEL_REX_BIN="$RT/bin/rex" CEL_ORCH_SESSIONS="$RT/sessions.json"
   export CEL_INBOX_DIR="$RT/inbox" CEL_REGISTRY="$RT/registry.yaml" CEL_STEWARD_STATE="$RT/steward-state"
-  export CEL_REX_RESUME_SETTLE_SECS=0 CEL_REX_SERVER_WAIT_TENTHS=20 REXT_LOG="$RT/relaunched" CEL_INBOX_NOTIFY=0
+  export CEL_REX_RESUME_SETTLE_SECS=0 CEL_REX_RESUME_RETRY_SECS=0 CEL_REX_ADMIT_POLLS=100 CEL_REX_SERVER_WAIT_TENTHS=20 REXT_LOG="$RT/relaunched" CEL_INBOX_NOTIFY=0
   export REXT_SRV="$RT/srv" REXT_CALLS="$RT/calls"
   _STEWARD_STATE="$CEL_STEWARD_STATE"
   mkdir -p "$RT/bin" "$RT/celroot/bin" "$RT/ws" "$CEL_REX_STATE" "$CEL_INBOX_DIR" "$REXT_SRV/sess"
@@ -54,15 +54,22 @@ case "$*" in
     elif [ "$b" = errors ]; then printf '{"child":null,"foreground":null,"error":{"code":"internal"}}\n'
     elif [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then jq -n --argjson p "$p" '{child:{pid:$p},foreground:{pid:$p},last_exit:null}'
     else printf '{"child":null,"foreground":null,"last_exit":{"exit_code":0}}\n'; fi ;;
+  # What the terminal last showed (an OpenCode launcher's refusal line).
+  'capture -s '*) cat "$S/capture" 2>/dev/null ;;
   'kill '*)
-    echo "kill $2" >> "$REXT_CALLS"; rm -f "$S/sess/$2"
+    echo "kill $2" >> "$REXT_CALLS"; [ ! -e "$S/kill-fails" ] || exit 1; rm -f "$S/sess/$2"
     if [ "$(cat "$S/exit_empty")" = true ] && [ -z "$(ls "$S/sess")" ]; then : > "$S/instance"; fi ;;
   *) exit 1 ;;
 esac
 SH
   # `cel run ...`: the canonical launch, played: a NEW runtime in a new Rex
   # session under the same receipt, as _rex_launch would publish it. It needs a
-  # running server (REX_AUTOSTART=false). Product "broken" is refused.
+  # running server (REX_AUTOSTART=false). Product "broken" is refused. A
+  # product's attempts file scripts its next launches, one line each:
+  #   refuse:<line>  the launch prints <line> and fails, starting nothing
+  #   raced:<line>   it fails so, but the agent is up anyway (another launch)
+  #   dies:<line>    an OpenCode launch: it returns, then its launcher refuses
+  #                  with <line> (its terminal shows it) and the runtime exits
   cat > "$RT/celroot/bin/cel" <<'SH'
 #!/bin/bash
 printf '%s|%s\n' "${REX_AUTOSTART:-}" "$*" >> "$REXT_LOG"
@@ -73,12 +80,28 @@ done
 [ -s "$REXT_SRV/instance" ] || { echo 'Error: no Rex server is running' >&2; exit 1; }
 [ "$product" != broken ] || { echo 'cel run: the launch was refused' >&2; exit 1; }
 name="$product-${lane:-orch}"
-sleep 300 >/dev/null 2>&1 &
+attempt=""
+if [ -s "$REXT_SRV/attempts-$product" ]; then
+  attempt="$(head -n 1 "$REXT_SRV/attempts-$product")"; sed -i 1d "$REXT_SRV/attempts-$product"
+fi
+case "$attempt" in refuse:*) echo "${attempt#refuse:}" >&2; exit 1 ;; esac
+# A launch writes its whole receipt: the one it replaces may be gone.
+[ -f "$REXT_SRV/receipt-$name" ] || cp "$CEL_REX_STATE/$name.json" "$REXT_SRV/receipt-$name"
+agent=omp
+case "$attempt" in
+  dies:*|stuck:*) agent=opencode; printf '%s\n' "${attempt#*:}" > "$REXT_SRV/capture"
+    case "$attempt" in stuck:*) : > "$REXT_SRV/kill-fails" ;; esac
+    sleep 1 >/dev/null 2>&1 & ;;
+  *) sleep 300 >/dev/null 2>&1 & ;;
+esac
 pid=$!
 printf '%s\tblock:new\t%s\n' "$name" "$pid" > "$REXT_SRV/sess/session:new-$name"
 s="$(cat "/proc/$pid/stat")"; s="${s##*) }"; set -- $s
-jq --argjson p "$pid" --arg s "${20}" '.pid=$p | .pid_start=$s | .agent_status="working"' \
-  "$CEL_REX_STATE/$name.json" > "$CEL_REX_STATE/$name.tmp" && mv "$CEL_REX_STATE/$name.tmp" "$CEL_REX_STATE/$name.json"
+jq --argjson p "$pid" --arg s "${20}" --arg a "$agent" --arg n "$name" \
+  '.pid=$p | .pid_start=$s | .agent_status="working" | .agent=$a
+   | if $a == "opencode" then .rex_session=("session:new-" + $n) | .rex_block="block:new" | .pane_id=("rex/session:new-" + $n + "/block:new") else . end' \
+  "$REXT_SRV/receipt-$name" > "$CEL_REX_STATE/$name.tmp" && mv "$CEL_REX_STATE/$name.tmp" "$CEL_REX_STATE/$name.json"
+case "$attempt" in raced:*) echo "${attempt#raced:}" >&2; exit 1 ;; esac
 SH
   chmod +x "$RT/bin/rex" "$RT/celroot/bin/cel"
   # A server cel starts: persistent, a new instance, the newer API, and (to
@@ -179,6 +202,137 @@ test_rex_server_restart_resumes_each_previously_live_agent_exactly_once() {
   out="$(CEL_ROOT="$RT/celroot" rex_generation_tick)$(CEL_ROOT="$RT/celroot" rex_generation_tick)"
   assert_eq "$out" ""
   assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 2
+  _rg_down
+}
+
+# ── a resume that ran out of time is retried once ───────────────────────────
+# A restart that resumes <product>-orch, its launches scripted by the given
+# attempts (see the fake cel). Prints the restore's rows.
+_rg_resume_with_attempts() { # <product> <attempt>...
+  local p="$1"; shift
+  _rg_agent "$p-orch" solo idle "$(_rg_line "$p")"
+  CEL_ROOT="$RT/celroot" rex_generation_tick >/dev/null
+  printf '%s\n' "$@" > "$REXT_SRV/attempts-$p"
+  _rg_server_restart instance-B
+  CEL_ROOT="$RT/celroot" rex_generation_tick
+}
+_RG_TIMEOUT='OpenCode guarded private launch refused (reason=plugin_request_timeout)'
+
+test_rex_resume_that_timed_out_is_retried_once_and_resumed_without_a_failure() {
+  _rg_setup
+  local out
+  out="$(_rg_resume_with_attempts alpha "refuse:$_RG_TIMEOUT")"
+  assert_contains "$out" "$(printf 'resumed\talpha-orch\t%s\t%s' "$RT/ws" "$RT/sessions/alpha-orch.jsonl")"
+  case "$out" in *failed*) echo "a resumed retry was reported as a failure: $out"; _rg_down; return 1 ;; esac
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 2
+  _rex_live "$CEL_REX_STATE/alpha-orch.json" || { echo 'retried agent is not alive'; _rg_down; return 1; }
+  _rg_down
+}
+
+# The real shape: `cel run` returns, then the OpenCode launcher refuses on
+# its timeout. The restore waits for it, takes the refusal from its terminal
+# (which it closes), and retries through the line recorded before.
+test_rex_resume_retries_an_opencode_launcher_that_timed_out_after_cel_run_returned() {
+  _rg_setup
+  local out
+  out="$(_rg_resume_with_attempts alpha "dies:OpenCode guarded private launch refused (reason=models_not_admitted)")"
+  assert_contains "$out" "$(printf 'resumed\talpha-orch\t%s' "$RT/ws")"
+  case "$out" in *failed*) echo "a resumed retry was reported as a failure: $out"; _rg_down; return 1 ;; esac
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 2
+  assert_contains "$(cat "$REXT_CALLS")" 'kill session:new-alpha-orch'
+  _rg_down
+}
+
+test_rex_resume_that_times_out_twice_is_reported_once_saying_it_was_retried() {
+  _rg_setup
+  local out
+  out="$(_rg_resume_with_attempts alpha "refuse:$_RG_TIMEOUT" "refuse:$_RG_TIMEOUT")"
+  assert_eq "$(grep -c '^failed' <<<"$out")" 1
+  assert_contains "$out" "$(printf 'failed\talpha-orch\t%s\t%s - retried once, 0s after its first attempt also failed (%s)' "$RT/ws" "$_RG_TIMEOUT" "$_RG_TIMEOUT")"
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 2
+  # ONCE still: later ticks do not try a third time.
+  out="$(CEL_ROOT="$RT/celroot" rex_generation_tick)"
+  assert_eq "$out" ""
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 2
+  _rg_down
+}
+
+test_rex_resume_refused_for_a_reason_other_than_time_is_not_retried() {
+  local out reason
+  for reason in guard_inactive session_identity model_unscoped; do
+    _rg_setup
+    out="$(_rg_resume_with_attempts alpha "refuse:OpenCode guarded private launch refused (reason=$reason)")"
+    assert_contains "$out" "$(printf 'failed\talpha-orch\t%s\tOpenCode guarded private launch refused (reason=%s)' "$RT/ws" "$reason")"
+    case "$out" in *retried*) echo "a $reason refusal was retried: $out"; _rg_down; return 1 ;; esac
+    assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 1
+    _rg_down
+  done
+}
+
+# Never a duplicate: an agent that is up again by the time of the retry
+# (another launch brought it back) is left alone.
+test_rex_resume_retry_never_relaunches_an_agent_live_by_then() {
+  _rg_setup
+  local out
+  out="$(_rg_resume_with_attempts alpha "raced:$_RG_TIMEOUT")"
+  assert_contains "$out" "$(printf 'skipped\talpha-orch\t%s\trunning again before its retry, so not relaunched' "$RT/ws")"
+  case "$out" in *failed*) echo "a live agent was reported as failed: $out"; _rg_down; return 1 ;; esac
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 1
+  _rex_live "$CEL_REX_STATE/alpha-orch.json" || { echo 'the live agent did not survive'; _rg_down; return 1; }
+  _rg_down
+}
+
+# A first attempt whose dead terminal could not be closed is not retried (a
+# retry would open a second terminal); the failure names the open one.
+test_rex_resume_with_an_unclosed_dead_terminal_is_not_retried() {
+  _rg_setup
+  local out
+  out="$(_rg_resume_with_attempts alpha "stuck:$_RG_TIMEOUT")"
+  assert_contains "$out" "$(printf 'failed\talpha-orch\t%s\t%s; its Rex terminal rex/session:new-alpha-orch/block:new could not be closed' "$RT/ws" "$_RG_TIMEOUT")"
+  case "$out" in *retried*) echo "retried with a terminal open: $out"; rm -f "$REXT_SRV/kill-fails"; _rg_down; return 1 ;; esac
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 1
+  rm -f "$REXT_SRV/kill-fails"
+  _rg_down
+}
+
+# A manual relaunch that lands during the wait (and has since exited) means
+# no retry: the receipt is no longer the failed attempt's.
+test_rex_resume_retry_skips_an_agent_relaunched_during_the_wait() {
+  _rg_setup
+  local out pid
+  _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
+  CEL_ROOT="$RT/celroot" rex_generation_tick >/dev/null
+  printf '%s\n' "refuse:$_RG_TIMEOUT" > "$REXT_SRV/attempts-alpha"
+  _rg_server_restart instance-B
+  CEL_ROOT="$RT/celroot" CEL_REX_RESUME_RETRY_SECS=3 rex_generation_tick > "$RT/out" &
+  local tick=$!
+  for ((i = 0; i < 50; i++)); do [ "$(wc -l < "$REXT_LOG" 2>/dev/null | tr -d ' ')" = 1 ] && break; sleep 0.1; done
+  sleep 0.5
+  REX_AUTOSTART=false "$RT/celroot/bin/cel" run orchestrator --product alpha 2>/dev/null
+  pid="$(jq -r .pid "$CEL_REX_STATE/alpha-orch.json")"; kill "$pid"
+  wait "$tick"
+  out="$(cat "$RT/out")"
+  assert_contains "$out" "$(printf 'skipped\talpha-orch\t%s\trelaunched or stopped since its failed attempt, so not retried' "$RT/ws")"
+  ! grep -q '^failed' <<<"$out" || { echo "reported as failed: $out"; _rg_down; return 1; }
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 2   # the first attempt and the manual one
+  _rg_down
+}
+
+# The retries in one pass are capped; one past the cap is reported, not run.
+test_rex_resume_retries_past_the_cap_are_reported_not_run() {
+  _rg_setup
+  local out
+  _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
+  _rg_agent beta-orch solo idle "$(_rg_line beta)"
+  CEL_ROOT="$RT/celroot" rex_generation_tick >/dev/null
+  printf '%s\n' "refuse:$_RG_TIMEOUT" "refuse:$_RG_TIMEOUT" > "$REXT_SRV/attempts-alpha"
+  printf '%s\n' "refuse:$_RG_TIMEOUT" "refuse:$_RG_TIMEOUT" > "$REXT_SRV/attempts-beta"
+  _rg_server_restart instance-B
+  out="$(CEL_ROOT="$RT/celroot" CEL_REX_RESUME_RETRY_MAX=1 rex_generation_tick)"
+  assert_eq "$(grep -c 'retry skipped: restore time cap' <<<"$out")" 1
+  assert_eq "$(grep -c 'retried once' <<<"$out")" 1
+  assert_eq "$(grep -c '^failed' <<<"$out")" 2
+  assert_eq "$(wc -l < "$REXT_LOG" | tr -d ' ')" 3
   _rg_down
 }
 
