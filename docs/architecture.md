@@ -969,4 +969,8 @@ starts its `--gate-timeout` clock only after acquiring it, recording the wait
 as `gate.waited_secs`. The lock is held by an open descriptor, so process exit
 releases it and no stale state survives an interrupted run. `--no-lock` and
 `CEL_SUITE_LOCK=none` opt out; a filtered run does not. The steward reports a
-lock held past `CEL_SUITE_HOLD_WARN_SECS` and never breaks it.
+lock held past `CEL_SUITE_HOLD_WARN_SECS` and never breaks it. It names the
+holder the kernel reports (`/proc/locks`, confirmed by the holder's fdinfo,
+else `fuser`), never the pid written in the lock file, and dates the hold from
+that process's start or from when it was first seen holding; the runner's
+holder record names the agent only when its pid and start time match.

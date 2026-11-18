@@ -713,9 +713,11 @@ check_liveness() {
 # descriptor (a stray `sleep` reparented to pid 1) keeps the lock alive after
 # the runner is gone; tests/run.sh and cel-verify close the descriptor in every
 # child, but an operator staring at a queue needs to be told which it is.
-# Held by a live suite is normal and silent; held while the pid in the file is
-# gone, or is running somewhere that is not a checkout, is a leak - a suite
-# runs from inside a checkout, a stray `sleep` does not.
+# Held by a live suite is normal and silent; held by a process running
+# somewhere that is not a checkout is a leak - a suite runs from inside a
+# checkout, a stray `sleep` does not. The holder is the process the kernel
+# says holds the lock (suite_lock_live_holder), never the pid the file still
+# names: anything can hold it without writing a word there.
 #
 # The path is resolved the same way tests/run.sh resolves it; doctor takes no
 # lock of its own, it only asks whether one can be taken.
@@ -749,21 +751,20 @@ doctor_exec_load_line() { # -> one line; 1 when over a bound
 }
 
 doctor_suite_lock_line() { # -> one line when the box's suite lock has leaked
-  local path pid cwd cmd
+  local path live pid cwd cmd
   path="$(_doctor_suite_lock_path)"
   [ "$path" = none ] && return 0
   [ -f "$path" ] || return 0
   have flock || return 0
   # Nobody is holding it: there is nothing to report, stale contents or not.
   flock -n "$path" -c true >/dev/null 2>&1 && return 0
-  pid="$(sed -n 1p "$path" 2>/dev/null | awk '{print $1}' || true)"
-  case "$pid" in ''|*[!0-9]*) printf 'suite lock held with no holder recorded (%s) - kill it or run cel gc --orphans\n' "$path"; return 0;; esac
-  if kill -0 "$pid" 2>/dev/null; then
-    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-    # A checkout is where a suite runs from. Anything else holding this lock
-    # inherited it rather than took it.
-    [ -n "$cwd" ] && [ -e "$cwd/.git" ] && return 0
-  fi
+  live="$(suite_lock_live_holder "$path")" \
+    || { printf 'suite lock held but no process found holding it (%s) - see /proc/locks, or run cel gc --orphans\n' "$path"; return 0; }
+  pid="${live%% *}"
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+  # A checkout is where a suite runs from. Anything else holding this lock
+  # inherited it rather than took it.
+  [ -n "$cwd" ] && [ -e "$cwd/.git" ] && return 0
   cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-40)"
   [ -n "$cmd" ] || cmd="gone"
   printf 'suite lock leaked (pid %s, %s) - kill it or run cel gc --orphans\n' "$pid" "${cmd% }"

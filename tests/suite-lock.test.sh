@@ -284,9 +284,10 @@ test_a_long_wait_says_when_the_recorded_holder_is_dead() {
 }
 
 # `cel doctor` is where a box-wide problem gets named, and a leaked suite lock
-# is box-wide: it blocks every gate on the box. It is a leak when the recorded
-# holder is gone, or is running somewhere that is not a checkout - a suite runs
-# from inside one, a `sleep` that inherited the descriptor does not.
+# is box-wide: it blocks every gate on the box. It is a leak when the process
+# HOLDING it - the kernel's answer, never the pid the file still names - is
+# running somewhere that is not a checkout: a suite runs from inside one, a
+# `sleep` that inherited the descriptor does not.
 test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
   source "$CEL_ROOT/lib/doctor.sh"
   T="$(mktemp -d)"
@@ -294,25 +295,27 @@ test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
   : > "$CEL_SUITE_LOCK"
   assert_eq "$(doctor_suite_lock_line)" ""
 
-  ( flock 9; exec sleep 5 ) 9>>"$CEL_SUITE_LOCK" &
+  # nobody holds it: nothing to say, whatever the file still names
+  printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"
+  assert_eq "$(doctor_suite_lock_line)" ""
+
+  ( cd "$T" && flock 9 && exec sleep 5 ) 9>>"$CEL_SUITE_LOCK" &
   local holder=$!
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
-  printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"
+  local _i; for _i in $(seq 1 50); do [ "$(cat "/proc/$holder/comm" 2>/dev/null)" = sleep ] && break; sleep 0.1; done
   local line; line="$(doctor_suite_lock_line)"
-  assert_contains "$line" "suite lock leaked (pid 4194303"
+  assert_contains "$line" "suite lock leaked (pid $holder, sleep 5)"
   assert_contains "$line" "cel gc --orphans"
+  case "$line" in *4194303*) echo "doctor named the stale pid in the file: $line"; kill "$holder"; rm -rf "$T"; return 1;; esac
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
 
   # a live runner, in a checkout, holding it for as long as its suite takes:
-  # that is the lock working, and doctor says nothing about it
-  ( cd "$CEL_ROOT" && flock 9 && printf '%s 03:04 %s\n' "$BASHPID" "$CEL_ROOT" > "$CEL_SUITE_LOCK" && exec sleep 5 ) 9>>"$CEL_SUITE_LOCK" &
+  # that is the lock working, and doctor says nothing about it - even before
+  # it has written a word into the file
+  : > "$CEL_SUITE_LOCK"
+  ( cd "$CEL_ROOT" && flock 9 && exec sleep 5 ) 9>>"$CEL_SUITE_LOCK" &
   holder=$!
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
-  # The holder takes the lock FIRST and only then writes its pid into the file,
-  # so "held" can be observed while the file is still empty - doctor then says
-  # "no holder recorded", which is exactly what failed on a loaded CI runner
-  # (run 39088203828) with a fixed `sleep 0.2`. Wait for the record itself.
-  local _i; for _i in $(seq 1 100); do [ -s "$CEL_SUITE_LOCK" ] && break; sleep 0.1; done
   assert_eq "$(doctor_suite_lock_line)" ""
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   unset CEL_SUITE_LOCK
