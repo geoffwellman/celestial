@@ -42,7 +42,7 @@ _suite_clear_caller_env() {
   local v
   for v in $(compgen -e); do
     case "$v" in
-      CEL_ROOT|CEL_TESTING|CEL_FLEET_CACHE_SECS|CEL_SUITE_LOCK|CEL_SUITE_LOCK_HELD|CEL_SUITE_WAIT_WARN) ;;
+      CEL_ROOT|CEL_TESTING|CEL_FLEET_CACHE_SECS|CEL_SUITE_LOCK|CEL_SUITE_LOCK_HELD|CEL_SUITE_WAIT_WARN|CEL_SUITE_HOLDER_LOOKUP) ;;
       # test knobs the caller sets on purpose: CEL_TEST_JOBS/TIMEOUT/TIMES for
       # the runner, CEL_TEST_CHROME(_WAIT_MS) and CEL_DASH_SHOTS for the dash
       # browser tests - they say how to test, not who is testing
@@ -111,9 +111,20 @@ _suite_spawn() ( # <fd> <cmd> [args...] - lock_spawn, inlined
 # lib/common.sh - this runner's own shell still sources nothing it tests - with
 # the lock descriptor closed. -> "<pid>\t<comm>\t<start HH:MM>\t<cwd>", or
 # nothing when the kernel names nobody this user can see.
+#
+# AND IT IS BOUNDED. fuser, a walk of /proc/*/fd and readlink of a cwd can each
+# block on a wedged NFS or FUSE mount, and a waiter stuck in the lookup never
+# calls flock again - it could not take a lock that had been freed. So the
+# child gets CEL_SUITE_HOLDER_LOOKUP seconds (default 3) in a session of its
+# own, and on expiry its whole group is killed (`setsid timeout`, as each test
+# is) and the waiting line falls back to the file. Without setsid or timeout
+# there is no bound to give it, and no lookup.
 _suite_live_holder() { # <lock-path>
   [ -r "$CEL_ROOT/lib/common.sh" ] || return 0
-  _suite_spawn "$SUITE_LOCK_FD" bash -c '
+  command -v setsid >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1 || return 0
+  local bound="${CEL_SUITE_HOLDER_LOOKUP:-3}"
+  case "$bound" in ''|*[!0-9]*|0) bound=3 ;; esac
+  _suite_spawn "$SUITE_LOCK_FD" setsid -w timeout -k 1 "$bound" bash -c '
     . "$1" >/dev/null 2>&1 || exit 0
     h="$(suite_lock_live_holder "$2")" || exit 0
     pid="${h%% *}"; start="${h#* }"; comm=""; btime=""; at="?"
