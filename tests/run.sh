@@ -104,6 +104,38 @@ _suite_spawn() ( # <fd> <cmd> [args...] - lock_spawn, inlined
   [ -n "$_fd" ] && exec {_fd}>&-
   exec "$@"
 )
+# WHO IS IN FRONT IS THE KERNEL'S ANSWER (lib/common.sh suite_lock_live_holder),
+# not the lock file's first line: that is only what the last runner wrote, and
+# a tool that takes the lock with `flock <lockfile> <cmd>` writes nothing, so
+# the file can name a pid long gone. Asked in a child that sources
+# lib/common.sh - this runner's own shell still sources nothing it tests - with
+# the lock descriptor closed. -> "<pid>\t<comm>\t<start HH:MM>\t<cwd>", or
+# nothing when the kernel names nobody this user can see.
+_suite_live_holder() { # <lock-path>
+  [ -r "$CEL_ROOT/lib/common.sh" ] || return 0
+  _suite_spawn "$SUITE_LOCK_FD" bash -c '
+    . "$1" >/dev/null 2>&1 || exit 0
+    h="$(suite_lock_live_holder "$2")" || exit 0
+    pid="${h%% *}"; start="${h#* }"; comm=""; btime=""; at="?"
+    { IFS= read -r comm < "/proc/$pid/comm"; } 2>/dev/null
+    { while read -r k v; do [ "$k" = btime ] && { btime="$v"; break; }; done < /proc/stat; } 2>/dev/null
+    clk="$(getconf CLK_TCK 2>/dev/null)"; [[ "$clk" =~ ^[1-9][0-9]*$ ]] || clk=100
+    [[ "$btime" =~ ^[0-9]+$ ]] && at="$(date -d "@$(( btime + start / clk ))" +%H:%M 2>/dev/null)"
+    printf "%s\t%s\t%s\t%s\n" "$pid" "${comm:-?}" "${at:-?}" "$(readlink "/proc/$pid/cwd" 2>/dev/null)"
+  ' _ "$CEL_ROOT/lib/common.sh" "$1" 2>/dev/null || true
+}
+# "pid <pid> (<comm>) since <time>\t<cwd>" for the waiting lines: the live
+# holder; when it is the runner the file names, the file's own time and
+# directory (when it took the lock, not when it began queueing). Fails when the
+# kernel names nobody.
+_suite_holder_says() { # <lock-path> <file-pid> <file-since> <file-cwd>
+  local live lpid comm at lcwd
+  live="$(_suite_live_holder "$1")"
+  [ -n "$live" ] || return 1
+  IFS=$'\t' read -r lpid comm at lcwd <<<"$live"
+  if [ "$lpid" = "$2" ]; then at="$3"; lcwd="$4"; fi
+  printf 'pid %s (%s) since %s\t%s' "$lpid" "$comm" "$at" "$lcwd"
+}
 _suite_lock_take() {
   local path; path="$(suite_lock_path)"
   # --no-lock means the whole run stays out of the queue, nested gates
@@ -122,28 +154,36 @@ _suite_lock_take() {
   mkdir -p "$(dirname "$path")" 2>/dev/null || true
   exec {SUITE_LOCK_FD}>>"$path" || { SUITE_LOCK_FD=""; return 0; }
   if ! flock -n "$SUITE_LOCK_FD"; then
-    # The holder wrote its pid and start time into the first line after it
-    # acquired, so the waiting line can name what to go and look at instead of
-    # leaving an operator to guess which of sixteen sessions is in front.
-    local held pid since cwd
+    # Who is in front, so the waiting line can name what to go and look at
+    # instead of leaving an operator to guess which of sixteen sessions it is.
+    # The file's first line (what a runner writes after it acquires) is only
+    # the fallback when the kernel names nobody.
+    local held pid since cwd says
     held="$(sed -n 1p "$path" 2>/dev/null || true)"
     pid="${held%% *}"
     since="$(printf '%s\n' "$held" | awk '{print $2}')"
     cwd="$(printf '%s\n' "$held" | cut -s -d' ' -f3-)"
-    printf 'waiting for the suite lock (held by pid %s since %s) \xe2\x80\xa6\n' "$pid" "$since"
+    if says="$(_suite_holder_says "$path" "$pid" "$since" "$cwd")"; then
+      printf 'waiting for the suite lock (held by %s) \xe2\x80\xa6\n' "${says%%$'\t'*}"
+    else
+      printf 'waiting for the suite lock (held by pid %s since %s) \xe2\x80\xa6\n' "$pid" "$since"
+    fi
     # A WAIT THAT HAS BECOME A PROBLEM SAYS SO, ONCE. The notice above scrolls
     # away and a long queue then looks like a hung gate, so a wait past
-    # CEL_SUITE_WAIT_WARN repeats itself with the holder's directory - and if
-    # the recorded pid is gone, the lock is held by something that merely
-    # inherited the descriptor, which is a different problem with a different
-    # fix and must not read as "somebody is running tests".
+    # CEL_SUITE_WAIT_WARN repeats itself with the holder's directory, asked
+    # again (the holder may have changed). If the kernel names nobody and the
+    # recorded pid is gone, the lock is held by something that merely inherited
+    # the descriptor, which is a different problem with a different fix and
+    # must not read as "somebody is running tests".
     local t0 warned=0 warn="${CEL_SUITE_WAIT_WARN:-120}"
     t0="$(date +%s)"
     until flock -w 1 "$SUITE_LOCK_FD"; do
       [ "$warned" -eq 0 ] || continue
       [ "$(( $(date +%s) - t0 ))" -ge "$warn" ] || continue
       warned=1
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      if says="$(_suite_holder_says "$path" "$pid" "$since" "$cwd")"; then
+        printf 'still waiting for the suite lock - held by %s (%s)\n' "${says%%$'\t'*}" "${says#*$'\t'}"
+      elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         printf 'still waiting for the suite lock - held by pid %s since %s (%s)\n' "$pid" "$since" "$cwd"
       else
         printf 'still waiting for the suite lock - held by a dead pid %s - the lock leaked; see cel doctor\n' "$pid"

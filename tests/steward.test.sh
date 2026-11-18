@@ -1289,6 +1289,8 @@ _suite_lock_key() {
   local ino; ino="$(stat -c %i "$CEL_SUITE_LOCK")"
   awk -v i="$ino" '{ k = ($2 == "->") ? $7 : $6; n = split(k, a, ":"); if (n == 3 && a[3] == i) { print k; exit } }' /proc/locks
 }
+# SL_TYPE (default FLOCK) and SL_KEY (default the kernel's maj:min:ino) override
+# the lock line the fixture fdinfo and /proc/locks carry.
 _suite_lock_proc() { # <pid> <started-secs-ago> <cwd> <argv...> - a fixture process holding the lock on fd 3
   local pid="$1" ago="$2" cwd="$3" d="$CEL_SERVE_PROC_ROOT/$1" clk btime; shift 3
   clk="$(getconf CLK_TCK)"
@@ -1300,10 +1302,10 @@ _suite_lock_proc() { # <pid> <started-secs-ago> <cwd> <argv...> - a fixture proc
   printf '%s\0' "$@" > "$d/cmdline"
   ln -sfn "$cwd" "$d/cwd"
   ln -sfn "$(readlink -f "$CEL_SUITE_LOCK")" "$d/fd/3"
-  printf 'pos:\t0\nflags:\t02102001\nlock:\t1: FLOCK  ADVISORY  WRITE %s %s 0 EOF\n' "$pid" "$(_suite_lock_key)" > "$d/fdinfo/3"
+  printf 'pos:\t0\nflags:\t02102001\nlock:\t1: %s  ADVISORY  WRITE %s %s 0 EOF\n' "${SL_TYPE:-FLOCK}" "$pid" "${SL_KEY:-$(_suite_lock_key)}" > "$d/fdinfo/3"
 }
 _suite_lock_kernel_lists() { # <pid> [->] - a /proc/locks line for the lock, a waiter's with ->
-  printf '1: %sFLOCK  ADVISORY  WRITE %s %s 0 EOF\n' "${2:+$2 }" "$1" "$(_suite_lock_key)" >> "$CEL_SERVE_PROC_ROOT/locks"
+  printf '1: %s%s  ADVISORY  WRITE %s %s 0 EOF\n' "${2:+$2 }" "${SL_TYPE:-FLOCK}" "$1" "${SL_KEY:-$(_suite_lock_key)}" >> "$CEL_SERVE_PROC_ROOT/locks"
 }
 _suite_lock_start_of() { # <pid> -> its start tick in the fixture /proc, as tests/run.sh records it
   local s; s="$(cat "$CEL_SERVE_PROC_ROOT/$1/stat")"; s="${s##*) }"
@@ -1442,6 +1444,44 @@ test_steward_names_the_live_suite_lock_holder_not_the_stale_pid_in_the_file() {
   assert_contains "$mail" "held 40m"
   case "$mail" in *4194303*|*4194301*|*old-checkout*|*beta-orch*) echo "the alert named a holder that is not holding: $mail"; _suite_lock_free; rm -rf "$T"; return 1;; esac
   [ ! -e "$CEL_SUITE_LOCK.holder" ] || { echo "a record for a gone run was kept"; _suite_lock_free; rm -rf "$T"; return 1; }
+  _suite_lock_free
+  rm -rf "$T"
+}
+
+# ONLY A FLOCK BLOCKS `flock -n`. A POSIX (fcntl) or OFD lock on the same
+# inode is somebody else's business: listed first, with an older process
+# behind it, it is still not the holder.
+test_steward_ignores_a_posix_lock_on_the_suite_lock_inode() {
+  _suite_lock_fixture
+  local holder; _suite_lock_hold
+  SL_TYPE=POSIX _suite_lock_proc 4194300 $((90 * 60)) "$T/elsewhere" python3 fcntl-locker
+  SL_TYPE=POSIX _suite_lock_kernel_lists 4194300
+  _suite_lock_proc "$holder" $((35 * 60)) "$T/elsewhere" flock "$CEL_SUITE_LOCK" bun test
+  _suite_lock_kernel_lists "$holder"
+  _steward_suite_lock >/dev/null 2>&1
+  local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_contains "$mail" "held 35m by pid $holder (flock"
+  case "$mail" in *4194300*|*fcntl-locker*) echo "a POSIX lock was taken for the holder: $mail"; _suite_lock_free; rm -rf "$T"; return 1;; esac
+  _suite_lock_free
+  rm -rf "$T"
+}
+
+# THE FILE IS ITS INODE AND ITS PATH, NOT stat's st_dev. On btrfs subvolumes
+# and overlayfs st_dev is not the s_dev the kernel prints in /proc/locks and
+# fdinfo; the holder is still the process whose descriptor on the lock file's
+# path shows a FLOCK on its inode - with the kernel's device, whatever it is.
+test_steward_finds_the_suite_lock_holder_when_st_dev_differs_from_the_kernels() {
+  _suite_lock_fixture
+  local holder; _suite_lock_hold
+  local key="fd:07:$(stat -c %i "$CEL_SUITE_LOCK")"
+  SL_KEY="$key" _suite_lock_proc "$holder" $((33 * 60)) "$T/elsewhere" flock "$CEL_SUITE_LOCK" bun test
+  SL_KEY="$key" _suite_lock_kernel_lists "$holder"
+  _steward_suite_lock >/dev/null 2>&1
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "held 33m by pid $holder (flock"
+  # and with /proc/locks naming only a pid that is gone (a runner's own
+  # short-lived `flock`), the descriptor on the path finds it all the same
+  : > "$CEL_SERVE_PROC_ROOT/locks"; SL_KEY="$key" _suite_lock_kernel_lists 4194302
+  assert_eq "$(suite_lock_live_holder "$CEL_SUITE_LOCK" "$CEL_SERVE_PROC_ROOT")" "$holder $(_suite_lock_start_of "$holder")"
   _suite_lock_free
   rm -rf "$T"
 }

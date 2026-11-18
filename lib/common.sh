@@ -242,26 +242,30 @@ pane_cwd() { # <cwd> -> the path without a trailing " (deleted)"
 # a pid that may be long gone. And /proc/locks lists a flock under the pid that
 # TOOK it, which for a runner is the short-lived `flock` child it ran on its
 # own descriptor - gone a moment later, its pid free for reuse. So a pid counts
-# only when one of its descriptors' fdinfo shows the lock itself (`lock:` with
-# this file's maj:min:inode) - a waiter has the file open too, and shows none.
-# First the pid /proc/locks lists; else every process with the file open
-# (fuser, or a walk of <proc>/*/fd when the proc root is a fixture or there is
-# no fuser), the oldest that holds it. Prints "<pid> <start-ticks>"; fails when
-# nobody can be named.
+# only when one of its descriptors - one whose link resolves to the lock
+# file's path - shows the lock itself in its fdinfo: a `lock:` line of type
+# FLOCK on this inode. A waiter has the file open too, and shows none; a POSIX
+# or OFD lock on the same inode is not what blocks `flock -n`, and counts for
+# nothing. The file is the inode plus that path, never stat's st_dev: on btrfs
+# subvolumes and overlayfs st_dev is not the s_dev the kernel prints, so the
+# device is whatever the kernel's own lines say.
+# First the pids /proc/locks lists with a FLOCK on the inode; else every
+# process with the file open (fuser, or a walk of <proc>/*/fd when the proc
+# root is a fixture or there is no fuser), the oldest that holds it. Prints
+# "<pid> <start-ticks>"; fails when nobody can be named.
 suite_lock_live_holder() { # <lock-path> [proc-root]
-  local proc="${2:-/proc}" path st dev key pat t pid di s best="" bs="" f
+  local proc="${2:-/proc}" path ino pat t pid di s best="" bs="" f
   local -a cands=()
   path="$(readlink -f -- "$1" 2>/dev/null)" && [ -n "$path" ] || path="$1"
-  st="$(stat -L -c '%d %i' -- "$path" 2>/dev/null)" || return 1
-  dev="${st% *}"
-  key="$(printf '%02x:%02x:%s' "$(( (dev >> 8) & 0xfff ))" "$(( (dev & 0xff) | ((dev >> 12) & 0xfff00) ))" "${st#* }")"
+  ino="$(stat -L -c '%i' -- "$path" 2>/dev/null)" && [ -n "$ino" ] || return 1
   pat="${path//\\/\\\\}"; pat="${pat//\*/\\*}"; pat="${pat//\?/\\?}"; pat="${pat//\[/\\[}"
   if [ -r "$proc/locks" ]; then
     # "<id>: FLOCK ADVISORY WRITE <pid> <maj:min:ino> ..."; a waiter's line
-    # has "->" after the id
+    # has "->" after the id, so its type is not in this field
     while read -r _ t _ _ pid di _; do
-      [ "$t" != "->" ] && [ "$di" = "$key" ] || continue
-      s="$(_suite_lock_held_by "$proc" "$pid" "$key" "$pat")" && { printf '%s %s\n' "$pid" "$s"; return 0; }
+      [ "$t" = FLOCK ] && [ "${di##*:}" = "$ino" ] || continue
+      # the device is the kernel's: this line's, matched in the holder's fdinfo
+      s="$(_suite_lock_held_by "$proc" "$pid" "$di" "$pat")" && { printf '%s %s\n' "$pid" "$s"; return 0; }
     done < "$proc/locks"
   fi
   if [ "$proc" = /proc ] && have fuser; then
@@ -273,25 +277,26 @@ suite_lock_live_holder() { # <lock-path> [proc-root]
     done < <(find "$proc"/[0-9]*/fd -mindepth 1 -maxdepth 1 -lname "$pat" 2>/dev/null)
   fi
   for pid in "${cands[@]}"; do
-    s="$(_suite_lock_held_by "$proc" "$pid" "$key" "$pat")" || continue
+    s="$(_suite_lock_held_by "$proc" "$pid" "$ino" "$pat")" || continue
     if [ -z "$best" ] || [ "$s" -lt "$bs" ]; then best="$pid"; bs="$s"; fi
   done
   [ -n "$best" ] || return 1
   printf '%s %s\n' "$best" "$bs"
 }
-_suite_lock_held_by() { # <proc> <pid> <maj:min:ino> <fd-link-pattern> -> its start ticks, when it holds the lock
-  local fd l line
+_suite_lock_held_by() { # <proc> <pid> <maj:min:ino | ino> <fd-link-pattern> -> its start ticks, when it holds the lock
+  local fd l t di line
   local -a f=()
   [[ "$2" =~ ^[1-9][0-9]*$ ]] || return 1
   while IFS= read -r fd; do
     { while IFS= read -r l; do
-        case "$l" in
-          lock:*" $3 "*)
-            { IFS= read -r line < "$1/$2/stat"; } 2>/dev/null || return 1
-            read -r -a f <<<"${line##*)}"
-            [[ "${f[19]:-}" =~ ^[0-9]+$ ]] || return 1
-            printf '%s' "${f[19]}"; return 0 ;;
-        esac
+        # "lock: <id>: FLOCK ADVISORY WRITE <pid> <maj:min:ino> ..."
+        case "$l" in lock:*) ;; *) continue ;; esac
+        read -r _ _ t _ _ _ di _ <<<"$l"
+        [ "$t" = FLOCK ] && { [ "$di" = "$3" ] || [ "${di##*:}" = "$3" ]; } || continue
+        { IFS= read -r line < "$1/$2/stat"; } 2>/dev/null || return 1
+        read -r -a f <<<"${line##*)}"
+        [[ "${f[19]:-}" =~ ^[0-9]+$ ]] || return 1
+        printf '%s' "${f[19]}"; return 0
       done < "$1/$2/fdinfo/${fd##*/}"; } 2>/dev/null
   done < <(find "$1/$2/fd" -mindepth 1 -maxdepth 1 -lname "$4" 2>/dev/null)
   return 1

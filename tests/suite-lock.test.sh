@@ -14,9 +14,11 @@ source "$CEL_ROOT/lib/common.sh"
 # a question a wall clock can answer.
 _suite_fixture() {
   T="$(mktemp -d)"
-  mkdir -p "$T/tests/lib"
+  mkdir -p "$T/tests/lib" "$T/lib"
   cp "$CEL_ROOT/tests/run.sh" "$T/tests/run.sh"
   cp "$CEL_ROOT/tests/lib/assert.sh" "$T/tests/lib/assert.sh"
+  # the runner asks the kernel who holds the lock through lib/common.sh
+  cp "$CEL_ROOT/lib/common.sh" "$T/lib/common.sh"
   printf 'test_slow_thing() { sleep 2; }\n' > "$T/tests/slow.test.sh"
   export CEL_SUITE_LOCK="$T/suite.lock"
   # The suite that runs THIS test is itself holding a lock and says so in the
@@ -268,12 +270,35 @@ test_a_long_wait_names_the_live_holder() {
   rm -rf "$T"
 }
 
-# And when the pid in the file is gone, the lock is held by something that
-# inherited the descriptor - the 2026-09-19 outage exactly. Saying "leaked"
-# rather than naming a process that no longer exists is the difference between
-# an operator waiting and an operator fixing it.
+# THE FILE IS NOT THE HOLDER. The lock file can name a pid long gone - another
+# tool's `flock <lockfile> bun test` writes nothing to it - so the waiting lines
+# name the process the kernel says holds the lock (suite_lock_live_holder):
+# its pid, command and directory, and never the file's pid.
+test_the_waiting_lines_name_the_live_holder_not_the_pid_in_the_file() {
+  _suite_fixture
+  mkdir -p "$T/elsewhere"
+  printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"
+  ( cd "$T/elsewhere" && flock 9 && exec sleep 6 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  local _i; for _i in $(seq 1 50); do [ "$(cat "/proc/$holder/comm" 2>/dev/null)" = sleep ] && break; sleep 0.1; done
+  local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "waiting for the suite lock (held by pid $holder (sleep) since "
+  assert_contains "$out" "still waiting for the suite lock - held by pid $holder (sleep) since "
+  assert_contains "$out" "($(cd "$T/elsewhere" && pwd -P))"
+  case "$out" in *4194303*|*a-checkout*|*leaked*) echo "the waiting lines named the file's pid: $out"; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+
+# And when the kernel names nobody this runner can see and the pid in the file
+# is gone, the lock is held by something that inherited the descriptor - the
+# 2026-09-19 outage exactly. Saying "leaked" rather than naming a process that
+# no longer exists is the difference between an operator waiting and an
+# operator fixing it. (Here the runner has no lib/common.sh to ask with.)
 test_a_long_wait_says_when_the_recorded_holder_is_dead() {
   _suite_fixture
+  rm -f "$T/lib/common.sh"
   ( flock 9; printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"; exec sleep 4 ) 9>>"$CEL_SUITE_LOCK" &
   local holder=$!
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
