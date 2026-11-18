@@ -14,9 +14,11 @@ source "$CEL_ROOT/lib/common.sh"
 # a question a wall clock can answer.
 _suite_fixture() {
   T="$(mktemp -d)"
-  mkdir -p "$T/tests/lib"
+  mkdir -p "$T/tests/lib" "$T/lib"
   cp "$CEL_ROOT/tests/run.sh" "$T/tests/run.sh"
   cp "$CEL_ROOT/tests/lib/assert.sh" "$T/tests/lib/assert.sh"
+  # the runner asks the kernel who holds the lock through lib/common.sh
+  cp "$CEL_ROOT/lib/common.sh" "$T/lib/common.sh"
   printf 'test_slow_thing() { sleep 2; }\n' > "$T/tests/slow.test.sh"
   export CEL_SUITE_LOCK="$T/suite.lock"
   # The suite that runs THIS test is itself holding a lock and says so in the
@@ -268,18 +270,120 @@ test_a_long_wait_names_the_live_holder() {
   rm -rf "$T"
 }
 
-# And when the pid in the file is gone, the lock is held by something that
-# inherited the descriptor - the 2026-09-19 outage exactly. Saying "leaked"
-# rather than naming a process that no longer exists is the difference between
-# an operator waiting and an operator fixing it.
+# THE FILE IS NOT THE HOLDER. The lock file can name a pid long gone - another
+# tool's `flock <lockfile> bun test` writes nothing to it - so the waiting lines
+# name the process the kernel says holds the lock (suite_lock_live_holder):
+# its pid, command and directory, and never the file's pid.
+test_the_waiting_lines_name_the_live_holder_not_the_pid_in_the_file() {
+  _suite_fixture
+  mkdir -p "$T/elsewhere"
+  printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"
+  ( cd "$T/elsewhere" && flock 9 && exec sleep 6 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  local _i; for _i in $(seq 1 50); do [ "$(cat "/proc/$holder/comm" 2>/dev/null)" = sleep ] && break; sleep 0.1; done
+  local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "waiting for the suite lock (held by pid $holder (sleep) since "
+  assert_contains "$out" "still waiting for the suite lock - held by pid $holder (sleep) since "
+  assert_contains "$out" "($(cd "$T/elsewhere" && pwd -P))"
+  case "$out" in *4194303*|*a-checkout*|*leaked*) echo "the waiting lines named the file's pid: $out"; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+
+# And when the kernel names nobody this runner can see and the pid in the file
+# is gone, the lock is held by something that inherited the descriptor - the
+# 2026-09-19 outage exactly. Saying "leaked" rather than naming a process that
+# no longer exists is the difference between an operator waiting and an
+# operator fixing it. (Here the runner has no lib/common.sh to ask with.)
 test_a_long_wait_says_when_the_recorded_holder_is_dead() {
   _suite_fixture
+  rm -f "$T/lib/common.sh"
   ( flock 9; printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"; exec sleep 4 ) 9>>"$CEL_SUITE_LOCK" &
   local holder=$!
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   assert_contains "$out" "still waiting for the suite lock - held by a dead pid 4194303 - the lock leaked; see cel doctor"
+  rm -rf "$T"
+}
+
+_await_file_line() { # <path> - until a holder has written its line into the lock file
+  local i=0; while [ ! -s "$1" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+}
+
+# A HOLDER LOOKUP THAT HANGS costs the waiter its bound and nothing more. A
+# wedged NFS or FUSE mount can block fuser, a /proc walk or a readlink; the
+# lookup has CEL_SUITE_HOLDER_LOOKUP seconds, its whole process group is killed
+# on expiry, the waiting line falls back to the file - and the waiter goes on
+# to take the lock once it is freed.
+test_a_hung_holder_lookup_is_bounded_and_the_lock_is_still_taken() {
+  _suite_fixture
+  cat > "$T/lib/common.sh" <<EOF
+suite_lock_live_holder() { sleep 60 & printf '%s\n' "\$!" >> '$T/stub.pids'; wait; }
+EOF
+  ( flock 9; printf '%s 03:04 /tmp/a-checkout\n' "$BASHPID" > "$CEL_SUITE_LOCK"; exec sleep 6 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  _await_file_line "$CEL_SUITE_LOCK"
+  local t0; t0="$(date +%s)"
+  CEL_SUITE_HOLDER_LOOKUP=1 CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" > "$T/out" 2>&1 &
+  local runner=$! i=0
+  until grep -q 'waiting for the suite lock' "$T/out" 2>/dev/null; do
+    sleep 0.1; i=$((i + 1)); [ "$i" -lt 100 ] || break
+  done
+  local first=$(( $(date +%s) - t0 ))
+  wait "$runner" 2>/dev/null || true
+  local total=$(( $(date +%s) - t0 )) out; out="$(cat "$T/out")"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  # bound 1s, a second's grace for the kill, and slack for a loaded box
+  [ "$first" -le 4 ] || { echo "the first waiting line took ${first}s behind a hung lookup"; rm -rf "$T"; return 1; }
+  [ "$total" -le 30 ] || { echo "the run took ${total}s behind a hung lookup"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "waiting for the suite lock (held by pid $holder since 03:04)"
+  assert_contains "$out" "still waiting for the suite lock - held by pid $holder since 03:04 (/tmp/a-checkout)"
+  assert_contains "$out" "suite lock acquired after"
+  assert_contains "$out" "1 passed, 0 failed"
+  local p
+  for p in $(cat "$T/stub.pids" 2>/dev/null); do
+    kill -0 "$p" 2>/dev/null && { echo "the hung lookup's child $p outlived its bound"; kill "$p"; rm -rf "$T"; return 1; }
+  done
+  [ -s "$T/stub.pids" ] || { echo "the stub lookup never ran"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# THE LOCK FILE THE HOLDER OPENED IS GONE FROM UNDER IT: deleted (its
+# descriptor reads "<name> (deleted)") or renamed (it reads the new name),
+# while the lock path is another name for the same inode, so the waiter still
+# queues. No descriptor on the lock path holds it, the kernel names nobody,
+# and the waiting lines fall back to the file's line.
+test_a_deleted_lock_file_name_falls_back_to_the_file_line() {
+  _suite_fixture
+  : > "$T/held-name"; ln "$T/held-name" "$CEL_SUITE_LOCK"
+  ( flock 9; printf '%s 03:04 /tmp/a-checkout\n' "$BASHPID" > "$CEL_SUITE_LOCK"; rm -f "$T/held-name"; exec sleep 4 ) 9>>"$T/held-name" &
+  local holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  _await_file_line "$CEL_SUITE_LOCK"
+  local i=0; while [ -e "$T/held-name" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "waiting for the suite lock (held by pid $holder since 03:04)"
+  assert_contains "$out" "still waiting for the suite lock - held by pid $holder since 03:04 (/tmp/a-checkout)"
+  assert_contains "$out" "1 passed, 0 failed"
+  rm -rf "$T"
+}
+test_a_renamed_lock_file_falls_back_to_the_file_line() {
+  _suite_fixture
+  : > "$T/old-name"
+  ( flock 9; printf '%s 03:04 /tmp/a-checkout\n' "$BASHPID" > "$T/old-name"
+    mv "$T/old-name" "$T/renamed" && ln "$T/renamed" "$CEL_SUITE_LOCK"; exec sleep 4 ) 9>>"$T/old-name" &
+  local holder=$!
+  local i=0; while [ ! -s "$CEL_SUITE_LOCK" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "waiting for the suite lock (held by pid $holder since 03:04)"
+  assert_contains "$out" "still waiting for the suite lock - held by pid $holder since 03:04 (/tmp/a-checkout)"
+  assert_contains "$out" "1 passed, 0 failed"
   rm -rf "$T"
 }
 
