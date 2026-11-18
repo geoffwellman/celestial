@@ -1250,6 +1250,12 @@ test_steward_restart_without_a_workspace_agent_refuses_naming_it() {
 # worker whose gate is waiting looks exactly like a worker that died. A suite
 # held far longer than any suite takes is the one case worth a word to root.
 # The steward never kills it: it says who has it and for how long.
+#
+# Who has it is the KERNEL's answer: /proc/locks and the holder's fdinfo,
+# never the lock file's first line, which is only what the last tests/run.sh
+# wrote. A real process holds the real fixture lock, so "is it held at all"
+# is the kernel's answer too; a fixture /proc ($CEL_SERVE_PROC_ROOT) says who
+# holds it, since when, and where.
 _suite_lock_fixture() {
   T="$(mktemp -d)"
   export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
@@ -1261,18 +1267,46 @@ _suite_lock_fixture() {
   printf 'name: beta\nrepos: [{name: gadget}]\n' > "$T/beta/workspace.yaml"
   CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
   export CEL_SUITE_LOCK="$T/suite.lock"
+  export CEL_SERVE_PROC_ROOT="$T/proc"
+  mkdir -p "$T/proc" "$T/elsewhere"
+  printf 'cpu  1 2 3 4\nbtime %s\n' "$(( $(date +%s) - 864000 ))" > "$T/proc/stat"
+  : > "$T/proc/locks"
 }
 
-_suite_lock_hold() { # -> sets holder: a live process holding the fixture lock, aged 31m
+_suite_lock_hold() { # -> sets holder: a live process holding the real fixture lock
+  # `exec` so the holder IS the process the test kills: a shell that forks a
+  # sleep leaves the sleep holding the inherited descriptor after the shell dies
   ( flock 9; exec sleep 30 ) 9>>"$CEL_SUITE_LOCK" &
   holder=$!
   local i=0
   while flock -n "$CEL_SUITE_LOCK" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); [ "$i" -lt 50 ] || break; done
-  printf '%s %s\n' "$holder" "$(date +%H:%M)" > "$CEL_SUITE_LOCK"
-  touch -d '31 minutes ago' "$CEL_SUITE_LOCK"
 }
-_suite_lock_start_of() { # <pid> -> its start tick, as tests/run.sh records it
-  local s; s="$(cat "/proc/$1/stat")"; s="${s##*) }"
+_suite_lock_free() { kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true; }
+
+# The lock as the kernel names it - "maj:min:inode" - taken from the kernel's
+# own /proc/locks line for the real hold.
+_suite_lock_key() {
+  local ino; ino="$(stat -c %i "$CEL_SUITE_LOCK")"
+  awk -v i="$ino" '{ k = ($2 == "->") ? $7 : $6; n = split(k, a, ":"); if (n == 3 && a[3] == i) { print k; exit } }' /proc/locks
+}
+_suite_lock_proc() { # <pid> <started-secs-ago> <cwd> <argv...> - a fixture process holding the lock on fd 3
+  local pid="$1" ago="$2" cwd="$3" d="$CEL_SERVE_PROC_ROOT/$1" clk btime; shift 3
+  clk="$(getconf CLK_TCK)"
+  btime="$(awk '/^btime/ {print $2}' "$CEL_SERVE_PROC_ROOT/stat")"
+  mkdir -p "$d/fd" "$d/fdinfo"
+  printf '%s (%s) S 1 %s 0 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0\n' \
+    "$pid" "${1##*/}" "$pid" "$(( ($(date +%s) - ago - btime) * clk ))" > "$d/stat"
+  printf '%s\n' "${1##*/}" > "$d/comm"
+  printf '%s\0' "$@" > "$d/cmdline"
+  ln -sfn "$cwd" "$d/cwd"
+  ln -sfn "$(readlink -f "$CEL_SUITE_LOCK")" "$d/fd/3"
+  printf 'pos:\t0\nflags:\t02102001\nlock:\t1: FLOCK  ADVISORY  WRITE %s %s 0 EOF\n' "$pid" "$(_suite_lock_key)" > "$d/fdinfo/3"
+}
+_suite_lock_kernel_lists() { # <pid> [->] - a /proc/locks line for the lock, a waiter's with ->
+  printf '1: %sFLOCK  ADVISORY  WRITE %s %s 0 EOF\n' "${2:+$2 }" "$1" "$(_suite_lock_key)" >> "$CEL_SERVE_PROC_ROOT/locks"
+}
+_suite_lock_start_of() { # <pid> -> its start tick in the fixture /proc, as tests/run.sh records it
+  local s; s="$(cat "$CEL_SERVE_PROC_ROOT/$1/stat")"; s="${s##*) }"
   printf '%s' "$(printf '%s\n' "$s" | awk '{print $20}')"
 }
 _suite_lock_record() { # <pid> <start> - the holder record tests/run.sh writes
@@ -1282,15 +1316,9 @@ _suite_lock_record() { # <pid> <start> - the holder record tests/run.sh writes
 
 test_steward_reports_a_suite_lock_held_past_the_warning_and_clears_it() {
   _suite_lock_fixture
-  # `exec` so the holder IS the process the test kills: a shell that forks a
-  # sleep leaves the sleep holding the inherited descriptor after the shell dies
-  ( flock 9; exec sleep 30 ) 9>>"$CEL_SUITE_LOCK" &
-  local holder=$!
-  local i=0
-  while flock -n "$CEL_SUITE_LOCK" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); [ "$i" -lt 50 ] || break; done
-  # what a real runner writes after it acquires the lock, aged 31 minutes
-  printf '%s %s\n' "$holder" "$(date +%H:%M)" > "$CEL_SUITE_LOCK"
-  touch -d '31 minutes ago' "$CEL_SUITE_LOCK"
+  local holder; _suite_lock_hold
+  _suite_lock_proc "$holder" $((31 * 60)) "$T/elsewhere" sleep 30
+  _suite_lock_kernel_lists "$holder"
 
   # three ticks, one item: a suite that will take an hour is still there in
   # five minutes and does not need saying again
@@ -1298,13 +1326,12 @@ test_steward_reports_a_suite_lock_held_past_the_warning_and_clears_it() {
   for j in 1 2 3; do _steward_suite_lock >/dev/null 2>&1; done
   local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
   assert_eq "$(printf '%s\n' "$mail" | grep -c 'suite lock held' || true)" "1"
-  assert_contains "$mail" "by pid $holder"
-  # no holder record: today's words, to root of the first workspace only
-  assert_contains "$mail" "(worktree "
+  assert_contains "$mail" "by pid $holder (sleep 30) in $T/elsewhere"
+  # no holder record, in no workspace: root of the first workspace only
   assert_eq "$(cmd_inbox read --for root --workspace beta --all)" ""
   assert_contains "$mail" "31m"
 
-  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _suite_lock_free
   _steward_suite_lock >/dev/null 2>&1
   _steward_suite_lock >/dev/null 2>&1
   mail="$(cmd_inbox read --for root --workspace alpha --all)"
@@ -1316,29 +1343,32 @@ test_steward_reports_a_suite_lock_held_past_the_warning_and_clears_it() {
 }
 
 # A suite that has been running for four minutes is a suite. Nothing is said
-# about it, or the sweep is noise every tick on a box doing its job.
+# about it, or the sweep is noise every tick on a box doing its job - however
+# old the lock file's own contents and mtime are.
 test_steward_says_nothing_about_a_suite_lock_held_for_a_normal_run() {
   _suite_lock_fixture
-  # `exec` so the holder IS the process the test kills: a shell that forks a
-  # sleep leaves the sleep holding the inherited descriptor after the shell dies
-  ( flock 9; exec sleep 30 ) 9>>"$CEL_SUITE_LOCK" &
-  local holder=$!
-  local i=0
-  while flock -n "$CEL_SUITE_LOCK" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); [ "$i" -lt 50 ] || break; done
-  printf '%s %s\n' "$holder" "$(date +%H:%M)" > "$CEL_SUITE_LOCK"
+  local holder; _suite_lock_hold
+  printf '4194303 06:45 /w/old-checkout\n' > "$CEL_SUITE_LOCK"
+  touch -d '18 hours ago' "$CEL_SUITE_LOCK"
+  _suite_lock_proc "$holder" $((4 * 60)) "$T/elsewhere" bash tests/run.sh
+  _suite_lock_kernel_lists "$holder"
   _steward_suite_lock >/dev/null 2>&1
   assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
-  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _suite_lock_free
   rm -rf "$T"
 }
 
 # WHO, WHERE, DOING WHAT - AND TOLD TO THEM. The runner leaves a holder record
 # beside the lock; the alert names the agent, its worktree and what it is
 # running, goes to that agent's own mailbox, and root of the box's first
-# workspace hears it once. The clear goes to the same two.
+# workspace hears it once. The clear goes to the same two. The runner takes
+# the lock with a `flock` child that exits at once, so /proc/locks lists that
+# dead pid: the runner is found by the descriptor it holds.
 test_steward_names_the_suite_lock_holder_and_tells_it_and_root_once() {
   _suite_lock_fixture
   local holder; _suite_lock_hold
+  _suite_lock_proc "$holder" $((32 * 60)) /w/beta-checkout bash tests/run.sh gc.test.sh steward.test.sh
+  _suite_lock_kernel_lists 4194302
   _suite_lock_record "$holder" "$(_suite_lock_start_of "$holder")"
   local j
   for j in 1 2 3; do _steward_suite_lock >/dev/null 2>&1; done
@@ -1347,16 +1377,17 @@ test_steward_names_the_suite_lock_holder_and_tells_it_and_root_once() {
   root_a="$(cmd_inbox read --for root --workspace alpha --all)"
   root_b="$(cmd_inbox read --for root --workspace beta --all)"
   assert_eq "$(printf '%s\n' "$own" | grep -c 'suite lock held' || true)" "1"
-  assert_contains "$own" "beta-orch"
+  assert_contains "$own" "beta-orch (pid $holder)"
   assert_contains "$own" "/w/beta-checkout"
   assert_contains "$own" "gc.test.sh steward.test.sh"
+  # the record's own word for when it took the lock: it queued first
   assert_contains "$own" "31m"
   assert_eq "$(printf '%s\n' "$root_a" | grep -c 'suite lock held' || true)" "1"
   assert_contains "$root_a" "beta-orch"
   assert_contains "$root_a" "/w/beta-checkout"
   assert_eq "$root_b" ""
 
-  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _suite_lock_free
   _steward_suite_lock >/dev/null 2>&1
   _steward_suite_lock >/dev/null 2>&1
   own="$(cmd_inbox read --for beta-orch --workspace beta --all)"
@@ -1371,19 +1402,108 @@ test_steward_names_the_suite_lock_holder_and_tells_it_and_root_once() {
 
 # A RECORD FOR A DIFFERENT PROCESS NAMES NOBODY. A record left by a killed run
 # can carry a pid the kernel has since handed to the current holder; its start
-# time then disagrees, and the alert falls back to root alone.
+# time then disagrees, the alert falls back to the process itself, and the
+# record - whose run is gone - is dropped.
 test_steward_ignores_a_suite_lock_holder_record_for_a_reused_pid() {
   _suite_lock_fixture
   local holder; _suite_lock_hold
+  _suite_lock_proc "$holder" $((31 * 60)) "$T/elsewhere" sleep 30
+  _suite_lock_kernel_lists "$holder"
   _suite_lock_record "$holder" 1
   _steward_suite_lock >/dev/null 2>&1
   local root_a; root_a="$(cmd_inbox read --for root --workspace alpha --all)"
-  assert_contains "$root_a" "by pid $holder"
-  assert_contains "$root_a" "(worktree "
-  case "$root_a" in *beta-orch*) echo "a stale record named an agent"; kill "$holder"; rm -rf "$T"; return 1;; esac
+  assert_contains "$root_a" "by pid $holder (sleep 30)"
+  case "$root_a" in *beta-orch*) echo "a stale record named an agent"; _suite_lock_free; rm -rf "$T"; return 1;; esac
   assert_eq "$(cmd_inbox read --for beta-orch --workspace beta --all)" ""
   assert_eq "$(cmd_inbox read --for root --workspace beta --all)" ""
-  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  [ ! -e "$CEL_SUITE_LOCK.holder" ] || { echo "a record for a gone run was kept"; _suite_lock_free; rm -rf "$T"; return 1; }
+  _suite_lock_free
+  rm -rf "$T"
+}
+
+# THE FILE IS NOT THE HOLDER (2026-11-19). The lock file named a pid that no
+# longer existed and its mtime was eighteen hours old - "held 1083m by pid
+# 3632120 (worktree unknown)" - while the lock was really held by another
+# tool's `flock <lockfile> bun test`, started minutes before. The alert names
+# the live holder, dated from its start; the dead pid's record is dropped and
+# a waiter in /proc/locks is not taken for the holder.
+test_steward_names_the_live_suite_lock_holder_not_the_stale_pid_in_the_file() {
+  _suite_lock_fixture
+  local holder; _suite_lock_hold
+  printf '4194303 06:45 /w/old-checkout\n' > "$CEL_SUITE_LOCK"
+  touch -d '18 hours ago' "$CEL_SUITE_LOCK"
+  _suite_lock_record 4194303 777
+  _suite_lock_proc "$holder" $((40 * 60)) "$T/elsewhere" flock "$CEL_SUITE_LOCK" bun test
+  _suite_lock_kernel_lists 4194301 '->'
+  _suite_lock_kernel_lists "$holder"
+  _steward_suite_lock >/dev/null 2>&1
+  local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_contains "$mail" "by pid $holder (flock $CEL_SUITE_LOCK bun test) in $T/elsewhere"
+  assert_contains "$mail" "held 40m"
+  case "$mail" in *4194303*|*4194301*|*old-checkout*|*beta-orch*) echo "the alert named a holder that is not holding: $mail"; _suite_lock_free; rm -rf "$T"; return 1;; esac
+  [ ! -e "$CEL_SUITE_LOCK.holder" ] || { echo "a record for a gone run was kept"; _suite_lock_free; rm -rf "$T"; return 1; }
+  _suite_lock_free
+  rm -rf "$T"
+}
+
+# A HOLDER THAT IS NOT A SUITE STILL HAS AN OWNER: the agent whose directory
+# it runs in (_serve_dir_owner), told alongside root.
+test_steward_tells_the_owner_of_a_foreign_suite_lock_holders_directory() {
+  _suite_lock_fixture
+  mkdir -p "$T/beta/repos/gadget"
+  local owner; owner="$(_serve_dir_owner "$T/beta/repos/gadget")"
+  assert_eq "$owner" "beta gadget-orch"
+  local holder; _suite_lock_hold
+  _suite_lock_proc "$holder" $((35 * 60)) "$T/beta/repos/gadget" flock "$CEL_SUITE_LOCK" bun test
+  _suite_lock_kernel_lists "$holder"
+  local j
+  for j in 1 2; do _steward_suite_lock >/dev/null 2>&1; done
+  local own root_a
+  own="$(cmd_inbox read --for gadget-orch --workspace beta --all)"
+  root_a="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_eq "$(printf '%s\n' "$own" | grep -c 'suite lock held' || true)" "1"
+  assert_contains "$own" "by pid $holder (flock $CEL_SUITE_LOCK bun test) in $T/beta/repos/gadget"
+  assert_contains "$own" "no tests/run.sh holder record"
+  assert_eq "$(printf '%s\n' "$root_a" | grep -c 'suite lock held' || true)" "1"
+  assert_eq "$(cmd_inbox read --for root --workspace beta --all)" ""
+  _suite_lock_free
+  _steward_suite_lock >/dev/null 2>&1
+  assert_contains "$(cmd_inbox read --for gadget-orch --workspace beta --all)" "cleared: the suite lock is free again"
+  assert_eq "$(_inbox_open_fp beta suite-lock steward gadget-orch)" ""
+  rm -rf "$T"
+}
+
+# NOBODY HOLDING IT IS NOTHING TO SAY, whatever the file still says: a pid,
+# an eighteen-hour-old mtime, a record for a run that is gone (dropped).
+test_steward_says_nothing_when_nobody_holds_the_suite_lock() {
+  _suite_lock_fixture
+  printf '4194303 06:45 /w/old-checkout\n' > "$CEL_SUITE_LOCK"
+  touch -d '18 hours ago' "$CEL_SUITE_LOCK"
+  _suite_lock_record 4194303 777
+  _steward_suite_lock >/dev/null 2>&1
+  assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  assert_eq "$(cmd_inbox read --for beta-orch --workspace beta --all)" ""
+  [ ! -e "$T/state.suite-lock" ] || { echo "a free lock left an alert marker"; rm -rf "$T"; return 1; }
+  [ ! -e "$CEL_SUITE_LOCK.holder" ] || { echo "a record for a gone run was kept"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A HOLDER THAT STARTED BEFORE THE LOCK WAS FREE did not hold it then: it is
+# dated from when the steward first saw it holding, not from its start.
+test_steward_dates_a_suite_lock_hold_from_first_sight_when_the_holder_queued() {
+  _suite_lock_fixture
+  : > "$CEL_SUITE_LOCK"
+  _steward_suite_lock >/dev/null 2>&1      # a tick that saw the lock free
+  local holder; _suite_lock_hold
+  _suite_lock_proc "$holder" $((120 * 60)) "$T/elsewhere" flock "$CEL_SUITE_LOCK" bun test
+  _suite_lock_kernel_lists "$holder"
+  _steward_suite_lock >/dev/null 2>&1
+  assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  # with no earlier look, its start is the best word there is
+  rm -f "$T/state.suite-holder"
+  _steward_suite_lock >/dev/null 2>&1
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "held 120m by pid $holder"
+  _suite_lock_free
   rm -rf "$T"
 }
 
@@ -1393,11 +1513,13 @@ test_steward_ignores_a_suite_lock_holder_record_for_a_reused_pid() {
 test_steward_clears_every_workspace_an_older_steward_told_about_the_suite_lock() {
   _suite_lock_fixture
   local holder; _suite_lock_hold
+  _suite_lock_proc "$holder" $((31 * 60)) "$T/elsewhere" sleep 30
+  _suite_lock_kernel_lists "$holder"
   local ws
   for ws in alpha beta; do _steward_raise "$ws" suite-lock status "steward: suite lock held 31m by pid 1 (worktree x)"; done
   : > "$T/state.suite-lock"
   _steward_suite_lock >/dev/null 2>&1
-  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _suite_lock_free
   _steward_suite_lock >/dev/null 2>&1
   for ws in alpha beta; do
     assert_eq "$(_inbox_open_fp "$ws" suite-lock steward root)" ""

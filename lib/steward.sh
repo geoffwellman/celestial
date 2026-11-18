@@ -1624,25 +1624,65 @@ _steward_suite_lock_path() {
 }
 
 # THE HOLDER RECORD (tests/run.sh writes it beside the lock): pid, its kernel
-# start time, the caller's mailbox and workspace, the checkout and the files
-# asked for. It counts only when it describes the process holding the lock now
-# - the pid in the lock file, with the same start time - so a record a killed
-# run left behind, whose pid the kernel has since reused, names nobody. Sets
-# the caller's agent, hws, wt and files.
-_steward_suite_holder() { # <record> <pid>
-  local k v rpid="" rstart="" stat
-  local -a f
+# start time, the caller's mailbox and workspace, the checkout, the files
+# asked for and when it took the lock. It counts only when it describes the
+# process holding the lock now - the live holder's pid, with the same start
+# time - so a record a killed run left behind, whose pid the kernel has since
+# reused, names nobody. Sets the caller's agent, hws, wt, files and rsince.
+_steward_suite_holder() { # <record> <pid> <start-ticks>
+  local k v rpid="" rstart=""
   [ -f "$1" ] || return 1
   while IFS='=' read -r k v; do
     case "$k" in
       pid) rpid="$v" ;; start) rstart="$v" ;; agent) agent="$v" ;;
-      workspace) hws="$v" ;; worktree) wt="$v" ;; files) files="$v" ;;
+      workspace) hws="$v" ;; worktree) wt="$v" ;; files) files="$v" ;; since) rsince="$v" ;;
     esac
   done < "$1" 2>/dev/null
-  [ "$rpid" = "$2" ] && [ -n "$rstart" ] || return 1
-  { IFS= read -r stat < "/proc/$2/stat"; } 2>/dev/null || return 1
-  read -r -a f <<< "${stat##*) }"
-  [ "${f[19]:-}" = "$rstart" ]
+  [ "$rpid" = "$2" ] && [ -n "$rstart" ] && [ "$rstart" = "$3" ]
+}
+
+# A RECORD WHOSE RUN IS GONE NAMES NOBODY, EVER AGAIN: its pid no longer
+# exists, or now belongs to a process with another start time. It is dropped,
+# held lock or not, so it cannot be read as anybody's later.
+_steward_suite_record_prune() { # <record> <proc-root>
+  local k v rpid="" rstart="" first=""
+  [ -f "$1" ] || return 0
+  while IFS='=' read -r k v; do
+    case "$k" in pid) rpid="$v" ;; start) rstart="$v" ;; esac
+  done < "$1" 2>/dev/null
+  [[ "$rpid" =~ ^[1-9][0-9]*$ ]] || return 0
+  if [ -r "$2/$rpid/stat" ]; then
+    [ -z "$rstart" ] || [ "$(_serve_pid_start_in "$2" "$rpid")" = "$rstart" ] && return 0
+  fi
+  # still the same record: a run that has just written its own is not dropped
+  { IFS= read -r first < "$1"; } 2>/dev/null
+  [ "$first" = "pid=$rpid" ] && rm -f -- "$1"
+  return 0
+}
+
+_steward_ticks_epoch() { # <proc-root> <start-ticks> -> the epoch second the process started
+  local k v btime="" clk
+  { while read -r k v; do [ "$k" = btime ] && { btime="$v"; break; }; done < "$1/stat"; } 2>/dev/null
+  [[ "$btime" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || return 0
+  clk="$(getconf CLK_TCK 2>/dev/null)" || clk=100
+  [[ "$clk" =~ ^[1-9][0-9]*$ ]] || clk=100
+  printf '%s' "$(( btime + $2 / clk ))"
+}
+
+# WHEN THE HOLD BEGAN. The kernel says when the holder STARTED, which is when it
+# took the lock unless it queued for it first. So the steward keeps what it saw
+# last tick in $_STEWARD_STATE.suite-holder, "<pid:start|-|?> <since> <looked>":
+# the same holder as last tick keeps its since; one that had already started
+# when the steward last looked and saw it not holding is dated from now, when
+# it was first seen holding; any other from its start. Records this look.
+_steward_suite_held_since() { # <state> <key> <start-epoch|""> <now> -> since
+  local pk="" ps="" pl="" since
+  { read -r pk ps pl < "$1"; } 2>/dev/null || true
+  if [ "$pk" = "$2" ] && [[ "$ps" =~ ^[0-9]+$ ]]; then since="$ps"
+  elif [ -n "$3" ] && ! { [[ "$pl" =~ ^[0-9]+$ ]] && [ "$pl" -ge "$3" ]; }; then since="$3"
+  else since="$4"; fi
+  printf '%s %s %s\n' "$2" "$since" "$4" > "$1" 2>/dev/null || true
+  printf '%s' "$since"
 }
 
 # The holder's mailbox lives in its own workspace: the one its launch named, if
@@ -1668,18 +1708,21 @@ _steward_suite_marker_expand() { # <marker>
 }
 
 _steward_suite_lock() {
-  local path ws to
+  local path ws to proc="${CEL_SERVE_PROC_ROOT:-/proc}" now
   path="$(_steward_suite_lock_path)"
   [ "$path" = none ] && return 0
   have flock || return 0
+  now="$(date +%s)"
+  local raised="$_STEWARD_STATE.suite-lock" seen="$_STEWARD_STATE.suite-holder"
+  _steward_suite_record_prune "$path.holder" "$proc"
 
   # Free, or gone entirely: whatever was said about it is no longer true. The
   # file surviving an unheld lock is normal - it is the descriptor that holds
-  # it, not the file - so its existence proves nothing on its own. The clear
-  # goes to whoever was told, one line each, recorded in $raised as
+  # it, not the file - so its existence, contents and age prove nothing. The
+  # clear goes to whoever was told, one line each, recorded in $raised as
   # "<ws>\t<mailbox>" when the alert went out.
-  local raised="$_STEWARD_STATE.suite-lock"
   if [ ! -f "$path" ] || flock -n "$path" -c true >/dev/null 2>&1; then
+    printf -- '- - %s\n' "$now" > "$seen" 2>/dev/null || true
     [ -f "$raised" ] || return 0
     _steward_suite_marker_expand "$raised"
     while IFS=$'\t' read -r ws to; do
@@ -1690,24 +1733,30 @@ _steward_suite_lock() {
     return 0
   fi
 
-  # The holder wrote its pid into the first line after acquiring, and that
-  # write is also when the hold started - so the file's own mtime is the
-  # clock, with no second file to keep in step with it.
-  local held pid mtime age
-  held="$(sed -n 1p "$path" 2>/dev/null || true)"
-  pid="${held%% *}"
-  case "$pid" in ''|*[!0-9]*) pid="?" ;; esac
-  mtime="$(stat -c %Y "$path" 2>/dev/null || printf 0)"
-  [ "${mtime:-0}" -gt 0 ] || return 0
-  age=$(( $(date +%s) - mtime ))
-  [ "$age" -ge "$_STEWARD_SUITE_HOLD_WARN_SECS" ] || return 0
+  # WHO HOLDS IT IS THE KERNEL'S ANSWER, NOT THE FILE'S. On 2026-11-19 the
+  # alert said "held 1083m by pid 3632120 (worktree unknown)": the file's pid,
+  # gone, dated by the file's eighteen-hour-old mtime - while another tool's
+  # `flock <lockfile> bun test`, started minutes before, held the lock and had
+  # written nothing. So the holder is the process the kernel says holds it
+  # (suite_lock_live_holder), dated from its start or from first sight.
+  local live pid="?" start="" sepoch="" since age
+  if live="$(suite_lock_live_holder "$path" "$proc")"; then
+    pid="${live%% *}"; start="${live#* }"
+    sepoch="$(_steward_ticks_epoch "$proc" "$start")"
+  fi
+  since="$(_steward_suite_held_since "$seen" "$pid${start:+:$start}" "$sepoch" "$now")"
 
   # Whose run, where and doing what, from the holder record when it is this
-  # holder's. Without one, which tree it is running in if the kernel will
-  # say; unknown is not a reason to stay quiet: the pid and the duration are
-  # already actionable.
-  local agent="" hws="" wt="" files="" ows="" msg
-  if [ "$pid" != "?" ] && _steward_suite_holder "$path.holder" "$pid"; then
+  # holder's - and since when, in its own word: a run queues before it holds.
+  local agent="" hws="" wt="" files="" rsince="" ows="" msg cwd cmd owner record=0
+  if [ "$pid" != "?" ] && _steward_suite_holder "$path.holder" "$pid" "$start"; then
+    record=1
+    [[ "$rsince" =~ ^[0-9]+$ ]] && [ "$rsince" -le "$now" ] && since="$rsince"
+  fi
+  age=$(( now - since ))
+  [ "$age" -ge "$_STEWARD_SUITE_HOLD_WARN_SECS" ] || return 0
+
+  if [ "$record" -eq 1 ]; then
     local who="pid $pid"
     [ -z "$agent" ] || who="$agent (pid $pid)"
     # The record is the holder's own words: each field is capped, so a long
@@ -1715,11 +1764,23 @@ _steward_suite_lock() {
     : "${wt:=unknown}" "${files:=all}"
     msg="steward: suite lock held $(( age / 60 ))m by $who in worktree ${wt:0:200}, running ${files:0:200} - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
     [ -z "$agent" ] || ows="$(_steward_suite_holder_ws "$hws" "$wt")"
+  elif [ "$pid" != "?" ]; then
+    # Not a run this plane started: named by its pid, command and directory,
+    # and told to whoever owns that directory as well as root.
+    agent=""
+    cwd="$(readlink -f "$proc/$pid/cwd" 2>/dev/null)" || cwd=""
+    cmd="$(tr '\0\n' '  ' < "$proc/$pid/cmdline" 2>/dev/null)" || cmd=""
+    cmd="${cmd% }"
+    [ -n "$cmd" ] || { IFS= read -r cmd < "$proc/$pid/comm"; } 2>/dev/null || cmd="?"
+    local where="${cwd:-unknown}"
+    msg="steward: suite lock held $(( age / 60 ))m by pid $pid (${cmd:0:120}) in ${where:0:200} - no tests/run.sh holder record - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
+    if [ -n "$cwd" ]; then
+      owner="$(_serve_dir_owner "$cwd")"
+      case "$owner" in ""|*" outside") ;; *) ows="${owner%% *}"; agent="${owner#* }" ;; esac
+    fi
   else
     agent=""
-    wt="unknown"
-    [ "$pid" = "?" ] || wt="$(readlink "/proc/$pid/cwd" 2>/dev/null || printf unknown)"
-    msg="steward: suite lock held $(( age / 60 ))m by pid $pid (worktree $wt) - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
+    msg="steward: suite lock held $(( age / 60 ))m by a process the kernel does not name (no /proc/locks or fdinfo entry holds $path) - every other gate on this box is queued behind it. Nothing has been killed."
   fi
   c_warn "$msg"
   # Once per window, not once per tick: the steward says a thing once, and a
