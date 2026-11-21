@@ -14,13 +14,13 @@ Search and retrieve standardized modern web best practices at the **start** of i
 
 ### Step 1. Search Use Cases
 
-Run the bundled CLI with `node` (see [Running the bundled CLI](#running-the-bundled-cli)) using a **2–5 word action-oriented English query** for a **single web platform capability or UI pattern**:
+Run the bundled CLI through its wrapper (see [Running the bundled CLI](#running-the-bundled-cli)) using a **2–5 word action-oriented English query** for a **single web platform capability or UI pattern**:
 - **Keep queries focused and generic**: Describe the user-visible capability (`<verb> + <UI/platform object>`, optionally paired with the target HTML/CSS/JS feature name if known). Omit framework/library names (`React`, `Vue`, `Tailwind`, etc.) and app/domain nouns (product, route, or component/file names). Split multi-feature tasks into separate `search` calls.
 - **Name implied UI primitives**: When the user's prompt expresses intent without naming the UI primitive (e.g. "confirm first", "delete with confirmation", "pick a date"), translate the domain intent into the implied UI component or platform mechanism (e.g. search `"confirmation modal dialog"` or `"confirm dialog"` rather than `"confirm destructive action"`, or `"date picker input"` rather than `"pick a date"`).
 - **Example**: Search `"light dismiss dialog"` or `"responsive data table"`, **not** `"dialog"` (too terse), `"responsive table dark mode"` (compound — split into two searches), or `"close React settings modal on outside click"` (framework/app noise).
 
 ```sh
-DISABLE_TELEMETRY=1 node <skill-dir>/modern-web.mjs search "<query>" --skill-version 2026_11_10-47b4c80e
+sh <skill-dir>/run.sh search "<query>" --skill-version 2026_11_10-47b4c80e
 ```
 
 > **Note**: Returns `[{ "id", "description" }, ...]`. Judge results by their `description` fields:
@@ -33,7 +33,7 @@ DISABLE_TELEMETRY=1 node <skill-dir>/modern-web.mjs search "<query>" --skill-ver
 Once you have relevant `id`(s) from the search results, call `retrieve` to get the full guide(s)—including both specific use-case guides that match your task and any broader discipline guide (e.g., `html`, `css`, `forms`, `accessibility`, `color`, `performance`, `security`) that applies. You can pass multiple IDs separated by commas.
 
 ```sh
-DISABLE_TELEMETRY=1 node <skill-dir>/modern-web.mjs retrieve "<id>"
+sh <skill-dir>/run.sh retrieve "<id>"
 ```
 
 If `retrieve` saves large output (> 9.5 KB) to a temporary file to prevent truncation, read that file path in full using your file-reading tool (reading remaining line ranges if needed)—do not use `cat` or `head`.
@@ -59,9 +59,9 @@ When you consult `modern-web-guidance` for a task, end the response where you de
 
 ## Running the bundled CLI
 
-- `<skill-dir>` is the directory that holds this SKILL.md: the base directory your runtime reports when it loads the skill. The CLI (`modern-web.mjs`), its search index (`gen/`) and every guide (`guides/`) are in it. Nothing is fetched, so it works offline and needs no network approval.
+- `<skill-dir>` is the directory that holds this SKILL.md: the base directory your runtime reports when it loads the skill. The CLI (`modern-web.mjs`), its search index (`gen/`), every guide (`guides/`) and the wrapper `run.sh` are in it. Nothing is fetched, so it works offline and needs no network approval.
 - It needs Node.js 22 or newer on PATH.
-- Always set `DISABLE_TELEMETRY=1`: without it the CLI sends usage data, including your search queries, to Google.
+- Always go through `run.sh`, never `node modern-web.mjs` directly: the wrapper turns the CLI's telemetry off (`DISABLE_TELEMETRY=1`), which otherwise sends usage data, including your search queries, to Google.
 - Never run `npx modern-web-guidance` or `npx skills ...`: they fetch an unpinned copy from the network or install the skill into the project.
 
 ## Guidelines

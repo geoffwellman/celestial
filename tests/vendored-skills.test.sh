@@ -117,6 +117,14 @@ test_ui_sdk_description_says_beta_and_core_only() {
   assert_contains "$desc" "@ui-sdk/core"
 }
 
+# Nor does its body tell an agent to add ui-sdk or load it from the network.
+test_ui_sdk_never_installs_core_or_loads_a_remote_script() {
+  local d="$CEL_ROOT/core/skills/ui-sdk" hits
+  hits="$(grep -rnE '<script[^>]*ui-sdk\.dev|<link[^>]*ui-sdk\.dev|if no `@ui-sdk` package is installed|install `@ui-sdk/core` and' "$d" || true)"
+  assert_eq "$hits" ""
+  assert_contains "$(cat "$d/SKILL.md")" 'Never install `@ui-sdk/core`'
+}
+
 # The upstream skill runs `npx modern-web-guidance@latest` (network, unpinned).
 # The vendored one runs the CLI and index fetched at install from the pinned
 # tarball, against the committed guides, with no network once fetched.
@@ -126,6 +134,11 @@ test_modern_web_guidance_answers_from_the_installed_cli() {
   if grep -nE '^(DISABLE_TELEMETRY=1 )?(npx|pnpx)|npx -y|@latest' "$skill/SKILL.md"; then
     echo "SKILL.md still fetches the CLI"; return 1
   fi
+  # every command goes through the telemetry-off wrapper
+  if grep -nE '^[^`-].*modern-web\.mjs (search|retrieve|list)' "$skill/SKILL.md"; then
+    echo "SKILL.md runs the CLI around its wrapper"; return 1
+  fi
+  assert_contains "$(cat "$skill/SKILL.md")" 'sh <skill-dir>/run.sh search'
   source "$CEL_ROOT/lib/common.sh"
   source "$CEL_ROOT/lib/link.sh"
   fetch_vendored_skills >/dev/null   # what `cel setup` / `cel update` run
@@ -135,15 +148,53 @@ test_modern_web_guidance_answers_from_the_installed_cli() {
   out="$(https_proxy=$dead HTTPS_PROXY=$dead http_proxy=$dead HTTP_PROXY=$dead python3 "$VENDOR" fetch)" \
     || { echo "after fetch_vendored_skills the inputs still needed the network"; return 1; }
   assert_contains "$out" "present modern-web-guidance"
-  out="$(cd "$T" && HOME="$T" DISABLE_TELEMETRY=1 https_proxy=$dead HTTPS_PROXY=$dead \
-    node "$skill/modern-web.mjs" search "light dismiss dialog" \
+  out="$(cd "$T" && env -u DISABLE_TELEMETRY HOME="$T" https_proxy=$dead HTTPS_PROXY=$dead \
+    sh "$skill/run.sh" search "light dismiss dialog" \
     --skill-version "$(cat "$skill/skill-version.txt")" 2>"$T/err")" || { cat "$T/err"; return 1; }
   assert_contains "$out" '"id":"light-dismiss-a-dialog"'
-  out="$(cd "$T" && HOME="$T" DISABLE_TELEMETRY=1 node "$skill/modern-web.mjs" retrieve dialog > "$T/guide" 2>"$T/err" \
+  out="$(cd "$T" && env -u DISABLE_TELEMETRY HOME="$T" sh "$skill/run.sh" retrieve dialog > "$T/guide" 2>"$T/err" \
     && cat "$T/guide")" || { cat "$T/err"; return 1; }
   assert_contains "$out" "Guide for dialog"
   # no update nag: the fetched CLI and the committed SKILL.md are one skill version
   [ ! -s "$T/err" ] || { cat "$T/err"; return 1; }
   assert_contains "$(cat "$skill/SKILL.md")" "--skill-version $(cat "$skill/skill-version.txt")"
+  rm -rf "$T"
+}
+
+# The wrapper, not the agent's memory, turns telemetry off: a stub node shows
+# the environment and arguments the real CLI would get.
+test_modern_web_guidance_wrapper_turns_telemetry_off() {
+  local skill="$CEL_ROOT/core/skills/modern-web-guidance" T out
+  T="$(mktemp -d)"
+  mkdir "$T/bin"
+  printf '#!/bin/sh\necho "DISABLE_TELEMETRY=${DISABLE_TELEMETRY:-unset} $*"\n' > "$T/bin/node"
+  chmod +x "$T/bin/node"
+  out="$(env -u DISABLE_TELEMETRY PATH="$T/bin:$PATH" sh "$skill/run.sh" search "a b")"
+  assert_eq "$out" "DISABLE_TELEMETRY=1 $skill/modern-web.mjs search a b"
+  out="$(DISABLE_TELEMETRY=0 PATH="$T/bin:$PATH" sh "$skill/run.sh" list)"
+  assert_eq "$out" "DISABLE_TELEMETRY=1 $skill/modern-web.mjs list"
+  rm -rf "$T"
+}
+
+# A failed write leaves no .vendor-* temporary behind in core/skills/.
+test_vendor_write_removes_its_temporary_on_failure() {
+  local T
+  T="$(mktemp -d)"
+  mkdir -p "$T/skills/x/dir-in-the-way"
+  python3 - "$CEL_ROOT/tools/skills" "$T/skills" <<'PY' || return 1
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import vendor
+vendor.SKILLS = Path(sys.argv[2])
+try:
+    vendor._write(vendor.SKILLS / "x" / "dir-in-the-way", b"body", False)
+except OSError:
+    pass
+else:
+    sys.exit("replacing a directory did not fail")
+left = sorted(p.name for p in vendor.SKILLS.iterdir() if p.name.startswith(".vendor-"))
+sys.exit(f"temporaries left: {left}" if left else 0)
+PY
   rm -rf "$T"
 }

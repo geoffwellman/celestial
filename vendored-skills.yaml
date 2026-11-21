@@ -87,7 +87,7 @@ skills:
     # The description says UI SDK is beta and the skill applies only where a
     # product already depends on @ui-sdk/core.
     patch: tools/skills/patches/ui-sdk.patch
-    sha256: 01f822bc5b2aba7ae67808093562e153b7159823913b356c984bbe10fc851821
+    sha256: 432279232026d95629eef9e937f048781124ad00f4a098d3a700b6e1cb7d3aa0
   modern-web-guidance:
     # Chrome Modern Web Guidance 1.0 (v1.0.1). Its installer
     # (`npx modern-web-guidance install` -> `npx skills add
@@ -134,4 +134,4 @@ skills:
           gen/query-words.i8: 6c88bceb3b737ec4fdbaa7b1a1a9034f5cd46895c0d2f36aff5c7639d14be82b
           gen/query-words.scale.f32: 4067f3b83a2ae21ffa3df21db1b159b2c04f6058ab394a4e2647d81faf28deea
     patch: tools/skills/patches/modern-web-guidance.patch
-    sha256: c859f5efe4a20fccb4036fe2648d491be6b6f66143d01c76de747fd08965cff1
+    sha256: 6e1e9867179c589811261ffc740906000becc725b7190474d3795055c03c92f2

@@ -18,9 +18,9 @@ The docs for the installed version ship in each package, as Markdown:
 
 The same docs are online at https://ui-sdk.dev/docs. Prefer the installed copy: it matches the version in the project.
 
-A page with no build step, like an Artifact, installs nothing: it loads `https://ui-sdk.dev/web.js` and `web.css` with two tags. Read https://ui-sdk.dev/web.md instead of `llms.txt`. It's the web components docs in one file, for that page, and [references/web-components.md](references/web-components.md#without-a-bundler) has the rest.
+UI SDK is in beta, and this skill applies only where the product's package.json already depends on `@ui-sdk/core`. Never install `@ui-sdk/core` or any other `@ui-sdk` package into a product that does not, and never load ui-sdk from a remote script or stylesheet (`https://ui-sdk.dev/web.js`, `web.css`); a page with no build step, like an Artifact, does not use ui-sdk. If the dependency is missing, stop and say so.
 
-Otherwise, if no `@ui-sdk` package is installed yet, install `@ui-sdk/core` and the framework's package with the project's package manager. In a Nuxt 4 or newer app using `@ui-sdk/vue`, also add `"@ui-sdk/vue"` to `modules` in `nuxt.config.ts`.
+In a Nuxt 4 or newer app that already uses `@ui-sdk/vue`, `"@ui-sdk/vue"` belongs in `modules` in `nuxt.config.ts`.
 
 ## Pick your path
 

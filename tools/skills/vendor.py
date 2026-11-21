@@ -282,10 +282,14 @@ def _write(target, body, executable):
     and the temporary is a dotfile in core/skills/, outside every skill's tree."""
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".vendor-", dir=SKILLS if target.is_relative_to(SKILLS) else target.parent)
-    with os.fdopen(fd, "wb") as f:
-        f.write(body)
-    os.chmod(tmp, 0o755 if executable else 0o644)
-    os.replace(tmp, target)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+        os.chmod(tmp, 0o755 if executable else 0o644)
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _place(selected, dest):
