@@ -434,16 +434,37 @@ gc_doctor_line() { # the one line cel doctor prints, from the same renderer
 }
 
 # A zombie still has a /proc directory until its launcher waits for it, so
-# "the directory exists" is not "still running". X (dead) is the same.
+# "the directory exists" is not "still running". X (dead) is the same. But a
+# thread-group leader that called pthread_exit is Z while its other threads
+# run: a Z pid with any task that is not Z/X is live.
 _gc_state_of() { # <pid> -> one-letter state from /proc/<pid>/stat, or fail
   local line state
   line="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
   state="${line##*) }"; printf '%s' "${state%% *}"
 }
-_gc_alive() { # <pid> -> 0 running, 1 gone, zombie or dead
-  local state
-  state="$(_gc_state_of "$1")" || return 1
-  case "$state" in Z|X) return 1;; esac
+_gc_task_states() { # <pid> -> one state letter per thread, one per line
+  local f line
+  for f in /proc/"$1"/task/*/stat; do
+    line="$(cat "$f" 2>/dev/null)" || continue
+    line="${line##*) }"; printf '%s\n' "${line%% *}"
+  done
+}
+# 0 running, 1 gone, zombie or dead. A pid that still exists but whose state
+# cannot be read counts as running (fail closed): the unreadable-cwd rule then
+# keeps everything, and a reap wait runs out its grace and reports it kept.
+_gc_alive() { # <pid>
+  local state t
+  if ! state="$(_gc_state_of "$1")"; then
+    _gc_pid_exists "$1" && return 0
+    return 1
+  fi
+  case "$state" in
+    X) return 1 ;;
+    Z) for t in $(_gc_task_states "$1"); do
+         case "$t" in Z|X) ;; *) return 0 ;; esac
+       done
+       return 1 ;;
+  esac
 }
 
 # pi IGNORES SIGTERM, so the old single TERM reported a reap that never

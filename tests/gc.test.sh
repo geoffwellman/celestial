@@ -1439,6 +1439,7 @@ _gc_fake_proc() { # <comm> [state] - one fake pid with an unreadable cwd beside 
   eval "_gc_comm_of() { printf '%s' '$1'; }"
   eval "_gc_state_of() { printf '%s' '${2:-S}'; }"
   _gc_pid_exists() { return 0; }
+  eval "_gc_task_states() { printf '%s\n' '${2:-S}'; }"
 }
 test_gc_unreadable_cwd_of_a_system_process_does_not_veto() {
   local c
@@ -1483,6 +1484,52 @@ test_gc_a_real_zombie_does_not_veto() {
   local rc=0; _gc_has_process "/nonexistent/wt" || rc=$?
   kill "$p"; wait "$p" 2>/dev/null || true
   [ "$rc" -eq 1 ] || { echo "real zombie $z vetoed (rc=$rc)"; return 1; }
+}
+# A thread-group leader that called pthread_exit shows Z with an unreadable
+# cwd while its other threads still run: the process is live and vetoes.
+test_gc_zombie_leader_with_a_running_thread_still_vetoes() {
+  _gc_fake_proc herdr-core Z; _gc_cwd_reset
+  _gc_task_states() { printf '%s\n' Z S; }
+  _gc_has_process "/nonexistent/wt" || { echo "zombie leader with a live thread did not veto"; return 1; }
+  _gc_alive 999001 || { echo "zombie leader with a live thread reported dead"; return 1; }
+  _gc_task_states() { printf '%s\n' Z X Z; }
+  _gc_alive 999001 && { echo "zombie with only dead threads reported alive"; return 1; }
+  return 0
+}
+test_gc_a_real_zombie_leader_with_a_live_thread_is_alive() {
+  command -v python3 >/dev/null || return 0
+  python3 -c 'import threading,time,ctypes
+threading.Thread(target=time.sleep,args=(5,)).start()
+ctypes.CDLL(None).pthread_exit(None)' & local p=$! i s=""
+  for ((i=0; i<50; i++)); do s="$(_gc_state_of "$p")"; [ "$s" = Z ] && break; sleep 0.1; done
+  [ "$s" = Z ] || { kill "$p"; echo "leader never became Z (state $s)"; return 1; }
+  local rc=0; _gc_alive "$p" || rc=$?
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || { echo "real zombie leader $p with a live thread reported dead"; return 1; }
+}
+# A pid that still exists but whose state cannot be read is kept (fail
+# closed), so its unreadable cwd vetoes; a pid that is gone is dead.
+test_gc_unreadable_state_of_an_existing_pid_is_alive() {
+  _gc_fake_proc herdr-core; _gc_cwd_reset
+  _gc_state_of() { return 1; }
+  _gc_alive 999001 || { echo "existing pid with unreadable state reported dead"; return 1; }
+  _gc_has_process "/nonexistent/wt" || { echo "unreadable state did not veto"; return 1; }
+  _gc_pid_exists() { return 1; }
+  _gc_alive 999001 && { echo "gone pid reported alive"; return 1; }
+  return 0
+}
+# The reap wait is bounded: a pid whose state stays unreadable is waited
+# for the grace, then reported still alive (kept), never looped on forever.
+test_gc_reap_wait_on_an_unreadable_pid_is_bounded() {
+  agent_get() { printf int; }
+  kill() { return 0; }
+  _gc_state_of() { return 1; }
+  _gc_pid_exists() { return 0; }
+  local rc=0 start=$SECONDS
+  CEL_GC_GRACE=1 _gc_reap_signal 999001 pi || rc=$?
+  unset -f kill
+  [ "$rc" -eq 1 ] || { echo "unreadable pid reported reaped (rc=$rc)"; return 1; }
+  [ $((SECONDS-start)) -le 5 ] || { echo "reap wait took $((SECONDS-start))s"; return 1; }
 }
 
 # ------------------------------------- finished reviewers
