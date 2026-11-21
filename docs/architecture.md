@@ -703,7 +703,14 @@ other PRs the same - and must name exactly that owner/name and PR. `cel gc`
 judges a Herdr reviewer of a Forgejo repo the same way (`forge_pr_view`,
 same checks; anything else is UNKNOWN, kept), a GitHub repo's by the
 owner/name its workspace declares, and a repo no workspace resolves is
-asked of no forge at all: UNKNOWN, kept, never guessed at by its name.
+asked of no forge at all: UNKNOWN, kept, never guessed at by its name. Its
+reviewer-checkout retention asks the same way, for the PR's state and when it
+closed (`closed_at`, which `forge_pr_view` gives on both forges), and removes
+a checkout only when that PR closed more than `CEL_REVIEW_CHECKOUT_KEEP_DAYS`
+days ago, nothing stands in it or holds a file open there, no retained Rex
+retirement packet cites it and it holds no untracked or modified file - at
+most `CEL_GC_REVIEW_CHECKOUT_CAP` forge lookups a pass, the answers
+remembered in `gc-review-checkouts.json` only to skip asking again.
 Other caller variables (`GH_CONFIG_DIR`, `GH_EDITOR`, `BROWSER`, ...) still
 reach gh - the environment is not scrubbed. The system directories are where
 root installs the distribution's packages and are normally root-owned, but

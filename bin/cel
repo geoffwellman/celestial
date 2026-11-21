@@ -323,8 +323,13 @@ cel - the celestial plane
   cel gc [--reap <hours>]       remove merged/closed solo worktrees, and
                                 close the reviewer panes whose PR is merged
                                 or closed (an open PR's reviewer is left
-                                alone however long it has waited); --reap
-                                also exits idle agents that old (panes survive)
+                                alone however long it has waited), and remove
+                                reviewer checkouts whose PR closed over
+                                CEL_REVIEW_CHECKOUT_KEEP_DAYS (3) days ago and
+                                that nothing uses or holds unique files (at
+                                most CEL_GC_REVIEW_CHECKOUT_CAP (30) a pass);
+                                --reap also exits idle agents that old (panes
+                                survive)
                                 --orphans: reap processes with no owner at all
                                 (watchers whose console exited, fixtures whose
                                 worktree is gone, shells on dead ptys, killed
