@@ -889,6 +889,33 @@ test('fresh launch handoff cannot adopt a root created before native-inventory a
   } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
 });
 
+// `cel run --fresh --handoff` puts the kickoff on the launch line: the TUI
+// creates the root and prompts it about a second after the launcher writes
+// its proof, before the first 3s observer tick has read it. That creation
+// must wait for the proof, not be dropped: a dropped root is never bound, so
+// its first turn and every later one fail "not bound" and no mail arrives.
+test('a fresh root created before the first observer tick binds once the written launch proof is read', async () => {
+  for (const [backend, order] of [['herdr', 'created-first'], ['rex', 'created-first'], ['herdr', 'request-first'], ['rex', 'request-first']]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-fresh-prompt-'));
+    const marker = path.join(dir, 'admission');
+    await writeFile(marker, JSON.stringify(admission()), { mode: 0o600 });
+    const f = backend === 'rex'
+      ? await resumeFixture({ agent_session: undefined }, { env: { CEL_OPENCODE_ADMISSION_FILE: marker } })
+      : await fixture({ env: { CEL_SESSION_BACKEND: 'herdr', CEL_OPENCODE_ADMISSION_FILE: marker } });
+    try {
+      if (order === 'created-first') {
+        await f.emit(created());
+        await f.hook('context', request({ options: {} }));
+      } else {
+        await Promise.all([f.hook('context', request({ options: {} })), f.emit(created())]);
+      }
+      await f.tick();
+      assert.equal(f.delivered[0]?.sessionID, 'ses_native', `${backend} ${order}`);
+      await assert.rejects(f.hook('context', request({ sessionID: 'ses_other', options: {} })), /unrelated roots/);
+    } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+  }
+});
+
 const catalogSource = { providerKey: 'openai-codex:0.159.0', schemaVersion: 14, updatedAt: 1 };
 const catalog = { schemaVersion: 1, sources: [{ ...catalogSource, hashVerification: 'not_verified' }], excluded: [], models: [
   { ...structuredClone(PINNED_CATALOG.models[0]), source: catalogSource, thinking: { mode: 'effort', efforts: ['low', 'medium', 'high'] } },
