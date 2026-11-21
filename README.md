@@ -736,7 +736,7 @@ foreground as null - an omitted key, an error, an empty or unreadable session
 counts as alive and is never touched. A
 client-autostarted server runs with `--exit-empty`, so closing the last shell
 can end it: if no server answers, a persistent one (`rex server start`, in its
-own systemd scope, with `--tailscale` when the old one served the tailnet) is
+own systemd scope with `OOMPolicy=continue`, with `--tailscale` when the old one served the tailnet) is
 started before any resume. If the old server served the tailnet and the new
 one does not, `rex server tailscale on` is run and verified. The summary names
 the server's version and API revision before and after.
@@ -765,6 +765,47 @@ it records the agents, installs exactly the version it vetted
 per-user Rex server in its own systemd scope if the package did not, resumes
 each recorded agent, checks it is still alive after a short settle, and sends
 root one summary. New Celestial launches wait while it runs.
+
+### Rex agents' memory: one runaway, one kill
+
+Every program a Rex terminal runs is a child of the Rex server. Each managed
+Rex launch therefore starts its terminal's command through
+`systemd-run --user --scope` (which execs it in place: same PID, same receipt)
+into a scope of its own, `cel-agent-<name>-<epoch>-<pid>.scope`, under
+`cel-agents.slice` (systemd nests it as `cel.slice/cel-agents.slice`). The
+agent's runtime and everything it starts - builds, test binaries, browsers -
+live there, not in the server's cgroup. Past the agent's `MemoryMax` the kernel
+kills that agent's largest process; in a box-wide out-of-memory the kernel's
+choice is the runaway, in its own scope. Either way the server's scope is not
+the one that loses a process, and the server's scope runs with
+`OOMPolicy=continue` besides (a scope's default, `stop`, ends the server and
+every session when any process in it is killed - what happened on
+2026-11-21). `systemd-cgls --user-unit cel-agents.slice` shows who is where.
+
+The limits live in the box config, `~/.local/share/cel/config.yaml`, in MB:
+
+```yaml
+agent_memory:
+  max_mb: 9583          # one agent's scope MemoryMax          (default: 40% of RAM)
+  swap_max_mb: 2047     # one agent's scope MemorySwapMax      (default: 25% of swap)
+  slice_max_mb: 20364   # cel-agents.slice MemoryMax, all agents (default: 85% of RAM)
+  slice_high_mb: 17968  # cel-agents.slice MemoryHigh, throttle  (default: 75% of RAM)
+  oom_policy: continue  # continue | kill | stop                 (default: continue)
+```
+
+The numbers shown are the defaults on a 23.4 GiB box with 8 GiB of swap; every
+default is computed from `/proc/meminfo` at launch. A value that is not a whole
+number of MB (or an unknown policy) is the default. `oom_policy` is the agent
+scope's: `continue` kills only the process the kernel chose, so an agent sees
+its test binary killed and carries on; `kill` ends the agent's whole scope,
+runtime included; `stop` stops it. The per-agent limits apply to new launches
+(and resumes); the slice limits are set on the live slice at every launch
+(`systemctl --user set-property --runtime`), so a change reaches agents already
+running at the next launch. `systemd-oomd` is not used.
+
+Without a systemd user manager (no `systemd-run`, or `systemctl --user` not
+answering) a launch warns that the agent runs inside the Rex server's own
+cgroup and proceeds as before. Herdr sessions are unchanged.
 
 ### Retire a completed Rex reviewer, keep its evidence
 

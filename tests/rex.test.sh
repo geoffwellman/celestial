@@ -64,7 +64,8 @@ _rext_down() {
     [ "$(jq -r .pid "$f")" = "$$" ] || kill "$(jq -r .pid "$f")" 2>/dev/null
   done
   export PATH="$REX_OLD_PATH"
-  unset CEL_REX_STATE CEL_REX_BIN CEL_MANIFEST CEL_MANIFEST_CACHE CEL_REX_RECORD
+  unset CEL_REX_STATE CEL_REX_BIN CEL_MANIFEST CEL_MANIFEST_CACHE CEL_REX_RECORD \
+    CEL_AGENT_SYSTEMD_RUN CEL_AGENT_SYSTEMCTL CEL_MEMINFO CEL_CONFIG_FILE
   rm -rf "$RT"
 }
 
@@ -327,4 +328,122 @@ test_rex_resume_by_the_steward_puts_the_plane_on_path_first() {
   [ "$(jq -r .pid "$f")" != "$old" ] || { echo 'the resume did not relaunch the agent'; unset CEL_REGISTRY; _rext_down; return 1; }
   unset CEL_REGISTRY
   _rext_down
+}
+
+# ── each agent in a scope of its own ─────────────────────────────────────────
+# 2026-11-21: one agent's test binary grew to 18 GB inside the Rex server's
+# scope; the kernel killed it, and systemd then stopped that whole scope - the
+# server and every agent. These stand in for systemd-run and systemctl, so the
+# suite never reaches the live user manager.
+_rext_scope_stubs() { # <rc of `systemctl --user show-environment`>
+  cat > "$RT/bin/fake-systemd-run" <<'SH'
+#!/bin/bash
+printf '%s\n' "$@" > "$CEL_REX_STATE/systemd-run.args"
+printf '%s' "$$" > "$CEL_REX_STATE/systemd-run.pid"
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift
+exec "$@"
+SH
+  cat > "$RT/bin/fake-systemctl" <<SH
+#!/bin/bash
+printf '%s\n' "\$*" >> "\$CEL_REX_STATE/systemctl.calls"
+case "\$*" in *show-environment*) exit ${1:-0} ;; esac
+exit 0
+SH
+  chmod +x "$RT/bin/fake-systemd-run" "$RT/bin/fake-systemctl"
+  printf 'MemTotal:       16777216 kB\nMemAvailable:    8388608 kB\nSwapTotal:       4194304 kB\n' > "$RT/meminfo"
+  export CEL_AGENT_SYSTEMD_RUN="$RT/bin/fake-systemd-run" CEL_AGENT_SYSTEMCTL="$RT/bin/fake-systemctl" \
+    CEL_MEMINFO="$RT/meminfo" CEL_CONFIG_FILE="$RT/config.yaml"
+}
+_rext_wait_runtime() {
+  local i
+  for ((i=0;i<50;i++)); do [ -f "$CEL_REX_STATE/observed" ] && return 0; sleep 0.1; done
+  return 1
+}
+
+# Defaults from the box's RAM (16 GiB) and swap (4 GiB): one agent 40% of RAM
+# and 25% of swap, every agent together 85% (hard) and 75% (throttle).
+test_rex_launch_runs_the_agent_in_a_scope_of_its_own_under_cel_agents_slice() {
+  _rext_setup
+  _rext_scope_stubs 0
+  local out rc=0 args
+  out="$(cd "$RT/ws" && cmd_run orchestrator --repo widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; _rext_down; return 1; }
+  _rext_wait_runtime || { echo 'the scoped runtime never started'; _rext_down; return 1; }
+  args="$(cat "$CEL_REX_STATE/systemd-run.args" 2>/dev/null)"
+  assert_contains "$args" "$(printf -- '--user\n--scope\n')" || { _rext_down; return 1; }
+  assert_contains "$args" "$(printf -- '--slice\ncel-agents.slice\n')" || { _rext_down; return 1; }
+  assert_contains "$args" "$(printf -- '--unit\ncel-agent-widget-orch-')" || { _rext_down; return 1; }
+  assert_contains "$args" "$(printf -- '-p\nOOMPolicy=continue\n')" || { _rext_down; return 1; }
+  assert_contains "$args" "$(printf -- '-p\nMemoryMax=6553M\n')" || { _rext_down; return 1; }
+  assert_contains "$args" "$(printf -- '-p\nMemorySwapMax=1024M\n--\n/bin/bash\n')" || { _rext_down; return 1; }
+  # The whole box's agents share one parent with its own ceiling.
+  assert_contains "$(cat "$CEL_REX_STATE/systemctl.calls")" \
+    '--user set-property --runtime cel-agents.slice MemoryMax=13926M MemoryHigh=12288M' || { _rext_down; return 1; }
+  # systemd-run --scope execs in place: the process it put in the scope IS
+  # the runtime the receipt names, so PID identity is unchanged.
+  assert_eq "$(cat "$CEL_REX_STATE/systemd-run.pid")" "$(jq -r .pid "$CEL_REX_STATE/widget-orch.json")" || { _rext_down; return 1; }
+  _rex_live "$CEL_REX_STATE/widget-orch.json" || { echo 'receipt does not name the live runtime'; _rext_down; return 1; }
+  _rext_down
+}
+
+test_rex_launch_without_a_user_manager_falls_back_to_the_server_cgroup_with_a_warning() {
+  _rext_setup
+  _rext_scope_stubs 1
+  local out rc=0
+  out="$(cd "$RT/ws" && cmd_run orchestrator --repo widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; _rext_down; return 1; }
+  _rext_wait_runtime || { echo 'the fallback launch never started its runtime'; _rext_down; return 1; }
+  assert_contains "$out" "widget-orch runs inside the Rex server's own cgroup (no systemd user manager answers)" || { _rext_down; return 1; }
+  [ ! -e "$CEL_REX_STATE/systemd-run.args" ] || { echo 'systemd-run ran without a user manager'; _rext_down; return 1; }
+  _rex_live "$CEL_REX_STATE/widget-orch.json" || { echo 'fallback receipt does not name the live runtime'; _rext_down; return 1; }
+  _rext_down
+  # No systemd-run at all: the same fallback, saying so.
+  _rext_setup
+  _rext_scope_stubs 0
+  export CEL_AGENT_SYSTEMD_RUN="$RT/bin/no-such-systemd-run"
+  _rex_agent_scope widget-orch > "$RT/scope.out" 2>&1
+  assert_eq "${#_REX_SCOPE[@]}" 0 || { _rext_down; return 1; }
+  assert_contains "$(cat "$RT/scope.out")" '(systemd-run is not installed)' || { _rext_down; return 1; }
+  _rext_down
+}
+
+test_rex_agent_scope_limits_and_oom_policy_follow_box_config() {
+  _rext_setup
+  _rext_scope_stubs 0
+  cat > "$CEL_CONFIG_FILE" <<'YAML'
+agent_memory:
+  max_mb: 2048
+  swap_max_mb: 0
+  slice_max_mb: 8192
+  slice_high_mb: 7168
+  oom_policy: kill
+YAML
+  _rex_agent_scope widget-orch > "$RT/scope.out" 2>&1
+  local words; words="$(printf '%s\n' "${_REX_SCOPE[@]}")"
+  assert_contains "$words" "$(printf -- '-p\nOOMPolicy=kill\n-p\nMemoryMax=2048M\n-p\nMemorySwapMax=0M\n--')" || { _rext_down; return 1; }
+  assert_contains "$(cat "$CEL_REX_STATE/systemctl.calls")" 'set-property --runtime cel-agents.slice MemoryMax=8192M MemoryHigh=7168M' || { _rext_down; return 1; }
+  # A value that is not a whole number of MB, or an unknown policy, is the default.
+  cat > "$CEL_CONFIG_FILE" <<'YAML'
+agent_memory:
+  max_mb: lots
+  oom_policy: explode
+YAML
+  _rex_agent_scope widget-orch > "$RT/scope.out" 2>&1
+  words="$(printf '%s\n' "${_REX_SCOPE[@]}")"
+  assert_contains "$words" "$(printf -- '-p\nOOMPolicy=continue\n-p\nMemoryMax=6553M\n')" || { _rext_down; return 1; }
+  _rext_down
+}
+
+# The server's own scope keeps running when the kernel kills a process in it:
+# a scope's default OOMPolicy is `stop`, which ended every agent on 2026-11-21.
+test_rex_server_starts_in_its_own_scope_with_oom_policy_continue() {
+  local words
+  words="$(_rex_server_start_argv running)"
+  assert_contains "$words" "$(printf 'systemd-run\n--user\n--scope\n')" || return 1
+  assert_contains "$words" "$(printf -- '--unit\ncel-rex-server-')" || return 1
+  assert_contains "$words" "$(printf -- '-p\nOOMPolicy=continue\n--\n')" || return 1
+  assert_contains "$words" "$(printf 'server\nstart\n--tailscale')" || return 1
+  words="$(_rex_server_start_argv off)"
+  case "$words" in *--tailscale*) echo 'a server that did not serve the tailnet came back serving it'; return 1 ;; esac
 }
