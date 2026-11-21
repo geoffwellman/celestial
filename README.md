@@ -512,6 +512,7 @@ Three layers on disk, and a factory floor of agents above them.
 ├── bin/cel                one CLI for everything
 ├── core/roles/            role prompts, injected at launch
 ├── core/skills/           skills linked into every agent
+├── vendored-skills.yaml   pins for the third-party skills in core/skills/
 └── agents.yaml            which agents, how to install, how to inject
 
 ~/ws/<name>                a workspace: private content + overrides (own repo)
@@ -2504,6 +2505,31 @@ revision. Celestial verifies that checkout, preserves the bundled `skills/`,
 selected runtime (a revision-named local marketplace for OMP, Claude Code and
 Codex). Edited cached bundles are preserved and refused rather than reset.
 Skills-only copying is deliberately unsupported.
+
+### Vendored UI skills
+
+Seven third-party skills sit in `core/skills/` beside the plane's own and are
+linked into every runtime (claude, omp, pi, codex, opencode) the same way:
+`web-design-guidelines`, `vercel-react-best-practices`,
+`vercel-composition-patterns` and `vercel-react-native-skills`
+(vercel-labs/agent-skills), `frontend-design` (anthropics/skills), `ui-sdk`
+(vercel-labs/ui; beta, only for products that already depend on
+`@ui-sdk/core`) and `modern-web-guidance` (Chrome Modern Web Guidance 1.0).
+
+[`vendored-skills.yaml`](vendored-skills.yaml) pins each to an exact upstream
+commit and records its repository, path, licence (MIT or Apache-2.0 only) and
+a digest of the committed tree. The GitHub content is committed, so agents read
+reviewed bytes with no network. Modern Web Guidance's CLI and search index ship
+only in its npm package; `cel setup` and `cel update` fetch them from the
+pinned tarball (sha512 integrity, per-file sha256) into the skill directory,
+gitignored, and keep them once present, so search and retrieve run offline.
+Never run its own per-project installer (`npx modern-web-guidance install`).
+
+```sh
+python3 tools/skills/vendor.py check     # offline: pins, licences, digests, names
+python3 tools/skills/vendor.py verify    # re-fetch every pin, compare byte for byte
+python3 tools/skills/vendor.py sync ui-sdk   # after moving a pin
+```
 
 
 ## Development and security

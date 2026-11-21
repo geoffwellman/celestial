@@ -1,0 +1,71 @@
+# Web components
+
+What the `@ui-sdk/web` types don't say, learned by probing.
+
+## Setup
+
+- Install `@ui-sdk/web` at the same version as `@ui-sdk/core` if it's missing.
+- There's no `primitive` entry. `createParts`, `wrappedButton` and the element types, like `UiInputElement`, come from `@ui-sdk/web` itself.
+- A component entry, like `@ui-sdk/web/input`, defines its elements when imported. It also exports the component's types and its controller factory when it has one, like `createInputController`. A `define…Elements()` function you may find in another `.d.ts` isn't what the entry exports, and calling it fails.
+
+## Without a bundler
+
+Not used here: ui-sdk is never loaded from a remote script or stylesheet (`https://ui-sdk.dev/web.js`, `web.css`). A plain HTML page, like an Artifact, does not use ui-sdk; this skill applies only where the product's package.json already depends on `@ui-sdk/core`.
+
+## Tag names and markup
+
+Each component's page, like `node_modules/@ui-sdk/web/docs/components/input.md`, shows its tags and markup. `node_modules/@ui-sdk/web/custom-elements.json` lists every tag each entry defines, with its attributes and their types, properties, the controller's methods on `.api`, events, parts and data attributes. Search it for a tag, like `"tagName": "ui-input-group"`, before probing. To confirm what an entry defines, probe it:
+
+```ts
+import "@ui-sdk/web/input"
+for (const tag of ["ui-input", "ui-input-group", "ui-input-clear"])
+  console.log(tag, !!customElements.get(tag))
+```
+
+Parts that keep native behavior need the native element inside them. The console says which: `<ui-input> needs its native element inside it for "root"`. For example:
+
+```html
+<ui-input-group>
+  <ui-input><input aria-label="Search" /></ui-input>
+  <ui-input-clear><button aria-label="Clear">×</button></ui-input-clear>
+</ui-input-group>
+```
+
+## Elements of your own
+
+`createParts` reads attributes and properties from the primitive's `options` schema, so give `definePrimitive` one, like `options: { clearOnEscape: "boolean", input: "value" }`. Every attribute option gets a property that reflects it, like `el.clearOnEscape = true`. Name booleans that start on in the root's `defaults`, like `defaults: { loop: true }`, so the property reads `true` without the attribute. Options the page provides go in the root's `options`:
+
+```ts
+createParts(clearableInput, {
+  root: {
+    tag: "ui-clearable-input",
+    display: "block",
+    // Read lazily: elements inside may upgrade after this one.
+    options: (el) => ({
+      input: () => el.querySelector<UiInputElement>("ui-input")?.api,
+    }),
+  },
+})
+```
+
+- Our elements expose their controller as `.api` and may not take a `controller` property, unlike their React components. If your primitive drives one of ours through a controller, take the controller as an option (a function, read when needed), so React can pass its own and web components can pass `.api`.
+- Don't bind a slot of yours to a native element one of ours binds. Both roots would write `data-slot` to it. Listen from a wrapper slot instead.
+
+## Differences from React
+
+- **Parts that aren't present stay in written markup, with `hidden`.** React removes them. A test helper that checks presence should treat `hidden` as absent.
+- **Changes fire events,** like `valuechange` on `<ui-input>`, with `{ value, reason }` in `detail`. `preventDefault()` cancels the change.
+- **Rendering custom elements from React JSX** needs their tags in `React.JSX.IntrinsicElements`. Don't name the props type `Element` inside `namespace JSX`: it shadows `JSX.Element`.
+
+## Testing
+
+Import the module that defines your elements in `beforeAll`, mount markup with `innerHTML`, and wait a tick before asserting, since parts register and sync after they connect. Dispatch real events with `bubbles: true`:
+
+```ts
+const event = new KeyboardEvent("keydown", {
+  key: "Escape",
+  bubbles: true,
+  cancelable: true,
+})
+field.dispatchEvent(event)
+```

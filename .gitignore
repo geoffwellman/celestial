@@ -1,4 +1,12 @@
 core/skills/herdr/
+# A vendored skill's npm inputs are fetched at install (vendored-skills.yaml).
+/core/skills/modern-web-guidance/modern-web.mjs
+/core/skills/modern-web-guidance/search.mjs
+/core/skills/modern-web-guidance/package.json
+/core/skills/modern-web-guidance/skill-version.txt
+/core/skills/modern-web-guidance/watchdog/
+/core/skills/modern-web-guidance/gen/
+/core/skills/.vendor-*
 workspace/
 spikes/
 .claude/skills/

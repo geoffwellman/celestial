@@ -1,0 +1,137 @@
+# Third-party skills vendored into core/skills/<name>/ and linked into every
+# runtime (claude, omp, pi, codex, opencode) exactly like the plane's own core
+# skills. Each is pinned like optional-plugins.yaml: an exact upstream commit,
+# never a branch, tag or @latest. The directory name is the upstream
+# frontmatter `name` (OpenCode and pi require the two to match).
+#
+# GitHub inputs are COMMITTED, so an agent reads reviewed bytes on every box
+# with no network. npm inputs are FETCHED AT INSTALL (`cel setup`,
+# `cel update`: lib/link.sh fetch_vendored_skills) into the same directory,
+# gitignored: the tarball must match its sha512 integrity and every file its
+# sha256 below, and files already present with that hash are kept, so a box
+# that has installed once works offline.
+#
+#   repo / commit / path   the upstream directory, copied whole
+#   license                MIT or Apache-2.0 only; anything else is refused
+#   license_files          where the licence text sits in the vendored copy
+#   extra                  more pinned inputs: a file or directory from another
+#                          commit (committed), or named files from an npm
+#                          tarball (fetched at install; `files` pins each)
+#   patch                  the plane's own edit, a zero-fuzz unified diff
+#   sha256                 digest of the committed tree (tools/skills/vendor.py)
+#
+# Offline check (tests/vendored-skills.test.sh): python3 tools/skills/vendor.py check
+# Re-fetch every pin and compare byte for byte: python3 tools/skills/vendor.py verify
+# Move a pin: edit it, then python3 tools/skills/vendor.py sync <name>
+# Pins read from GitHub and npm on 2026-11-21.
+skills:
+  web-design-guidelines:
+    repo: vercel-labs/agent-skills
+    commit: 5a37a6329fbad3666c3207392a6a7c0110e92efb
+    path: skills/web-design-guidelines
+    # Upstream declares MIT (README.md "License") but ships no licence file.
+    # references/command.md is a snapshot of web-interface-guidelines at the
+    # commit SKILL.md names; that repository's MIT licence travels with it.
+    license: MIT
+    license_files: [references/LICENSE]
+    extra:
+      - repo: vercel-labs/web-interface-guidelines
+        commit: 434b7f91364665f2f733b310ec54809bf8f37937
+        path: LICENSE
+        to: references/LICENSE
+        license: MIT
+    sha256: ddd5fbbeebfa5649a0e0130f0ef0021b8d01f8be5797e0fc73174f331b75dfeb
+  vercel-react-best-practices:
+    repo: vercel-labs/agent-skills
+    commit: 5a37a6329fbad3666c3207392a6a7c0110e92efb
+    path: skills/react-best-practices
+    # MIT per SKILL.md frontmatter and README.md; no licence file upstream.
+    license: MIT
+    license_files: []
+    sha256: 37c1ee962b0e34e374d96fb38b1a3864b6236ccd7d2843dfca98b17341b45ad3
+  vercel-composition-patterns:
+    repo: vercel-labs/agent-skills
+    commit: 5a37a6329fbad3666c3207392a6a7c0110e92efb
+    path: skills/composition-patterns
+    # MIT per SKILL.md frontmatter and README.md; no licence file upstream.
+    license: MIT
+    license_files: []
+    sha256: 9167f419a4ba1e982f1325c34fc7682ea895c4dcd4e734e01280323fa3cfd71c
+  vercel-react-native-skills:
+    repo: vercel-labs/agent-skills
+    commit: 5a37a6329fbad3666c3207392a6a7c0110e92efb
+    path: skills/react-native-skills
+    # MIT per SKILL.md frontmatter and README.md; no licence file upstream.
+    license: MIT
+    license_files: []
+    sha256: 3d7d9f48c9824b2878cdcb84cf9f6aefd7e85a8918ce5ee1054fb1eedd75a07d
+  frontend-design:
+    repo: anthropics/skills
+    commit: e4bb5d960d87126ff3b3a8af1a104b7db67560ba
+    path: skills/frontend-design
+    license: Apache-2.0
+    license_files: [LICENSE.txt]
+    sha256: bfaf399ef64709e44984c746e0ba0d6d8f24b2de4d5579dd9daae98c84965293
+  ui-sdk:
+    repo: vercel-labs/ui
+    commit: 855bc7fd4df3d61aee33d9d975dc3e4f71debc6c
+    path: packages/core/skills/ui-sdk
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: vercel-labs/ui
+        commit: 855bc7fd4df3d61aee33d9d975dc3e4f71debc6c
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+    # The description says UI SDK is beta and the skill applies only where a
+    # product already depends on @ui-sdk/core.
+    patch: tools/skills/patches/ui-sdk.patch
+    sha256: 432279232026d95629eef9e937f048781124ad00f4a098d3a700b6e1cb7d3aa0
+  modern-web-guidance:
+    # Chrome Modern Web Guidance 1.0 (v1.0.1). Its installer
+    # (`npx modern-web-guidance install` -> `npx skills add
+    # GoogleChrome/modern-web-guidance --skill modern-web-guidance`) writes
+    # this directory - SKILL.md and guides/ - into one project; that SKILL.md
+    # then fetches the CLI with `npx modern-web-guidance@latest` on every use.
+    # The CLI and the search index it reads ship only in the npm package, so
+    # they come from the published 1.0.1 tarball (built from
+    # GoogleChrome/modern-web-guidance-src at its gitHead), fetched at
+    # install: the index is 9 MB of embeddings plus an English vocabulary list
+    # that the private-vocabulary scan cannot tell from private names. The
+    # patch runs that CLI in place: offline, pinned, telemetry off.
+    # Not taken: legacy-scan.mjs, whose bundle carries ISC and BSD-2-Clause
+    # dependencies (package THIRD_PARTY_NOTICES); the patch drops that flow.
+    repo: GoogleChrome/modern-web-guidance
+    commit: 64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65
+    path: skills/modern-web-guidance
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: GoogleChrome/modern-web-guidance
+        commit: 64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+      - npm: modern-web-guidance@1.0.1
+        integrity: sha512-5ztUh5F1p2PewnSkA6EhsGUXqomaZY9qe6iWJCU4JbIQxHTky7s5lMJcPE4EbD1uhbQZIhl0HROH0+s6fIiGzg==
+        repo: GoogleChrome/modern-web-guidance-src
+        commit: 6971ebbec2b127d57aaa24ba63bab7b9de9e656b
+        path: package/skills/modern-web-guidance
+        to: .
+        license: Apache-2.0
+        files:
+          modern-web.mjs: 40ad56075492fda04cc03b3b9b92f9aea0b02dc4a3826486a5f520bcad4bf12d
+          search.mjs: 685f62b4e150bd7ae445027667a2cd7713b6f23d3e13c0134f6ee8955d06b6ee
+          package.json: 1655240daf0c8f83914035c1ccb133be424895cd2a1fd87b1679a07e6dc2a36b
+          skill-version.txt: 14c84492d05b22d46eac2386dac8a683ae32a266969f7e6ac2344de7d1890f78
+          watchdog/main.js: b65e8592592975c8cb44b72a826fa7a3d96e71e66d96422239a603cfc2ea12c8
+          gen/guides.json: 91fbc01b415e6e3b880a3bdaabd42fc0fb1e804032c966ec649684e2d165fa49
+          gen/guide-chunks.json.gz: 100fe6c1bde649895f2a358b79f4d5b3d22d196db5f332c5fda17887ee4cc1aa
+          gen/guide-chunks.i8: 762246ed36f50de9c1977016f231faf954760593b8c8305842436033a3ee1b1f
+          gen/guide-chunks.scale.f32: b34a5aedbad1eee74a9453a8c9a3db03917bd8b07b254d04d213b78e33700c51
+          gen/query-words.json: 14ddb88bf337a4726a62a13788241d84d656e798a7188b3cc655b1328c863966
+          gen/query-words.i8: 6c88bceb3b737ec4fdbaa7b1a1a9034f5cd46895c0d2f36aff5c7639d14be82b
+          gen/query-words.scale.f32: 4067f3b83a2ae21ffa3df21db1b159b2c04f6058ab394a4e2647d81faf28deea
+    patch: tools/skills/patches/modern-web-guidance.patch
+    sha256: 6e1e9867179c589811261ffc740906000becc725b7190474d3795055c03c92f2

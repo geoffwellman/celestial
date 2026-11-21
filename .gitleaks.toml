@@ -1,0 +1,10 @@
+# CI's credential scan (gitleaks, .github/workflows/ci.yml) loads this from the
+# repository root. It keeps every built-in rule and adds only exact allowances
+# for upstream text that is not a credential.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "WebCrypto algorithm name in a vendored skill guide (vendored-skills.yaml: modern-web-guidance)"
+regexTarget = "secret"
+regexes = ['''^MLKEM768-X25519$''']

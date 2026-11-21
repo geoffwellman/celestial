@@ -21,6 +21,11 @@ STANDARD_PREFIXES = {"UTF", "SHA", "ISO", "RFC", "TLS", "HTTP", "CWE", "CVE", "N
                      "CC0", "CC", "BSD", "GPL", "LGPL", "AGPL", "EPL", "MPL", "CDDL", "APACHE",
                      # FOLLOWUPS-<yymmdd> is a file-naming word, not a ticket.
                      "FOLLOWUPS"}
+# Exact standard identifiers in vendored upstream text (vendored-skills.yaml),
+# token for token and nothing wider: the FIPS 203/204 parameter sets ML-KEM-*
+# and ML-DSA-*, one UTC offset, and the Apache licence URL (LICENSE-2.0 is
+# matched as LICENSE-2).
+STANDARD_TOKENS = {"KEM-512", "KEM-768", "KEM-1024", "DSA-44", "DSA-65", "DSA-87", "UTC-5", "LICENSE-2"}
 TICKET = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-[0-9]+\b")
 SECRET_RULES = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
@@ -49,7 +54,7 @@ def scan_text(label, text, private_rules, findings):
         # ticket. Only this exact syntax is exempt, not bracketed content.
         ticket_text = line.replace("[A-Z0-9]", " " * len("[A-Z0-9]"))
         for match in TICKET.finditer(ticket_text):
-            if match[1] not in EXAMPLE_PREFIXES | STANDARD_PREFIXES:
+            if match[1] not in EXAMPLE_PREFIXES | STANDARD_PREFIXES and match[0] not in STANDARD_TOKENS:
                 findings.add((label, number, "non-example ticket identifier"))
 
 
@@ -159,7 +164,8 @@ def main():
             for rule in [*SECRET_RULES.values(), *rules]:
                 safe_label = rule.sub("<redacted>", safe_label)
             safe_label = TICKET.sub(
-                lambda match: match[0] if match[1] in EXAMPLE_PREFIXES | STANDARD_PREFIXES else "<ticket>",
+                lambda match: match[0] if match[1] in EXAMPLE_PREFIXES | STANDARD_PREFIXES or match[0] in STANDARD_TOKENS
+                else "<ticket>",
                 safe_label,
             )
             print(f"{safe_label}:{line}: {category}", file=sys.stderr)
