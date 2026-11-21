@@ -332,7 +332,14 @@ export async function createPlugin(context, deps = {}) {
       // The first created root alone may bind. Resume and later roots cannot
       // replace it, including an unrelated root whose idle event arrives first.
       if (resumeCandidate || resumeError || sessionID) return;
-      if (!launchAdmitted) return;
+      // Read the launch proof now rather than drop a root whose creation
+      // beat the first observer tick: a kickoff on the launch line (`cel run
+      // --fresh --handoff`) creates and prompts the root about a second after
+      // the launcher writes the proof, and a root dropped here is never bound
+      // - its first turn and all later ones refused, no mail delivered. A root
+      // seen while the proof is still absent stays unadopted.
+      try { if (!await refreshLaunchAdmission()) return; } catch { return; }
+      if (disposed || resumeCandidate || resumeError || sessionID) return;
       try {
         if (typeof p.sessionID !== 'string' || !/^ses_[A-Za-z0-9]+$/.test(p.sessionID)) throw new Error('Invalid native root identity');
         assertRoot(p);
