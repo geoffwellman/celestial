@@ -5,6 +5,8 @@
 _CEL_REX=1
 # shellcheck source=lib/opencode.sh
 . "${BASH_SOURCE[0]%/*}/opencode.sh"
+# shellcheck source=lib/config.sh
+. "${BASH_SOURCE[0]%/*}/config.sh"
 
 _rex_state() {
   if [ -n "${CEL_REX_STATE:-}" ]; then printf '%s' "$CEL_REX_STATE"
@@ -215,6 +217,99 @@ rex_launch_check() { # name runtime cwd prefix args...
   return "$rc"
 }
 
+# ── each agent in a scope of its own ─────────────────────────────────────────
+# A Rex agent's runtime, and everything it starts (builds, test binaries,
+# browsers), is a child of the Rex server. Left in the server's cgroup, one
+# runaway takes the server with it: on 2026-11-21 an agent's 18 GB test
+# binary caused a global OOM, the kernel killed it inside the server's scope,
+# and systemd then stopped that scope (a scope's default OOMPolicy is `stop`)
+# - the server and every agent's program ended.
+#
+# So a terminal's command runs through `systemd-run --user --scope`, which
+# execs it in place (same PID, so receipts and Rex's child report are
+# unchanged) in a scope of its own under cel-agents.slice:
+#   - the agent's scope: MemoryMax (the kernel kills the agent's largest
+#     process past it), MemorySwapMax (a runaway cannot fill the box's swap
+#     first), OOMPolicy (`continue`: only the process the kernel chose dies,
+#     the agent lives on; `kill` ends the agent's whole scope; `stop` stops it);
+#   - cel-agents.slice: MemoryMax/MemoryHigh across every agent, set on the
+#     live slice at each launch (systemctl set-property --runtime), so a
+#     config change applies to running agents too.
+# Box config `agent_memory:` (MB) overrides each; the defaults come from this
+# box's RAM and swap. Refused slice limits only warn: the agent still gets its
+# own scope. Only with no systemd-run, or no user manager answering within
+# CEL_AGENT_MANAGER_TIMEOUT seconds (5; a wedged manager must not hang a
+# launch, a resume or the steward's tick), does it fall back, with a warning,
+# to the server's cgroup - the behaviour before.
+REX_AGENT_SLICE=cel-agents.slice
+
+_rex_meminfo_mb() { # MemTotal|SwapTotal -> MB; fails when unreadable
+  local f="${CEL_MEMINFO:-}"
+  # The suite never measures the box it runs on: only a fixture.
+  if [ -z "$f" ]; then [ -z "${CEL_TESTING:-}" ] || return 1; f=/proc/meminfo; fi
+  awk -v k="$1:" '$1 == k { printf "%d\n", $2 / 1024; found = 1 } END { exit !found }' "$f" 2>/dev/null
+}
+
+# Config first (a whole number of MB, at least <min>), else <percent> of the
+# box's <MemTotal|SwapTotal>; empty (no limit) when neither can be had. An
+# empty <key> is the default alone.
+_rex_agent_memory() { # <key> <min> <percent> <MemTotal|SwapTotal>
+  local v="" total
+  [ -z "$1" ] || v="$(cel_config_get agent_memory "$1" 2>/dev/null || true)"
+  if [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge "$2" ]; then printf '%s' "$v"; return 0; fi
+  total="$(_rex_meminfo_mb "$4")" || return 0
+  printf '%s' "$(( total * $3 / 100 ))"
+}
+
+# One bounded call to the user manager: rc 124 when it did not answer in time.
+_rex_user_manager() { # <systemctl> <args...>
+  ( _rex_close_leases
+    exec timeout -k 1 "${CEL_AGENT_MANAGER_TIMEOUT:-5}" "$@" ) </dev/null >/dev/null 2>&1
+}
+
+# Sets _REX_SCOPE: the words that go before a terminal's command, or none.
+_rex_agent_scope() { # <agent name>
+  _REX_SCOPE=()
+  local run="${CEL_AGENT_SYSTEMD_RUN:-}" ctl="${CEL_AGENT_SYSTEMCTL:-}" why="" pol max swap unit rc smax shigh
+  # The suite never reaches the live user manager: only its stand-ins.
+  if [ -n "${CEL_TESTING:-}" ] && { [ -z "$run" ] || [ -z "$ctl" ]; }; then return 0; fi
+  ctl="${ctl:-systemctl}"
+  if ! run="$(command -v "${run:-systemd-run}")"; then why="systemd-run is not installed"
+  elif ! _rex_user_manager "$ctl" --user show-environment; then why="no systemd user manager answers"
+  fi
+  if [ -z "$why" ]; then
+    smax="$(_rex_agent_memory slice_max_mb 1 85 MemTotal)"
+    shigh="$(_rex_agent_memory slice_high_mb 1 75 MemTotal)"
+    # A throttle above the ceiling is not a pair: both take their defaults.
+    if [ -n "$smax" ] && [ -n "$shigh" ] && [ "$shigh" -gt "$smax" ]; then
+      smax="$(_rex_agent_memory '' 1 85 MemTotal)"; shigh="$(_rex_agent_memory '' 1 75 MemTotal)"
+    fi
+    local -a slice=()
+    [ -z "$smax" ] || slice+=("MemoryMax=${smax}M")
+    [ -z "$shigh" ] || slice+=("MemoryHigh=${shigh}M")
+    rc=0
+    [ "${#slice[@]}" = 0 ] || _rex_user_manager "$ctl" --user set-property --runtime "$REX_AGENT_SLICE" "${slice[@]}" || rc=$?
+    if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+      why="no systemd user manager answers"
+    elif [ "$rc" != 0 ]; then
+      c_warn "Rex: the user manager refused $REX_AGENT_SLICE's limits (${slice[*]}) - $1 still gets a scope of its own, but nothing caps all agents together" >&2
+    fi
+  fi
+  if [ -n "$why" ]; then
+    c_warn "Rex: $1 runs inside the Rex server's own cgroup ($why) - an out-of-memory kill there can stop the server and end every Rex agent" >&2
+    return 0
+  fi
+  pol="$(cel_config_get agent_memory oom_policy 2>/dev/null || true)"
+  case "$pol" in continue|kill|stop) ;; *) pol=continue ;; esac
+  max="$(_rex_agent_memory max_mb 1 40 MemTotal)"
+  swap="$(_rex_agent_memory swap_max_mb 0 25 SwapTotal)"
+  unit="cel-agent-${1//[^A-Za-z0-9_.-]/_}-$(date +%s)-$$"
+  _REX_SCOPE=("$run" --user --scope --quiet --collect --unit "$unit" --slice "$REX_AGENT_SLICE" -p "OOMPolicy=$pol")
+  [ -z "$max" ] || _REX_SCOPE+=(-p "MemoryMax=${max}M")
+  [ -z "$swap" ] || _REX_SCOPE+=(-p "MemorySwapMax=${swap}M")
+  _REX_SCOPE+=(--)
+}
+
 # Callers name the product agent whose session a reviewer or member joins in
 # _REX_HOST (and a member's feature in _REX_TEAM); without one the agent opens
 # a session of its own.
@@ -224,6 +319,7 @@ _rex_launch() { # name runtime cwd label envprefix args...
   _rex_launch_native "$rt" "$cwd" "$@"
   native="$_REX_NATIVE"
   local d file script resp session block pid start bin window="" host="${_REX_HOST:-}" host_session=""
+  local -a _REX_SCOPE=()
   d="$(_rex_state)"; mkdir -p "$d"; chmod 700 "$d"
   file="$(_rex_file "$name")"
   local lock
@@ -247,12 +343,13 @@ _rex_launch() { # name runtime cwd label envprefix args...
     _rex_launch_line "$rt" "$prefix" "$bin" run "$@"; printf '\n'
   } > "$script"
   printf '%s\n' "$script" > "$file.pending"; chmod 600 "$file.pending"
+  _rex_agent_scope "$name"
   if [ -n "$host" ]; then
     host_session="$(_rex_host_session "$host" "${wsdir:-$cwd}")" \
       || c_warn "Rex: $host has no live session Celestial can prove is its own - $name opens in a session of its own"
   fi
   if [ -n "$host_session" ]; then
-    if ! resp="$(_rex_cli window new -s "$host_session" "$name" --cwd "$cwd" --shell=none --keep-open --focus=false --json -- /bin/bash "$script")"; then
+    if ! resp="$(_rex_cli window new -s "$host_session" "$name" --cwd "$cwd" --shell=none --keep-open --focus=false --json -- ${_REX_SCOPE[@]+"${_REX_SCOPE[@]}"} /bin/bash "$script")"; then
       die "cel run: Rex launch was not acknowledged; inspect rex window ls -s $host_session before retrying ($name)"
     fi
     session="$host_session"
@@ -260,7 +357,7 @@ _rex_launch() { # name runtime cwd label envprefix args...
     block="$(jq -er '.block_ids[0] | select(type == "string" and length > 0)' <<<"$resp")" || die 'Rex returned no terminal identity'
   else
     host=""
-    if ! resp="$(_rex_cli new "$name" --cwd "$cwd" --window "$label" --shell=none --keep-open --json -- /bin/bash "$script")"; then
+    if ! resp="$(_rex_cli new "$name" --cwd "$cwd" --window "$label" --shell=none --keep-open --json -- ${_REX_SCOPE[@]+"${_REX_SCOPE[@]}"} /bin/bash "$script")"; then
       # A timeout can have created a session: keep the script and pid receipt,
       # and refuse a blind retry; do not destroy an unobserved session.
       die "cel run: Rex launch was not acknowledged; inspect rex ls before retrying ($name)"
@@ -989,14 +1086,21 @@ _rex_server_stop() {
 # A persistent server (not --exit-empty, unlike client autostart), serving the
 # tailnet when the old one did, in its own transient scope - never the
 # caller's cgroup: a server started from the steward's oneshot unit would be
-# killed when the tick ends.
-_rex_server_start() { # <tailscale-state-before>
-  [ -z "${CEL_TESTING:-}" ] || return 1
+# killed when the tick ends. OOMPolicy=continue: an out-of-memory kill of a
+# process in the scope is that one process, never a stop of the scope (the
+# default for a scope), which ends the server and every session with it.
+_rex_server_start_argv() { # <tailscale-state-before> -> one word per line
   local -a flags=()
   [ "${1:-}" != running ] || flags=(--tailscale)
+  printf '%s\n' systemd-run --user --scope --quiet --collect --unit "cel-rex-server-$(date +%s)" \
+    -p OOMPolicy=continue -- "${CEL_REX_BIN:-rex}" server start ${flags[@]+"${flags[@]}"}
+}
+_rex_server_start() { # <tailscale-state-before>
+  [ -z "${CEL_TESTING:-}" ] || return 1
+  local -a argv=()
+  mapfile -t argv < <(_rex_server_start_argv "${1:-}")
   ( _rex_close_leases
-    exec systemd-run --user --scope --quiet --collect --unit "cel-rex-server-$(date +%s)" \
-      -- "${CEL_REX_BIN:-rex}" server start "${flags[@]}" ) </dev/null
+    exec "${argv[@]}" ) </dev/null
 }
 
 _REX_ORIGIN=pkgs.superlogical.com
