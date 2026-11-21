@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Workspace-scoped vendored skill sets (vendored-skills.yaml `set:`, opted
 # into by workspace.yaml `skill_sets:`): linked under <workspace>/.cel/skills
-# for the declaring workspaces only, removed when no longer declared, never written into a repo, kept out of every runtime's
+# for the declaring workspaces only, removed when no longer declared, never
+# written into a repo, kept out of every runtime's
 # global skills dir (codex's: linked there but disabled), and named by each
 # launch for that workspace (agents.yaml workspace_skills).
 
@@ -134,13 +135,14 @@ test_codex_gets_scoped_skills_linked_and_disabled() {
   for n in $CLOUDFLARE $EXPO; do
     assert_eq "$(readlink "$sd/$n")" "$CEL_ROOT/core/workspace-skills/$n"
   done
-  python3 - "$cfg" "$sd" $CLOUDFLARE $EXPO <<'PY' || return 1
+  python3 - "$cfg" "$(readlink -f "$CEL_ROOT")" $CLOUDFLARE $EXPO <<'PY' || return 1
 import sys, tomllib
-cfg, sd, names = sys.argv[1], sys.argv[2], sys.argv[3:]
+cfg, root, names = sys.argv[1], sys.argv[2], sys.argv[3:]
 data = tomllib.load(open(cfg, "rb"))
 assert data["model"] == "x" and data["profiles"]["a"]["model"] == "y", data
 got = {e["path"]: e["enabled"] for e in data["skills"]["config"]}
-want = {f"{sd}/{n}/SKILL.md": False for n in names}
+# the resolved SKILL.md: codex matches an entry by the skill's resolved path
+want = {f"{root}/core/workspace-skills/{n}/SKILL.md": False for n in names}
 assert got == want, (got, want)
 PY
   local sum; sum="$(cksum < "$cfg")"
@@ -153,19 +155,61 @@ PY
   rm -rf "$T"
 }
 
-# A config.toml that sets skills.config itself is not rewritten; codex then
-# gets no scoped skill at all rather than all of them enabled.
-test_codex_scoped_skills_refused_beside_a_users_skills_config() {
-  _wss_setup
-  local sd cfg sum
+# A config.toml vendor.py cannot edit with certainty is left byte for byte
+# alone, and codex then gets no scoped skill at all (fail closed): any
+# skills setting of the user's own, in any TOML spelling; an incomplete or
+# repeated block of ours, with the user's content after it; invalid TOML.
+_codex_refusal() { # <config.toml body>
+  local sd cfg sum out
   sd="$(agent_skills_dir codex)"; cfg="${sd%/*}/config.toml"
   mkdir -p "$sd"
-  printf '[[skills.config]]\npath = "/x/SKILL.md"\nenabled = false\n' > "$cfg"
-  ln -s "$CEL_ROOT/core/workspace-skills/wrangler" "$sd/wrangler"
+  printf '%s\n' "$1" > "$cfg"
+  ln -sfn "$CEL_ROOT/core/workspace-skills/wrangler" "$sd/wrangler"
   sum="$(cksum < "$cfg")"
-  link_codex_workspace_skills >/dev/null 2>&1
-  assert_eq "$(cksum < "$cfg")" "$sum"
-  [ ! -e "$sd/wrangler" ] && [ ! -L "$sd/wrangler" ] || { echo "scoped link left enabled"; return 1; }
+  out="$(link_codex_workspace_skills 2>&1)"
+  assert_eq "$(cksum < "$cfg")" "$sum" || { printf 'rewrote:\n%s\n' "$1"; return 1; }
+  assert_contains "$out" "not linked for codex"
+  [ ! -e "$sd/wrangler" ] && [ ! -L "$sd/wrangler" ] || { printf 'scoped link left for:\n%s\n' "$1"; return 1; }
+  [ -z "$(find "$sd" -maxdepth 1 -type l -lname "$CEL_ROOT/core/workspace-skills/*")" ] || { echo "scoped links made"; return 1; }
+}
+test_codex_scoped_skills_refused_beside_a_users_skills_config() {
+  _wss_setup
+  local body
+  for body in \
+    $'[[skills.config]]\npath = "/x/SKILL.md"\nenabled = false' \
+    $'[skills]\nbundled = false' \
+    $'["skills"]\nx = 1' \
+    $'[\'skills\'.config]\nx = 1' \
+    $'[["skills".config]]\npath = "/x/SKILL.md"\nenabled = false' \
+    $'[[ skills . "config" ]]\npath = "/x/SKILL.md"\nenabled = false' \
+    $'skills.config = []' \
+    $'"skills".config = []' \
+    $'skills = { config = [] }' \
+    $'model = "x"\n# cel:workspace-skills:begin - cel update writes this block: workspace-scoped skills are off unless a cel launch enables them\n[projects."/home/u/app"]\ntrust_level = "trusted"' \
+    $'model = "x"\n# cel:workspace-skills:end\n[projects."/a"]\ntrust_level = "trusted"' \
+    $'# cel:workspace-skills:begin - cel update writes this block: workspace-scoped skills are off unless a cel launch enables them\n# cel:workspace-skills:end\n# cel:workspace-skills:begin - cel update writes this block: workspace-scoped skills are off unless a cel launch enables them\n# cel:workspace-skills:end' \
+    $'model = "x\n[broken' ; do
+    _codex_refusal "$body" || return 1
+  done
+  rm -rf "$T"
+}
+
+# A key named skills inside another table is the user's and not codex's
+# skills setting: the block is added and the whole file still parses.
+test_codex_block_keeps_a_nested_skills_key_and_valid_toml() {
+  _wss_setup
+  local sd cfg
+  sd="$(agent_skills_dir codex)"; cfg="${sd%/*}/config.toml"
+  mkdir -p "${cfg%/*}"
+  printf '[profiles.a]\nskills = ["x"]\n' > "$cfg"
+  link_codex_workspace_skills >/dev/null
+  python3 - "$cfg" <<'PY' || return 1
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+assert d["profiles"]["a"]["skills"] == ["x"], d
+assert len(d["skills"]["config"]) == 14 and not any(e["enabled"] for e in d["skills"]["config"]), d
+PY
+  [ -L "$sd/wrangler" ] || { echo "not linked"; return 1; }
   rm -rf "$T"
 }
 
@@ -193,7 +237,7 @@ test_launch_names_the_workspace_skills_per_runtime() {
   assert_eq "${AGENT_ARGS[*]} | ${LAUNCH_ENV_EXTRA[*]}" "--role x | OPENCODE_CONFIG=$d/opencode.json"
   AGENT_ARGS=(--role x); _run_workspace_skills codex "$T/cf"
   list=""
-  for n in $CLOUDFLARE; do list+="${list:+,}{path=\"$HOME/.codex/skills/$n/SKILL.md\",enabled=true}"; done
+  for n in $CLOUDFLARE; do list+="${list:+,}{path=\"$(readlink -f "$CEL_ROOT")/core/workspace-skills/$n/SKILL.md\",enabled=true}"; done
   assert_eq "${AGENT_ARGS[0]}|${AGENT_ARGS[1]}|${AGENT_ARGS[2]}" "-c|skills.config=[$list]|--role"
   rm -rf "$T"
 }

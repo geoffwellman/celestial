@@ -1,7 +1,6 @@
 ---
 name: eas-workflows
 description: Helps understand and write EAS workflow YAML files for Expo projects. Use this skill when the user asks about CI/CD or workflows in an Expo or EAS context, mentions .eas/workflows/, or wants help with EAS build pipelines or deployment automation.
-allowed-tools: "Read,Write,Bash(node:*),Bash(npx *eas-cli@*)"
 license: MIT License
 ---
 
@@ -13,7 +12,7 @@ license: MIT License
 > Needs the owner's approval here:
 > - `eas workflow:run`, or anything else that starts a workflow: each job spends build minutes, and jobs can build, submit or publish updates.
 > - Committing or pushing workflow files whose push, pull_request or schedule triggers start such jobs, and removing a `require-approval` gate.
-> - The `allowed-tools` line above pre-approves `eas-cli` commands; that does not cover these. Writing YAML and `workflow:validate` need no approval.
+> - Writing YAML and `eas-cli workflow:validate` need no approval. Upstream's `allowed-tools` line, which pre-approved every `node` and `eas-cli` command, is removed here.
 
 # EAS Workflows Skill
 

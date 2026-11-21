@@ -127,8 +127,10 @@ _run_workspace_skills() { # <runtime> <wsdir> -> AGENT_ARGS, LAUNCH_ENV_EXTRA
     flag) AGENT_ARGS=("$(agent_workspace_skills "$rt" flag)" "$path" "${AGENT_ARGS[@]}") ;;
     env) LAUNCH_ENV_EXTRA+=("$(agent_workspace_skills "$rt" env)=$(printf '%q' "$path")") ;;
     codex_config)
+      # The resolved SKILL.md, as lib/link.sh writes the disabled entry:
+      # codex matches an entry by the skill's resolved path.
       for n in "${names[@]}"; do
-        p="$(agent_skills_dir "$rt")/$n/SKILL.md"; p="${p//\\/\\\\}"; p="${p//\"/\\\"}"
+        p="$(readlink -f -- "$d/skills/$n/SKILL.md")"; p="${p//\\/\\\\}"; p="${p//\"/\\\"}"
         list+="${list:+,}{path=\"$p\",enabled=true}"
       done
       AGENT_ARGS=(-c "skills.config=[$list]" "${AGENT_ARGS[@]}") ;;

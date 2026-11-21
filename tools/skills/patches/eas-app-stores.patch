@@ -1,6 +1,6 @@
 --- a/SKILL.md
 +++ b/SKILL.md
-@@ -4,6 +4,17 @@
+@@ -4,6 +4,19 @@
  license: MIT
  ---
  
@@ -10,7 +10,9 @@
 +> Everything else in this skill applies as written.
 +>
 +> Needs the owner's approval here:
-+> - `eas-cli init`, `build`, `build --auto-submit`, `submit`, `submit:retry`, `metadata:push`, `build:version:set`, `eas update`, and `npx testflight`.
++> - `eas-cli init`, `build`, `build --auto-submit`, `submit`, `submit:retry`, `metadata:push`, `build:version:set`, and `npx testflight`.
++> - `eas-cli deploy` (EAS Hosting) and `eas update`.
++> - `eas-cli login` and `eas-cli credentials` changes (certificates, provisioning profiles, keys).
 +> - App Store Connect and Google Play Console release actions: adding testers or groups, submitting for review, releasing, expedited review, rollout changes.
 +> - Workflow files that build or submit, and removing a `require-approval` gate.
 +> - "Carry the user's existing authorization" (below) does not apply here: each of these needs the owner's approval.

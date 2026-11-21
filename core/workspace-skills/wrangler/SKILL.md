@@ -11,8 +11,9 @@ description: Run or troubleshoot Wrangler CLI commands in projects that have a w
 > Needs the owner's approval here:
 > - `wrangler deploy`, `wrangler versions upload` / `versions deploy`, rollbacks, Preview deployments (public URLs) and claimable prototype deployments.
 > - `wrangler secret put` / `secret delete` / `versions secret`, which create (and usually deploy) a version.
-> - Creating or deleting D1, KV, R2, Queues or other resources, including automatic provisioning by a deploy with omitted IDs; writes to production resources; deleting named Previews.
-> - `wrangler login` (broad OAuth access to the account).
+> - Creating or deleting D1, KV, R2, Queues or other resources, including automatic provisioning by a deploy with omitted IDs, and deleting named Previews.
+> - Any write to a remote resource: `wrangler d1 execute --remote`, `wrangler d1 migrations apply --remote`, `wrangler kv key put|delete --remote`, `wrangler kv bulk put|delete --remote`, `wrangler r2 object put|delete --remote`, `wrangler queues` changes, and anything else run against production.
+> - `wrangler login` (broad OAuth access to the account). `wrangler deploy --dry-run`, local `wrangler dev` and `wrangler types` need no approval.
 
 # Wrangler CLI
 

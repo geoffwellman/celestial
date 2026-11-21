@@ -182,6 +182,43 @@ test_flagged_skills_open_with_the_owner_approval_note() {
     "$(printf '%s\n' $APPROVAL_NOTE_SKILLS | wc -l)"
 }
 
+# The notes name the commands that need approval, not only their kind.
+test_approval_notes_name_the_commands() {
+  local note
+  _note() { awk '/^> \*\*Celestial: owner approval first/ {f = 1} f && !/^>/ {exit} f' "$(_skill_path "$1")/SKILL.md"; }
+  note="$(_note eas-app-stores)"
+  for want in '`eas-cli credentials`' '`eas-cli login`' '`eas-cli deploy` (EAS Hosting)' '`eas update`' '`submit`' '`build`' '`metadata:push`' 'npx testflight'; do
+    assert_contains "$note" "$want" || return 1
+  done
+  note="$(_note wrangler)"
+  for want in 'wrangler deploy' 'wrangler d1 execute --remote' 'wrangler kv key put|delete --remote' 'wrangler r2 object put|delete --remote' 'wrangler secret put' 'wrangler login'; do
+    assert_contains "$note" "$want" || return 1
+  done
+  note="$(_note expo-dev-client)"
+  assert_contains "$note" '`eas-cli credentials`'
+  note="$(_note eas-workflows)"
+  assert_contains "$note" '`eas workflow:run`'
+}
+
+# allowed-tools pre-approves tools while a skill is active (Claude Code); no
+# vendored skill ships a shell pre-approval (vendor.py BASH_ALLOWED_TOOLS is
+# empty: upstream's eas-workflows and expo-ui ones are removed by patches).
+test_no_vendored_skill_pre_approves_shell_commands() {
+  local hits T
+  hits="$(grep -lE '^allowed[-_]tools:' "$CEL_ROOT"/core/skills/*/SKILL.md "$CEL_ROOT"/core/workspace-skills/*/SKILL.md || true)"
+  assert_eq "$hits" ""
+  assert_eq "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import vendor; print(vendor.BASH_ALLOWED_TOOLS)' "$CEL_ROOT/tools/skills")" "{}"
+  T="$(mktemp -d)"
+  for v in '"Bash(node:*)"' '"Read,Bash(npx *eas-cli@*)"' '[Read, "Bash(git status)"]'; do
+    mkdir -p "$T/x"
+    printf -- '---\nname: x\ndescription: d\nallowed-tools: %s\n---\n' "$v" > "$T/x/SKILL.md"
+    assert_fails python3 "$VENDOR" names "$T/x/SKILL.md" || { echo "accepted allowed-tools: $v"; return 1; }
+  done
+  printf -- '---\nname: x\ndescription: d\nallowed-tools: "Read,Write"\n---\n' > "$T/x/SKILL.md"
+  python3 "$VENDOR" names "$T/x/SKILL.md"
+  rm -rf "$T"
+}
+
 test_link_puts_vendored_skills_in_every_runtime_skills_dir() {
   local SANDBOX a sd n linked=""
   SANDBOX="$(mktemp -d)"

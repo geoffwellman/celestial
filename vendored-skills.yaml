@@ -332,7 +332,7 @@ skills:
         license: Apache-2.0
     patch: tools/skills/patches/wrangler.patch
     set: cloudflare
-    sha256: 9fd89415c347bed5f02d1e7930826c11b760828f5c34932c079e7012792d9359
+    sha256: ef56a25a77f08a6f86825238766497a664288b7935e37b4ea6f830232c374ad9
   eas-app-stores:
     repo: expo/skills
     commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
@@ -347,7 +347,7 @@ skills:
         license: MIT
     patch: tools/skills/patches/eas-app-stores.patch
     set: expo
-    sha256: 229e7335ccc519c891c1c4287efe2f60e0f8f366a12cff362d57e30b315d852b
+    sha256: 82e56d5fe7c93c8678149fa1200c589677a87ecdd71e1ada05f04e03edc40868
   eas-workflows:
     repo: expo/skills
     commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
@@ -362,7 +362,7 @@ skills:
         license: MIT
     patch: tools/skills/patches/eas-workflows.patch
     set: expo
-    sha256: 5f5a16fab37a135a694fde3807cdf389128705a6261a1ec45aece98d8a8ccd37
+    sha256: 86de7e45ee79dbebf53a4adef6bf406ace068af4337adf80e9fd704ca910ae52
   expo-animation:
     # Its own LICENSE (MIT, its author) ships upstream; the repository's
     # MIT licence travels beside it.
@@ -435,8 +435,12 @@ skills:
         path: LICENSE
         to: LICENSE
         license: MIT
+    # The patch drops upstream's allowed-tools pre-approval of
+    # `node *expo-ui/scripts/list-components.js *`, whose leading `*` also
+    # admits `node -e <code> ...` (vendor.py BASH_ALLOWED_TOOLS).
+    patch: tools/skills/patches/expo-ui.patch
     set: expo
-    sha256: 9397746f9bc9403fb3b17604ddcbffc938313f211810aeeaa9371eacb71cc1ea
+    sha256: accc50fe02ab2788983e03d25796e21b098ebbb66fe1276b7d8034f9358b90a5
   expo-upgrade:
     repo: expo/skills
     commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4

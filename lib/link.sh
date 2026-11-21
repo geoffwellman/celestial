@@ -67,29 +67,19 @@ fetch_vendored_skills() {
 # too) and its own skills dir; it has no per-launch skill directory. So every
 # workspace-scoped skill (vendored-skills.yaml `set:`) is linked into
 # codex's skills dir - which no other runtime reads - and DISABLED in its
-# config.toml, in one marked block; a launch for a declared workspace enables
-# that workspace's with `-c skills.config=[...]` (lib/run.sh), which codex
-# merges over this block per path. Codex matches the entry by the skill's
+# config.toml, in one marked block (tools/skills/vendor.py codex-config); a
+# launch for a declared workspace enables that workspace's with
+# `-c skills.config=[...]` (lib/run.sh), which codex merges over this block
+# per path. Codex resolves a skill's path before matching an entry (0.166,
+# proved with the link path and the resolved one), and both sides write the
 # resolved path. The block is written before a link appears and outlives it,
-# so there is never a moment a scoped skill is enabled everywhere. A
-# config.toml that already sets skills.config itself is not edited: the
-# scoped links are then removed and codex gets none of them.
-_CEL_CODEX_SKILLS_BEGIN='# cel:workspace-skills:begin - cel update writes this block: workspace-scoped skills are off unless a cel launch enables them'
-_CEL_CODEX_SKILLS_END='# cel:workspace-skills:end'
-_link_codex_block() { # <config.toml> <skills-dir> <names...> -> the file with the block for <names> at its end
-  local f="$1" sd="$2" n p; shift 2
-  [ ! -f "$f" ] || awk -v b="$_CEL_CODEX_SKILLS_BEGIN" -v e="$_CEL_CODEX_SKILLS_END" \
-    '$0 == b {skip = 1; next} skip && $0 == e {skip = 0; next} !skip' "$f"
-  [ "$#" -gt 0 ] || return 0
-  printf '%s\n' "$_CEL_CODEX_SKILLS_BEGIN"
-  for n in "$@"; do
-    p="$sd/$n/SKILL.md"; p="${p//\\/\\\\}"; p="${p//\"/\\\"}"
-    printf '[[skills.config]]\npath = "%s"\nenabled = false\n' "$p"
-  done
-  printf '%s\n' "$_CEL_CODEX_SKILLS_END"
-}
+# so a scoped skill is never enabled everywhere. A config.toml vendor.py will
+# not edit (one of the user's own skills settings in any spelling, an
+# incomplete block of ours, invalid TOML) is left alone and codex gets none
+# of them: their links are removed.
 link_codex_workspace_skills() {
-  local a sd f names n l tmp keep=" "
+  local a sd f names n l tmp keep refused
+  local -a paths
   [ -f "$CEL_ROOT/vendored-skills.yaml" ] || return 0
   for a in $(agent_names); do
     [ "$(agent_workspace_skills "$a" strategy)" = codex_config ] || continue
@@ -99,35 +89,35 @@ link_codex_workspace_skills() {
     if ! names="$(python3 "$CEL_ROOT/tools/skills/vendor.py" scoped 2>&1)"; then
       c_warn "$a: workspace-scoped skills not linked (${names##*vendor.py: })"; continue
     fi
-    # shellcheck disable=SC2086  # names are skill names, one word each
-    if [ -f "$f" ] && _link_codex_block "$f" "$sd" | grep -qE '^[[:space:]]*(\[\[?[[:space:]]*skills[]. ]|skills[[:space:]]*[.=])'; then
-      c_warn "$a: $f already configures skills itself; workspace-scoped skills are not linked for $a"
-      names=""
+    paths=() keep=" " refused=0
+    for n in $names; do paths+=("$(readlink -f -- "$CEL_ROOT/core/workspace-skills/$n")/SKILL.md"); done
+    mkdir -p "${f%/*}" || return
+    tmp="$(mktemp "$f.cel-XXXXXX")" || return
+    if python3 "$CEL_ROOT/tools/skills/vendor.py" codex-config "$f" ${paths[@]+"${paths[@]}"} > "$tmp" 2> "$tmp.err"; then
+      for n in $names; do keep+="$n "; done
+    else
+      c_warn "$a: workspace-scoped skills not linked for $a ($(sed -n 's/^vendor.py: //p' "$tmp.err" | head -1))"
+      names="" refused=1
     fi
-    for n in $names; do keep+="$n "; done
-    # Unlink what is no longer scoped before its entry goes; add entries
-    # before their links appear.
+    rm -f "$tmp.err"
+    # Unlink what is no longer scoped (or everything, on a refusal) before
+    # its entry goes; add entries before their links appear.
     for l in "$sd"/*; do
       [ -L "$l" ] || continue
       case "$(readlink "$l")" in
         "$CEL_ROOT"/core/workspace-skills/*) case "$keep" in *" ${l##*/} "*) ;; *) rm -f "$l" ;; esac ;;
       esac
     done
-    mkdir -p "${f%/*}" || return
-    tmp="$(mktemp "$f.cel-XXXXXX")" || return
-    # shellcheck disable=SC2086
-    if ! _link_codex_block "$f" "$sd" $names > "$tmp"; then rm -f "$tmp"; return 1; fi
-    if [ -f "$f" ] && cmp -s "$tmp" "$f"; then
-      rm -f "$tmp"
-    elif [ ! -f "$f" ] && [ ! -s "$tmp" ]; then
+    if [ "$refused" = 1 ] || { [ -f "$f" ] && cmp -s "$tmp" "$f"; } || { [ ! -f "$f" ] && [ ! -s "$tmp" ]; }; then
       rm -f "$tmp"
     else
       [ ! -f "$f" ] || chmod --reference="$f" "$tmp"
       mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
     fi
-    [ -z "$names" ] || mkdir -p "$sd"
+    [ -n "$names" ] || continue
+    mkdir -p "$sd"
     for n in $names; do ln -sfn "$CEL_ROOT/core/workspace-skills/$n" "$sd/$n"; done
-    [ -z "$names" ] || c_ok "$a workspace-scoped skills -> $sd (disabled unless a launch enables them)"
+    c_ok "$a workspace-scoped skills -> $sd (disabled unless a launch enables them)"
   done
   return 0
 }
