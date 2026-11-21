@@ -126,7 +126,10 @@ _gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE=""; }
 # ssh-agent, sshd-session, sftp-server. Left as vetoes, any one of them would
 # keep EVERY worktree live. These are matched by
 # exact comm and none of them is an agent, a runtime or a tool that could sit
-# in a worktree. Anything else unreadable, an agent included, still vetoes.
+# in a worktree. A zombie or dead (X) pid is skipped too: it runs nothing, its
+# cwd is gone for good, and one unreaped defunct child kept all 306 worktrees.
+# Kernel threads never appear: pgrep -u lists only our own uid.
+# Anything else unreadable, an agent included, still vetoes.
 # Chosen over an environ PWD fallback: environ is unreadable for exactly the
 # same processes, and PWD is only where the process started, not where it is now.
 _gc_unreadable_is_system() { # <comm>
@@ -145,7 +148,7 @@ _gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknow
   for pid in $pids; do
     if cwd="$(_gc_cwd_of "$pid")"; then
       out="$out$pid"$'\t'"$cwd"$'\n'
-    elif _gc_pid_exists "$pid"; then
+    elif _gc_pid_exists "$pid" && _gc_alive "$pid"; then
       _gc_unreadable_is_system "$(_gc_comm_of "$pid")" && continue
       _GC_CWDS_STATE=unknown; return 0
     fi
@@ -431,12 +434,16 @@ gc_doctor_line() { # the one line cel doctor prints, from the same renderer
 }
 
 # A zombie still has a /proc directory until its launcher waits for it, so
-# "the directory exists" is not "still running".
-_gc_alive() { # <pid>
+# "the directory exists" is not "still running". X (dead) is the same.
+_gc_state_of() { # <pid> -> one-letter state from /proc/<pid>/stat, or fail
   local line state
   line="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
-  state="${line##*) }"; state="${state%% *}"
-  [ "$state" != Z ]
+  state="${line##*) }"; printf '%s' "${state%% *}"
+}
+_gc_alive() { # <pid> -> 0 running, 1 gone, zombie or dead
+  local state
+  state="$(_gc_state_of "$1")" || return 1
+  case "$state" in Z|X) return 1;; esac
 }
 
 # pi IGNORES SIGTERM, so the old single TERM reported a reap that never

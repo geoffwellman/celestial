@@ -1432,10 +1432,11 @@ test_gc_live_recheck_sees_a_process_the_snapshot_missed() {
 # manager, ssh-agent, sshd-session...) vetoed EVERY worktree: gc kept 232
 # "live" and removed nothing. A fixed set of system processes that can never
 # be an agent in a worktree no longer vetoes; any other unreadable cwd does.
-_gc_fake_proc() { # <comm> - one fake pid with an unreadable cwd beside our own
+_gc_fake_proc() { # <comm> [state] - one fake pid with an unreadable cwd beside our own
   pgrep() { printf '%s\n' 999001; }
   _gc_cwd_of() { return 1; }
   eval "_gc_comm_of() { printf '%s' '$1'; }"
+  eval "_gc_state_of() { printf '%s' '${2:-S}'; }"
   _gc_pid_exists() { return 0; }
 }
 test_gc_unreadable_cwd_of_a_system_process_does_not_veto() {
@@ -1449,6 +1450,38 @@ test_gc_unreadable_cwd_of_a_system_process_does_not_veto() {
 test_gc_unreadable_cwd_of_an_unknown_process_still_vetoes() {
   _gc_fake_proc pi; _gc_cwd_reset
   _gc_has_process "/nonexistent/wt" || { echo "unknown unreadable cwd no longer vetoes"; return 1; }
+}
+# A zombie (or a dead X) keeps its /proc entry until reaped, but its cwd is
+# gone for good: one defunct herdr-core left unreaped since the day before
+# kept all 306 worktrees "live". It runs nothing, so it vetoes nothing.
+test_gc_unreadable_cwd_of_a_dead_process_does_not_veto() {
+  local s
+  for s in Z X; do
+    _gc_fake_proc herdr-core "$s"; _gc_cwd_reset
+    _gc_has_process "/nonexistent/wt" && { echo "state $s vetoed"; return 1; }
+  done
+  return 0
+}
+test_gc_unreadable_cwd_of_a_live_unknown_process_still_vetoes() {
+  local s
+  for s in R S D T I; do
+    _gc_fake_proc herdr-core "$s"; _gc_cwd_reset
+    _gc_has_process "/nonexistent/wt" || { echo "state $s no longer vetoes"; return 1; }
+  done
+  return 0
+}
+test_gc_a_real_zombie_does_not_veto() {
+  # The exec'd sleep never waits for its exited child: a real zombie.
+  bash -c 'sleep 0 & exec sleep 5' & local p=$! z="" i
+  for ((i=0; i<50; i++)); do
+    z="$(command pgrep -P "$p" 2>/dev/null)" && [ -n "$z" ] && [ "$(_gc_state_of "$z")" = Z ] && break
+    z=""; sleep 0.1
+  done
+  [ -n "$z" ] || { kill "$p"; echo "no zombie made"; return 1; }
+  eval "pgrep() { printf '%s\n' $z; }"; _gc_cwd_reset
+  local rc=0; _gc_has_process "/nonexistent/wt" || rc=$?
+  kill "$p"; wait "$p" 2>/dev/null || true
+  [ "$rc" -eq 1 ] || { echo "real zombie $z vetoed (rc=$rc)"; return 1; }
 }
 
 # ------------------------------------- finished reviewers
