@@ -117,12 +117,15 @@ _update_changelog_since() { # <installed> <available>
 # directory - would otherwise take effect only on the update after it (the
 # update to the vendored UI skills linked them all but fetched nothing). The
 # workspace, dashboard and pages steps below already run the new bin/cel.
+# The child runs under the same -euo pipefail as bin/cel, so a step that fails
+# inside link_all fails the update exactly as it did in-process.
 _update_link_fresh() {
   if [ -f "$CEL_ROOT/lib/link.sh" ] && [ -f "$CEL_ROOT/lib/install.sh" ] && [ -z "${CEL_UPDATE_INPROC:-}" ]; then
-    CEL_ROOT="$CEL_ROOT" bash -c '. "$CEL_ROOT/lib/link.sh" && . "$CEL_ROOT/lib/install.sh" && link_all'
+    CEL_ROOT="$CEL_ROOT" "${BASH:-bash}" -euo pipefail -c \
+      '. "$CEL_ROOT/lib/link.sh"; . "$CEL_ROOT/lib/install.sh"; link_all'
   else
     link_all
-  fi
+  fi || { c_err "re-linking with the code at $(git -C "$CEL_ROOT" rev-parse --short HEAD 2>/dev/null) failed (see above)"; return 1; }
 }
 
 # Everything the installation touched, in one place: the symlink layer and the
@@ -132,7 +135,7 @@ _update_link_fresh() {
 # timer is rewritten by the doctor run in _update_verify (lib/steward_timer.sh).
 _update_reapply() {
   c_hd "Re-applying"
-  _update_link_fresh
+  _update_link_fresh || return 1
   local ws
   for ws in $(registry_names 2>/dev/null); do
     "$CEL_ROOT/bin/cel" ws sync "$ws" || c_warn "ws sync $ws failed"
@@ -643,7 +646,7 @@ _update_rollback() {
   if [ -n "$prev" ]; then
     _update_require_pristine
     git -C "$CEL_ROOT" reset --hard "$prev" -q || die "could not reset the plane to $prev"
-    _update_reapply
+    _update_reapply || die "rolled back to $prev but re-applying it failed - inspect above"
     c_ok "rolled back to $(git -C "$CEL_ROOT" rev-parse --short HEAD) (v$(cel_version))"
   fi
   _update_agents_rollback || return 1
@@ -715,7 +718,7 @@ cmd_update() { # [--check [--agents] | --rollback | --components | --channel mai
     git -C "$CEL_ROOT" pull --ff-only -q origin main \
       || die "could not fast-forward to origin/main from $before_main - this checkout has diverged from main"
     c_ok "$n commits applied - now $(cel_build_line)"
-    _update_reapply
+    _update_reapply || die "update landed but re-applying it failed - inspect above, or: cel update --rollback"
     [ "$skip_components" -eq 1 ] || _update_components_fresh || crc=$?
     if ! _update_verify; then
       c_err "update landed but doctor is red - inspect above, or: cel update --rollback"
@@ -749,7 +752,7 @@ cmd_update() { # [--check [--agents] | --rollback | --components | --channel mai
     || die "could not fast-forward to v$avail from $before - this checkout has diverged from the releases"
   c_ok "v$inst -> v$avail ($(git -C "$CEL_ROOT" rev-parse --short HEAD))"
 
-  _update_reapply
+  _update_reapply || die "update landed but re-applying it failed - inspect above, or: cel update --rollback"
   [ "$skip_components" -eq 1 ] || _update_components_fresh || crc=$?
   if ! _update_verify; then
     c_err "update landed but doctor is red - inspect above, or: cel update --rollback"

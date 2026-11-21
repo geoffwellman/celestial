@@ -272,6 +272,67 @@ test_update_links_with_the_code_its_pull_brought_in() {
   _upd_cleanup
 }
 
+# _upd_release <version> <link_all body>: tag a release on origin whose
+# lib/link.sh defines link_all with that body (it may write "$RELINK_LOG").
+_upd_release() {
+  local dev="$T/dev-$1"
+  git clone -q "$ORIGIN" "$dev" 2>/dev/null
+  git -C "$dev" config user.email t@example.com
+  git -C "$dev" config user.name tester
+  git -C "$dev" checkout -q "$(git -C "$dev" tag --sort=-v:refname | head -1)" -b "r$1"
+  mkdir -p "$dev/lib" "$dev/bin"
+  printf 'link_all() { %s; }\n' "$2" >"$dev/lib/link.sh"
+  : >"$dev/lib/install.sh"
+  printf '#!/bin/sh\nexit 0\n' >"$dev/bin/cel"
+  chmod +x "$dev/bin/cel"
+  printf '%s\n' "$1" >"$dev/VERSION"
+  git -C "$dev" add -A
+  git -C "$dev" commit -qm "release $1"
+  git -C "$dev" tag "v$1"
+  git -C "$dev" push -q origin "v$1"
+}
+
+# A rollback re-links with the build it restores, not the one it leaves.
+test_update_rollback_relinks_with_the_restored_code() {
+  local real_reapply out rc
+  real_reapply="$(declare -f _update_reapply)"
+  _upd_fixture
+  eval "$real_reapply"
+  export RELINK_LOG="$T/relink"
+  _upd_release 0.4.0 'echo "linked by 0.4.0" >>"$RELINK_LOG"'
+  _upd_release 0.5.0 'echo "linked by 0.5.0" >>"$RELINK_LOG"'
+  git -C "$ROOT" fetch -q --tags origin
+  git -C "$ROOT" reset -q --hard v0.4.0   # the box runs 0.4.0
+  rc=0; out="$(cmd_update 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; _upd_cleanup; return 1; }
+  assert_eq "$(cat "$RELINK_LOG")" "linked by 0.5.0" || { _upd_cleanup; return 1; }
+  : >"$RELINK_LOG"
+  rc=0; out="$(cmd_update --rollback 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; _upd_cleanup; return 1; }
+  assert_eq "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse 'v0.4.0^{commit}')" || { _upd_cleanup; return 1; }
+  assert_eq "$(cat "$RELINK_LOG")" "linked by 0.4.0" || { _upd_cleanup; return 1; }
+  _upd_cleanup
+}
+
+# A step that fails inside the installed link code fails the update, as it did
+# in-process under bin/cel's -euo pipefail, and says what failed.
+test_update_fails_when_the_installed_link_step_fails() {
+  local real_reapply out rc
+  real_reapply="$(declare -f _update_reapply)"
+  _upd_fixture
+  eval "$real_reapply"
+  export RELINK_LOG="$T/relink"
+  : >"$RELINK_LOG"
+  _upd_release 0.4.0 'false; echo "ran past a failed step" >>"$RELINK_LOG"'
+  rc=0; out="$(cmd_update 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "update succeeded past a failed link step"; _upd_cleanup; return 1; }
+  assert_contains "$out" "re-linking with the code at" || { _upd_cleanup; return 1; }
+  assert_contains "$out" "re-applying it failed" || { _upd_cleanup; return 1; }
+  assert_eq "$(cat "$RELINK_LOG")" "" || { echo "the child did not stop at the failure"; _upd_cleanup; return 1; }
+  if grep -q verify "$LOG"; then echo "verify ran after a failed re-apply"; _upd_cleanup; return 1; fi
+  _upd_cleanup
+}
+
 # A red doctor after an update is the exact moment someone needs to be told
 # there is a way back, and rollback has to actually re-apply the old build.
 test_update_verify_failure_offers_rollback_and_rollback_restores() {
