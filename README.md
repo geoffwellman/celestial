@@ -971,6 +971,10 @@ session identity, and scoped model availability. A private admission marker
 prevents a loaded resume plugin from draining inbox mail before those checks.
 Missing/failed plugins never admit an unguarded TUI. The server's stdin lease
 and native child processes are owned by this launch, not a shared service.
+The server's copy of the config sets `experimental.location_idle_timeout` to
+`false`: OpenCode otherwise unloads a location's services, the plugin's idle
+inbox observer among them, after 60 minutes without session activity, and an
+agent idle that long stopped waking for mail.
 
 The plugin preserves primary/child identity and delivers idle inbox messages
 through native synthetic input, never terminal typing. Medium is persisted
