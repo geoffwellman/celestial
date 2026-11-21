@@ -236,8 +236,11 @@ rex_launch_check() { # name runtime cwd prefix args...
 #     live slice at each launch (systemctl set-property --runtime), so a
 #     config change applies to running agents too.
 # Box config `agent_memory:` (MB) overrides each; the defaults come from this
-# box's RAM and swap. With no user manager it falls back, with a warning, to
-# the server's cgroup - the behaviour before.
+# box's RAM and swap. Refused slice limits only warn: the agent still gets its
+# own scope. Only with no systemd-run, or no user manager answering within
+# CEL_AGENT_MANAGER_TIMEOUT seconds (5; a wedged manager must not hang a
+# launch, a resume or the steward's tick), does it fall back, with a warning,
+# to the server's cgroup - the behaviour before.
 REX_AGENT_SLICE=cel-agents.slice
 
 _rex_meminfo_mb() { # MemTotal|SwapTotal -> MB; fails when unreadable
@@ -248,31 +251,49 @@ _rex_meminfo_mb() { # MemTotal|SwapTotal -> MB; fails when unreadable
 }
 
 # Config first (a whole number of MB, at least <min>), else <percent> of the
-# box's <MemTotal|SwapTotal>; empty (no limit) when neither can be had.
+# box's <MemTotal|SwapTotal>; empty (no limit) when neither can be had. An
+# empty <key> is the default alone.
 _rex_agent_memory() { # <key> <min> <percent> <MemTotal|SwapTotal>
-  local v total
-  v="$(cel_config_get agent_memory "$1" 2>/dev/null || true)"
+  local v="" total
+  [ -z "$1" ] || v="$(cel_config_get agent_memory "$1" 2>/dev/null || true)"
   if [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge "$2" ]; then printf '%s' "$v"; return 0; fi
   total="$(_rex_meminfo_mb "$4")" || return 0
   printf '%s' "$(( total * $3 / 100 ))"
 }
 
+# One bounded call to the user manager: rc 124 when it did not answer in time.
+_rex_user_manager() { # <systemctl> <args...>
+  ( _rex_close_leases
+    exec timeout -k 1 "${CEL_AGENT_MANAGER_TIMEOUT:-5}" "$@" ) </dev/null >/dev/null 2>&1
+}
+
 # Sets _REX_SCOPE: the words that go before a terminal's command, or none.
 _rex_agent_scope() { # <agent name>
   _REX_SCOPE=()
-  local run="${CEL_AGENT_SYSTEMD_RUN:-}" ctl="${CEL_AGENT_SYSTEMCTL:-}" why="" pol max swap unit
+  local run="${CEL_AGENT_SYSTEMD_RUN:-}" ctl="${CEL_AGENT_SYSTEMCTL:-}" why="" pol max swap unit rc smax shigh
   # The suite never reaches the live user manager: only its stand-ins.
   if [ -n "${CEL_TESTING:-}" ] && { [ -z "$run" ] || [ -z "$ctl" ]; }; then return 0; fi
   ctl="${ctl:-systemctl}"
   if ! run="$(command -v "${run:-systemd-run}")"; then why="systemd-run is not installed"
-  elif ! ( _rex_close_leases; exec "$ctl" --user show-environment ) >/dev/null 2>&1; then why="no systemd user manager answers"
+  elif ! _rex_user_manager "$ctl" --user show-environment; then why="no systemd user manager answers"
   fi
-  local -a slice=()
-  max="$(_rex_agent_memory slice_max_mb 1 85 MemTotal)"; [ -z "$max" ] || slice+=("MemoryMax=${max}M")
-  max="$(_rex_agent_memory slice_high_mb 1 75 MemTotal)"; [ -z "$max" ] || slice+=("MemoryHigh=${max}M")
-  if [ -z "$why" ] && [ "${#slice[@]}" -gt 0 ] \
-     && ! ( _rex_close_leases; exec "$ctl" --user set-property --runtime "$REX_AGENT_SLICE" "${slice[@]}" ) >/dev/null 2>&1; then
-    why="the user manager refused $REX_AGENT_SLICE's limits"
+  if [ -z "$why" ]; then
+    smax="$(_rex_agent_memory slice_max_mb 1 85 MemTotal)"
+    shigh="$(_rex_agent_memory slice_high_mb 1 75 MemTotal)"
+    # A throttle above the ceiling is not a pair: both take their defaults.
+    if [ -n "$smax" ] && [ -n "$shigh" ] && [ "$shigh" -gt "$smax" ]; then
+      smax="$(_rex_agent_memory '' 1 85 MemTotal)"; shigh="$(_rex_agent_memory '' 1 75 MemTotal)"
+    fi
+    local -a slice=()
+    [ -z "$smax" ] || slice+=("MemoryMax=${smax}M")
+    [ -z "$shigh" ] || slice+=("MemoryHigh=${shigh}M")
+    rc=0
+    [ "${#slice[@]}" = 0 ] || _rex_user_manager "$ctl" --user set-property --runtime "$REX_AGENT_SLICE" "${slice[@]}" || rc=$?
+    if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+      why="no systemd user manager answers"
+    elif [ "$rc" != 0 ]; then
+      c_warn "Rex: the user manager refused $REX_AGENT_SLICE's limits (${slice[*]}) - $1 still gets a scope of its own, but nothing caps all agents together" >&2
+    fi
   fi
   if [ -n "$why" ]; then
     c_warn "Rex: $1 runs inside the Rex server's own cgroup ($why) - an out-of-memory kill there can stop the server and end every Rex agent" >&2

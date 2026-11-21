@@ -804,8 +804,31 @@ runtime included; `stop` stops it. The per-agent limits apply to new launches
 running at the next launch. `systemd-oomd` is not used.
 
 Without a systemd user manager (no `systemd-run`, or `systemctl --user` not
-answering) a launch warns that the agent runs inside the Rex server's own
-cgroup and proceeds as before. Herdr sessions are unchanged.
+answering within `CEL_AGENT_MANAGER_TIMEOUT` seconds, default 5) a launch
+warns that the agent runs inside the Rex server's own cgroup and proceeds as
+before. If the manager refuses the slice limits, the launch warns and the
+agent still gets its own scope; a `slice_high_mb` above `slice_max_mb` is
+ignored and both take their defaults. Herdr sessions are unchanged.
+
+Nothing here moves what is already running. A Rex server that is running
+keeps its cgroup and its `OOMPolicy` - including one a Rex client auto-started
+inside some other unit's cgroup - until it is moved into a scope of its own or
+restarted, and an agent launched before keeps sharing the server's cgroup
+until it is relaunched. To move a running server without ending any session,
+adopt its process into a new scope (one exact PID from
+`pgrep -f '^/usr/bin/rex server run '`):
+
+```sh
+busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+  org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \
+  "cel-rex-server-$(date +%s).scope" fail 2 PIDs au 1 <pid> OOMPolicy s continue 0
+```
+
+Its agents stay where they are until relaunched. The alternative is a server
+restart, which ends every program in every session (see
+[above](#rex-server-restarts-and-rex-upgrades)); stop and start it in one
+line, or a client auto-starts the next server in its own cgroup:
+`rex server stop && systemd-run --user --scope --unit cel-rex-server-$(date +%s) -p OOMPolicy=continue -- rex server start --tailscale`.
 
 ### Retire a completed Rex reviewer, keep its evidence
 

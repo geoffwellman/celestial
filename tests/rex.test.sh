@@ -335,6 +335,9 @@ test_rex_resume_by_the_steward_puts_the_plane_on_path_first() {
 # scope; the kernel killed it, and systemd then stopped that whole scope - the
 # server and every agent. These stand in for systemd-run and systemctl, so the
 # suite never reaches the live user manager.
+# The systemctl stand-in answers show-environment with <rc>; a file
+# `setprop.rc` in the state dir makes set-property exit with its contents, and
+# `systemctl.hang` makes show-environment never answer.
 _rext_scope_stubs() { # <rc of `systemctl --user show-environment`>
   cat > "$RT/bin/fake-systemd-run" <<'SH'
 #!/bin/bash
@@ -347,7 +350,10 @@ SH
   cat > "$RT/bin/fake-systemctl" <<SH
 #!/bin/bash
 printf '%s\n' "\$*" >> "\$CEL_REX_STATE/systemctl.calls"
-case "\$*" in *show-environment*) exit ${1:-0} ;; esac
+case "\$*" in
+  *show-environment*) [ ! -e "\$CEL_REX_STATE/systemctl.hang" ] || exec sleep 30; exit ${1:-0} ;;
+  *set-property*) [ ! -e "\$CEL_REX_STATE/setprop.rc" ] || exit "\$(cat "\$CEL_REX_STATE/setprop.rc")" ;;
+esac
 exit 0
 SH
   chmod +x "$RT/bin/fake-systemd-run" "$RT/bin/fake-systemctl"
@@ -432,6 +438,73 @@ YAML
   _rex_agent_scope widget-orch > "$RT/scope.out" 2>&1
   words="$(printf '%s\n' "${_REX_SCOPE[@]}")"
   assert_contains "$words" "$(printf -- '-p\nOOMPolicy=continue\n-p\nMemoryMax=6553M\n')" || { _rext_down; return 1; }
+  # A throttle above the ceiling is no pair: both slice values are the defaults.
+  cat > "$CEL_CONFIG_FILE" <<'YAML'
+agent_memory:
+  slice_max_mb: 8000
+  slice_high_mb: 9000
+YAML
+  : > "$CEL_REX_STATE/systemctl.calls"
+  _rex_agent_scope widget-orch > "$RT/scope.out" 2>&1
+  assert_contains "$(cat "$CEL_REX_STATE/systemctl.calls")" 'set-property --runtime cel-agents.slice MemoryMax=13926M MemoryHigh=12288M' || { _rext_down; return 1; }
+  _rext_down
+}
+
+# The box-wide ceiling is a second line of defence: a manager that refuses it
+# (a bad value, no memory controller) still gives the agent its own scope.
+test_rex_refused_slice_limits_warn_and_the_agent_still_gets_its_own_scope() {
+  _rext_setup
+  _rext_scope_stubs 0
+  printf 1 > "$CEL_REX_STATE/setprop.rc"
+  local out rc=0 args
+  out="$(cd "$RT/ws" && cmd_run orchestrator --repo widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; _rext_down; return 1; }
+  _rext_wait_runtime || { echo 'the scoped runtime never started'; _rext_down; return 1; }
+  assert_contains "$out" "refused cel-agents.slice's limits (MemoryMax=13926M MemoryHigh=12288M) - widget-orch still gets a scope of its own" || { _rext_down; return 1; }
+  args="$(cat "$CEL_REX_STATE/systemd-run.args" 2>/dev/null)"
+  assert_contains "$args" "$(printf -- '--scope\n')" || { _rext_down; return 1; }
+  assert_contains "$args" "$(printf -- '-p\nOOMPolicy=continue\n-p\nMemoryMax=6553M\n')" || { _rext_down; return 1; }
+  _rex_live "$CEL_REX_STATE/widget-orch.json" || { echo 'receipt does not name the live runtime'; _rext_down; return 1; }
+  _rext_down
+}
+
+# A wedged user manager cannot hang a launch: the call is bounded, and no
+# answer is no manager.
+test_rex_hung_user_manager_times_out_and_the_launch_still_goes_through() {
+  _rext_setup
+  _rext_scope_stubs 0
+  : > "$CEL_REX_STATE/systemctl.hang"
+  local out rc=0 started=$SECONDS
+  out="$(cd "$RT/ws" && CEL_AGENT_MANAGER_TIMEOUT=1 cmd_run orchestrator --repo widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; _rext_down; return 1; }
+  [ $((SECONDS - started)) -lt 20 ] || { echo "the launch waited $((SECONDS - started))s on a hung manager"; _rext_down; return 1; }
+  _rext_wait_runtime || { echo 'the launch never started its runtime'; _rext_down; return 1; }
+  assert_contains "$out" "widget-orch runs inside the Rex server's own cgroup (no systemd user manager answers)" || { _rext_down; return 1; }
+  [ ! -e "$CEL_REX_STATE/systemd-run.args" ] || { echo 'systemd-run ran against a hung manager'; _rext_down; return 1; }
+  _rext_down
+}
+
+# A RESUME IS A LAUNCH: the steward's relaunch after a server restart puts the
+# agent in a scope of its own too.
+test_rex_resume_by_the_steward_runs_the_agent_in_its_own_scope() {
+  _rext_setup
+  _rext_scope_stubs 0
+  export CEL_REGISTRY="$RT/registry.yaml"
+  printf 'workspaces:\n  alpha: {path: "%s/ws"}\n' "$RT" > "$CEL_REGISTRY"
+  local out rc=0 f="$CEL_REX_STATE/widget-orch.json" old i
+  out="$(cd "$RT/ws" && cmd_run orchestrator --repo widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; unset CEL_REGISTRY; _rext_down; return 1; }
+  _rext_wait_runtime || { unset CEL_REGISTRY; _rext_down; return 1; }
+  old="$(jq -r .pid "$f")"; kill "$old"
+  for ((i=0;i<50;i++)); do _rex_live "$f" || break; sleep 0.1; done
+  rm -f "$CEL_REX_STATE/systemd-run.args" "$CEL_REX_STATE/systemd-run.pid" "$CEL_REX_STATE/observed"
+  out="$(cd / && PATH="$(_rext_steward_path)" _rex_relaunch "$f" 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || { echo "$out"; unset CEL_REGISTRY; _rext_down; return 1; }
+  _rext_wait_runtime || { echo 'the resume never started its runtime'; unset CEL_REGISTRY; _rext_down; return 1; }
+  [ "$(jq -r .pid "$f")" != "$old" ] || { echo 'the resume did not relaunch the agent'; unset CEL_REGISTRY; _rext_down; return 1; }
+  assert_contains "$(cat "$CEL_REX_STATE/systemd-run.args" 2>/dev/null)" "$(printf -- '--slice\ncel-agents.slice\n')" || { unset CEL_REGISTRY; _rext_down; return 1; }
+  assert_eq "$(cat "$CEL_REX_STATE/systemd-run.pid")" "$(jq -r .pid "$f")" || { unset CEL_REGISTRY; _rext_down; return 1; }
+  unset CEL_REGISTRY
   _rext_down
 }
 
