@@ -819,14 +819,15 @@ test_gc_drops_a_reviewer_row_whose_pane_is_already_gone() {
   rm -rf "$T"
 }
 
-# The summary counts reviewers beside worktrees, and says so when there were
-# none: a sweep that reports nothing is indistinguishable from one that never
-# looked.
+# The summary counts reviewers and their checkouts beside worktrees, and says
+# so when there were none: a sweep that reports nothing is indistinguishable
+# from one that never looked.
 test_gc_summary_counts_reviewers_closed_even_when_there_were_none() {
   _gc_managed_fixture
   export CEL_REVIEWERS_STATE="$T/reviewers.json"
   local out; out="$(cmd_gc)"
   assert_contains "$out" "0 reviewers closed"
+  assert_contains "$out" "0 review checkouts removed"
   rm -rf "$T"
 }
 

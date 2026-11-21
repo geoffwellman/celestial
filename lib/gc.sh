@@ -553,7 +553,7 @@ _gc_reviewer_pr_state() { # <repo> <pr> [cwd] [repodir] -> MERGED|CLOSED|OPEN|UN
 }
 
 _gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> PR JSON in gh's words, or fail
-  local out cwd wsdir="" rd="" desc provider slug f="$5"
+  local cwd wsdir="" rd=""
   cwd="$(pane_cwd "${3:-}")"
   # THE REPO IS ASKED OF THE FORGE ITS WORKSPACE DECLARES, by owner/name, or
   # not at all. Its forge is forge_repo's answer for the reviewer's workspace
@@ -567,22 +567,30 @@ _gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> PR JSON in gh
   if [ -n "$cwd" ] && [ -d "$cwd" ]; then wsdir="$(ws_of_checkout "$cwd")" || wsdir=""; fi
   [ -n "$wsdir" ] || IFS=$'\t' read -r wsdir rd < <(_gc_reviewer_ws "$1" "${4:-}") || true
   [ -n "$wsdir" ] || return 1
-  desc="$(forge_repo "$wsdir" "$1" "${rd:-${4:-$wsdir/repos/$1}}" 2>/dev/null)" || return 1
+  _gc_forge_pr_json "$wsdir" "$1" "${rd:-${4:-$wsdir/repos/$1}}" "$2" "$5"
+}
+
+# One PR of a repo a workspace declares, asked of that repo's forge by
+# forge_repo's owner/name: gh's own fields for GitHub, the Forgejo answer
+# translated into them. Fails on anything else.
+_gc_forge_pr_json() { # <wsdir> <repo> <repodir> <pr> <gh fields> -> PR JSON in gh's words, or fail
+  local out desc provider slug
+  desc="$(forge_repo "$1" "$2" "$3" 2>/dev/null)" || return 1
   provider="$(printf '%s' "$desc" | jq -r '.provider // empty' 2>/dev/null)"
   slug="$(printf '%s' "$desc" | jq -er '"\(.owner | strings)/\(.repo | strings)"' 2>/dev/null)" || return 1
   case "$provider" in
-    forgejo) _gc_reviewer_forgejo_pr "$wsdir" "$1" "$2" "$desc"; return ;;
-    github)  out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json "$f" 2>/dev/null)" || return 1 ;;
+    forgejo) _gc_reviewer_forgejo_pr "$1" "$2" "$4" "$desc"; return ;;
+    github)  out="$(ws_gh "$1" pr view "$4" --repo "$slug" --json "$5" 2>/dev/null)" || return 1 ;;
     *)       return 1 ;;
   esac
   printf '%s' "$out"
 }
 
 # A Forgejo repo's PR (forge_pr_view, as the workspace) in the gh words this
-# pass reads: {state: MERGED|CLOSED|OPEN, headRefOid}. The answer must be
-# exactly this PR of this owner/name - its number, and a url ending in
-# /<owner>/<name>/pulls/<n> - with a full head; anything else fails, which
-# every caller reads as UNKNOWN: kept.
+# pass reads: {state: MERGED|CLOSED|OPEN, headRefOid, closedAt, mergedAt}.
+# The answer must be exactly this PR of this owner/name - its number, and a
+# url ending in /<owner>/<name>/pulls/<n> - with a full head; anything else
+# fails, which every caller reads as UNKNOWN: kept.
 _gc_reviewer_forgejo_pr() { # <wsdir> <repo> <pr> <forge_repo descriptor>
   local out tail
   [[ "$3" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -592,7 +600,7 @@ _gc_reviewer_forgejo_pr() { # <wsdir> <repo> <pr> <forge_repo descriptor>
     select(type == "object" and .number == $n and (.state | IN("open", "merged", "closed"))
       and (.head_sha | type == "string" and test("^[a-f0-9]{40}$"))
       and (.url | type == "string" and endswith($tail)))
-    | {state: (.state | ascii_upcase), headRefOid: .head_sha}' 2>/dev/null
+    | {state: (.state | ascii_upcase), headRefOid: .head_sha, closedAt: (.closed_at // null), mergedAt: (.merged_at // null)}' 2>/dev/null
 }
 
 # Which workspace a reviewer's repo belongs to, and the clone to read it
@@ -1296,6 +1304,279 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
 # promise it.
 _gc_idle_stop_last() { printf '%s' "${CEL_GC_IDLE_STOP_LAST:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle-stop-last.txt}"; }
 
+# REVIEWER CHECKOUTS, LONG AFTER THEIR REVIEW. A finished reviewer's checkout
+# is kept on purpose (`cel run reviewer` for its PR brings it back) and a live
+# reviewer's is never touched, so the checkouts under <reviews> (lib/run.sh
+# reviewer_checkout_path) only ever grew - by the hundred. One goes when every
+# one of these is a fact:
+#   - gc can name it: a directory directly under <reviews>, not a symlink, a
+#     git checkout (linked worktree or private clone) of a repo a registered
+#     workspace declares, named <repo>-pr-<n>[-<kind>-<focus>][.round.<x>];
+#   - no reviewer of that PR is recorded (reviewers.json), and no pane, and no
+#     process of this user - its cwd or an open file - is in it: the roster and
+#     /proc are read once per pass and again right before the removal; one
+#     unreadable process keeps every checkout (bar a zombie, or a system
+#     process _gc_unreadable_is_system names);
+#   - its PR is merged or closed, asked of the repo's own forge as the
+#     reviewer pass asks (GitHub by its declared owner/name, Forgejo through
+#     forge_pr_view; unreadable is kept), and closed more than
+#     CEL_REVIEW_CHECKOUT_KEEP_DAYS days ago (default 3);
+#   - nothing in it is its own: no untracked or modified file (ignored build
+#     output is not), no commit only it has - one that has is kept and named;
+#   - no retained Rex retirement packet cites it (#284's evidence rule,
+#     rex_reviewer_checkout_preserved).
+# A linked worktree goes by a plain `git worktree remove`, which itself refuses
+# one that changed since; a private clone by rm. The verdicts and evidence in
+# the workspace (.cel/reviews, .cel/solo-reviews.json) are never touched.
+# ONE PASS IS BOUNDED: at most CEL_GC_REVIEW_CHECKOUT_CAP (default 30)
+# checkouts are asked of the forge per pass, oldest first. What the forge said
+# is remembered (gc-review-checkouts.json) only to skip asking again - an open
+# PR for an hour, a recent close until its window ends; a removal always rests
+# on a fresh answer.
+_gc_rc_state() { printf '%s' "${CEL_GC_REVIEW_CHECKOUT_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-review-checkouts.json}"; }
+
+# Every path under <prefix> that a process of this user has as its cwd or holds
+# open, one find over /proc. A pid that has gone is nothing; a zombie has no
+# files; any other process whose cwd or files cannot be read fails the read,
+# unless it is one of the fixed system processes - unknown is never "unused".
+_gc_open_paths() { # <prefix> -> "<proc link><TAB><target>" lines, or fail
+  local pids pid err out line pat="$1" rc args=()
+  if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
+    rc=$?; [ "$rc" -eq 1 ] && return 0
+    return 1
+  fi
+  for pid in $pids; do args+=("/proc/$pid/cwd" "/proc/$pid/fd"); done
+  # -lname takes a glob: the prefix is matched literally.
+  pat="${pat//\\/\\\\}"; pat="${pat//\*/\\*}"; pat="${pat//\?/\\?}"; pat="${pat//\[/\\[}"
+  err="$(mktemp)" || return 1
+  out="$(LC_ALL=C find "${args[@]}" -maxdepth 1 \( -lname "$pat" -o -lname "$pat/*" -o -lname "$pat (deleted)" \) \
+    -printf '%p\t%l\n' 2>"$err")"
+  while IFS= read -r line; do
+    [[ "$line" =~ /proc/([0-9]+)/ ]] || { rm -f -- "$err"; return 1; }
+    pid="${BASH_REMATCH[1]}"
+    case "$line" in *'No such file or directory'*) continue ;; esac
+    _gc_pid_exists "$pid" && _gc_alive "$pid" || continue
+    _gc_unreadable_is_system "$(_gc_comm_of "$pid")" && continue
+    rm -f -- "$err"; return 1
+  done < "$err"
+  rm -f -- "$err"
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
+_gc_rc_in() { # <dir> <paths, one per line> -> 0 when one is <dir> or below it
+  local p
+  while IFS= read -r p; do
+    p="${p% (deleted)}"
+    case "$p" in "$1"|"$1"/*) return 0 ;; esac
+  done <<< "$2"
+  return 1
+}
+
+# Every repo every registered workspace declares, by the real path of its
+# clone (repos/<r> may be a symlink to a clone elsewhere).
+_gc_rc_clones() { # -> "<real clone path><TAB><wsdir><TAB><repo>" lines
+  local ws wsdir r real
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    wsdir="$(registry_path "$ws" 2>/dev/null)" && [ -n "$wsdir" ] && [ -f "$wsdir/workspace.yaml" ] || continue
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      real="$(readlink -f -- "$wsdir/repos/$r" 2>/dev/null)" && [ -d "$real" ] || continue
+      printf '%s\t%s\t%s\n' "$real" "$wsdir" "$r"
+    done < <(ws_repo_names "$wsdir" 2>/dev/null)
+  done < <(registry_names 2>/dev/null)
+}
+
+# Whose checkout this is: the one declared repo whose clone it is a worktree
+# of (a private clone: whose name it carries), and the PR its name gives.
+# Anything else - not a checkout's top level, no repo or two of them, a name
+# that is not <repo>-pr-<n>... - fails, and is kept.
+_gc_rc_identify() { # <checkout> <clones> -> wsdir<US>repo<US>pr<US>common-git-dir ("" for a private clone)
+  local d="$1" b="${1##*/}" gitdir common real="" cl ws r rest n=0 hit=""
+  gitdir="$(git -C "$d" rev-parse --absolute-git-dir 2>/dev/null)" \
+    && common="$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    && [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" = "$d" ] || return 1
+  if [ "$gitdir" = "$common" ]; then
+    [ "$gitdir" = "$d/.git" ] || return 1
+  else
+    real="$(readlink -f -- "$(dirname "$common")" 2>/dev/null)" || return 1
+  fi
+  while IFS=$'\t' read -r cl ws r; do
+    [ -n "$r" ] || continue
+    case "$b" in "$r"-pr-*) ;; *) continue ;; esac
+    [ -z "$real" ] || [ "$cl" = "$real" ] || continue
+    rest="${b#"$r"-pr-}"
+    [[ "$rest" =~ ^([1-9][0-9]*)($|-(review|qa)-.|\.round\.) ]] || continue
+    n=$((n + 1)); hit="$ws"$'\x1f'"$r"$'\x1f'"${BASH_REMATCH[1]}"
+  done <<< "$2"
+  [ "$n" -eq 1 ] || return 1
+  printf '%s\x1f%s\n' "$hit" "$([ -z "$real" ] || printf '%s' "$common")"
+}
+
+# What only this checkout holds. Sets rc_veto (unknown|unique|evidence) and,
+# for unique, appends what it holds to rc_own; 1 when nothing vetoes.
+# GIT_OPTIONAL_LOCKS=0: reading the status must not write the index.
+_gc_rc_vetoed() { # <checkout>
+  local st n first
+  rc_veto=""
+  st="$(GIT_OPTIONAL_LOCKS=0 git -C "$1" status --porcelain --untracked-files=all 2>/dev/null)" || { rc_veto=unknown; return 0; }
+  if [ -n "$st" ]; then
+    n="$(printf '%s\n' "$st" | grep -c .)"
+    first="$(printf '%s\n' "$st" | head -3 | cut -c4- | paste -sd, - | sed 's/,/, /g')"
+    rc_own+=("$1 ($n untracked or modified: $first$([ "$n" -le 3 ] || printf ', ...'))")
+    rc_veto=unique; return 0
+  fi
+  if rex_reviewer_checkout_preserved "$1"; then rc_veto=evidence; return 0; fi
+  return 1
+}
+
+# A commit only this checkout has. A reviewer runs read-only git, so this is
+# the belt to that brace: HEAD that no branch, tag or remote reaches and that
+# is not the PR's head, made here (its reflog says commit/merge/...); and in a
+# private clone, any branch commit no remote has. 0 has, 1 not, 2 unknown.
+_gc_rc_own_commits() { # <checkout> <pr head> <common git dir, "" for a private clone>
+  local head out gitdir
+  head="$(git -C "$1" rev-parse --verify -q HEAD 2>/dev/null)" || return 2
+  if [ -z "$3" ]; then
+    out="$(git -C "$1" rev-list -n1 --branches --tags --not --remotes 2>/dev/null)" || return 2
+    [ -z "$out" ] || return 0
+  fi
+  [ "$head" != "$2" ] || return 1
+  out="$(git -C "$1" rev-list -n1 HEAD --not --branches --tags --remotes 2>/dev/null)" || return 2
+  [ -n "$out" ] || return 1
+  gitdir="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" || return 2
+  [ -f "$gitdir/logs/HEAD" ] || return 1
+  grep -qE $'\t''(commit|merge|cherry-pick|rebase|revert|am)' "$gitdir/logs/HEAD"
+}
+
+_gc_rc_size() { # <KiB> -> human size
+  numfmt --to=iec --from-unit=1024 "$1" 2>/dev/null || printf '%sK' "$1"
+}
+
+_gc_rc_keep() { # <reason>; reads d/dry, counts into rc_why
+  rc_why[$1]=$(( ${rc_why[$1]:-0} + 1 ))
+  [ "$dry" -eq 1 ] && printf '  kept review checkout %s: %s\n' "$d" "$1"
+  return 0
+}
+
+_gc_rc_blind() { # <reason>: nothing could be proven this pass
+  c_warn "review checkouts: $1 - every one kept"
+  rc_fragment=", review checkouts kept ($1)"
+}
+
+_gc_review_checkouts() { # <dry>; sets rc_removed rc_kib rc_fragment
+  local dry="$1" dir rows roster panes open clones cache='{}' now days cap looked=0 f
+  local d ident wsdir repo pr common cstate cached_at cclosed old out state ts head closed kib age rc_veto=""
+  local -A rc_why=()
+  local -a rc_own=() items=()
+  rc_removed=0 rc_kib=0 rc_fragment=", 0 review checkouts removed"
+  dir="$(_run_review_dir)"
+  [ -d "$dir" ] || return 0
+  dir="$(readlink -f -- "$dir")" || return 0
+  days="${CEL_REVIEW_CHECKOUT_KEEP_DAYS:-3}"; [[ "$days" =~ ^[0-9]+$ ]] || days=3
+  cap="${CEL_GC_REVIEW_CHECKOUT_CAP:-30}"; [[ "$cap" =~ ^[1-9][0-9]*$ ]] || cap=30
+  now="$(date +%s)"
+  rows="$(reviewers_rows 2>/dev/null)" || { _gc_rc_blind "the reviewer registry is unreadable"; return 0; }
+  roster="$(lock_spawn "${lock_fd:-}" cel_agent_list 2>/dev/null)" \
+    && printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
+    && panes="$(printf '%s' "$roster" | jq -r '.result.agents[] | .cwd // "" | strings')" \
+    || { _gc_rc_blind "the agent roster is unreadable"; return 0; }
+  open="$(_gc_open_paths "$dir")" || { _gc_rc_blind "cannot read every process's cwd and open files"; return 0; }
+  open="$(printf '%s' "$open" | cut -f2-)"
+  clones="$(_gc_rc_clones)"
+  f="$(_gc_rc_state)"
+  if [ -s "$f" ]; then cache="$(jq -c 'if type == "object" then . else {} end' "$f" 2>/dev/null)" || cache='{}'; fi
+  [ -n "$cache" ] || cache='{}'
+  # Oldest first: the longest-settled checkouts go first under the cap.
+  mapfile -t items < <(stat -c $'%Y\t%n' -- "$dir"/*/ 2>/dev/null | sort -n | cut -f2-)
+  for d in "${items[@]}"; do
+    d="${d%/}"
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    ident="$(_gc_rc_identify "$d" "$clones")" || { _gc_rc_keep unresolved; continue; }
+    IFS=$'\x1f' read -r wsdir repo pr common <<< "$ident"
+    if printf '%s' "$rows" | jq -e --arg r "$repo" --arg p "$pr" 'any(.[]; .repo == $r and (.pr | tostring) == $p)' >/dev/null 2>&1; then
+      _gc_rc_keep reviewer; continue
+    fi
+    if _gc_rc_in "$d" "$panes" || _gc_rc_in "$d" "$open"; then _gc_rc_keep live; continue; fi
+    cstate=- cached_at=0 cclosed=0
+    IFS=$'\x1f' read -r cstate cached_at cclosed < <(printf '%s' "$cache" | jq -r --arg k "$d" \
+      '.[$k] // {} | [(.state // "-"), (.at // 0 | tostring), (.closed // 0 | tostring)] | join("\u001f")')
+    [[ "$cached_at" =~ ^[0-9]+$ ]] || cached_at=0
+    [[ "$cclosed" =~ ^[0-9]+$ ]] || cclosed=0
+    if [ "$cstate" = OPEN ] && [ "$cached_at" -le "$now" ] && [ $((now - cached_at)) -lt 3600 ]; then _gc_rc_keep open-pr; continue; fi
+    old=0
+    case "$cstate" in
+      MERGED|CLOSED) [ $((now - cclosed)) -lt $((days * 86400)) ] && { _gc_rc_keep recent; continue; }; old=1 ;;
+    esac
+    # Known settled long ago: what it holds is read before the forge is asked
+    # again, so a checkout kept for its own files spends no lookup per pass.
+    if [ "$old" -eq 1 ] && _gc_rc_vetoed "$d"; then _gc_rc_keep "$rc_veto"; continue; fi
+    if [ "$looked" -ge "$cap" ]; then _gc_rc_keep deferred; continue; fi
+    looked=$((looked + 1))
+    state=UNKNOWN ts="" head=""
+    if out="$(_gc_forge_pr_json "$wsdir" "$repo" "$wsdir/repos/$repo" "$pr" state,closedAt,mergedAt,headRefOid)"; then
+      IFS=$'\x1f' read -r state ts head < <(printf '%s' "$out" | jq -r \
+        'def s: if type == "string" then . else "" end;
+         [(.state | s), ((.closedAt | s) as $c | if $c != "" then $c else (.mergedAt | s) end), (.headRefOid | s)] | join("\u001f")' 2>/dev/null) \
+        || state=UNKNOWN
+    fi
+    case "$state" in
+      OPEN)
+        cache="$(printf '%s' "$cache" | jq -c --arg k "$d" --argjson at "$now" '.[$k] = {state:"OPEN", at:$at}')"
+        _gc_rc_keep open-pr; continue ;;
+      MERGED|CLOSED)
+        closed="$(date -d "$ts" +%s 2>/dev/null)" && [[ "$closed" =~ ^[0-9]+$ ]] && [ -n "$ts" ] \
+          || { _gc_rc_keep unknown; continue; }
+        cache="$(printf '%s' "$cache" | jq -c --arg k "$d" --arg s "$state" --argjson at "$now" --argjson c "$closed" \
+          '.[$k] = {state:$s, at:$at, closed:$c}')" ;;
+      *) _gc_rc_keep unknown; continue ;;
+    esac
+    [ $((now - closed)) -ge $((days * 86400)) ] || { _gc_rc_keep recent; continue; }
+    if [ "$old" -eq 0 ] && _gc_rc_vetoed "$d"; then _gc_rc_keep "$rc_veto"; continue; fi
+    local oc=0; _gc_rc_own_commits "$d" "$head" "$common" || oc=$?
+    case "$oc" in
+      0) rc_own+=("$d (commits no branch, tag or remote has)"); _gc_rc_keep unique; continue ;;
+      2) _gc_rc_keep unknown; continue ;;
+    esac
+    kib="$(du -sk -- "$d" 2>/dev/null | cut -f1)"; [[ "$kib" =~ ^[0-9]+$ ]] || kib=0
+    age=$(( (now - closed) / 86400 ))
+    if [ "$dry" -eq 1 ]; then
+      c_ok "would remove review checkout $d ($repo#$pr $state ${age}d ago, ~$(_gc_rc_size "$kib"))"
+    else
+      # The roster and /proc once more, right now: the pass's first reading
+      # is only ever allowed to keep.
+      if _reviewer_checkout_occupant "$d" >/dev/null; then _gc_rc_keep live; continue; fi
+      out="$(_gc_open_paths "$d")" && [ -z "$out" ] || { _gc_rc_keep live; continue; }
+      if [ -n "$common" ]; then
+        git --git-dir="$common" worktree remove "$d" >/dev/null 2>&1 \
+          || { c_warn "$d: git worktree remove refused - kept"; _gc_rc_keep refused; continue; }
+      else
+        rm -rf -- "$d" || { c_warn "$d: could not be removed - kept"; _gc_rc_keep refused; continue; }
+      fi
+      c_ok "removed review checkout $d ($repo#$pr $state ${age}d ago, ~$(_gc_rc_size "$kib") freed)"
+    fi
+    rc_removed=$((rc_removed + 1)) rc_kib=$((rc_kib + kib))
+  done
+  if [ "$dry" -eq 0 ]; then
+    # Only the answers about checkouts still here are worth remembering.
+    local keep; keep="$(for d in "${items[@]}"; do d="${d%/}"; [ -d "$d" ] && printf '%s\n' "$d"; done | jq -Rsc 'split("\n") | map(select(length > 0))')"
+    mkdir -p "$(dirname "$f")" 2>/dev/null \
+      && printf '%s' "$cache" | jq -c --argjson e "$keep" 'with_entries(select(.key as $k | $e | index($k)))' | _gc_state_write "$f" \
+      || true
+  fi
+  local r parts="" kept=0
+  for r in reviewer live open-pr recent unknown unique evidence deferred refused unresolved; do
+    [ "${rc_why[$r]:-0}" -gt 0 ] || continue
+    parts="${parts:+$parts, }${rc_why[$r]} $r"; kept=$((kept + rc_why[$r]))
+  done
+  printf 'gc: review checkouts: %s %d (~%s), kept %d%s\n' "$([ "$dry" -eq 1 ] && printf 'would remove' || printf removed)" \
+    "$rc_removed" "$(_gc_rc_size "$rc_kib")" "$kept" "${parts:+ ($parts)}"
+  for r in "${rc_own[@]}"; do c_warn "review checkout kept, it holds work of its own: $r"; done
+  if [ "$dry" -eq 1 ]; then rc_fragment=", $rc_removed review checkouts would be removed (~$(_gc_rc_size "$rc_kib"))"
+  else rc_fragment=", $rc_removed review checkouts removed (~$(_gc_rc_size "$rc_kib") freed)"; fi
+  return 0
+}
+
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
   local reap_hours="" dry=0 orphans=0 box=0
   while [ $# -gt 0 ]; do
@@ -1435,13 +1716,17 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   # the orphan reaper does not want it either - it has a live owner. Seven of
   # them, six for merged PRs, were most of a `box memory low` warning.
   _gc_reviewers "$dry" "$agents"
+  # Their checkouts, once the PR is long settled: after the reviewer pass,
+  # so a reviewer it closed has no row or pane left to keep one.
+  local rc_removed=0 rc_kib=0 rc_fragment=""
+  _gc_review_checkouts "$dry"
   # AFTER the worktree pass, deliberately: a freed worktree may have been the
   # last reference to a cache entry, and sweeping first would leave that entry
   # behind for another fortnight. `cel gc` is unchanged without --box.
   local box_line="" box_rc=0
   if [ "$box" -eq 1 ]; then box_sweep "$dry" || box_rc=$?; box_line="$(box_summary_fragment)"; fi
-  printf 'gc: %d worktrees removed, %d reviewers closed, %d agents reaped, %d kept%s%s%s\n' \
-    "$removed" "$reviewers_closed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$box_line" \
+  printf 'gc: %d worktrees removed, %d reviewers closed, %d agents reaped, %d kept%s%s%s%s\n' \
+    "$removed" "$reviewers_closed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$rc_fragment" "$box_line" \
     "$([ "$dry" -eq 1 ] && printf ' (dry run)')"
   # A BLIND GC MUST NOT LOOK LIKE AN IDLE ONE. Naming the directories is the
   # difference between "nothing to do" and "I cannot see anything".

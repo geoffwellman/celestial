@@ -797,6 +797,19 @@ or stopped using a saved-file/idle guess. A reviewer that went by other means
 proof is in flight) loses only its registry row to `cel gc`, so the PR can be
 reviewed again; its receipt, checkout and native log stay.
 
+A kept checkout does not stay forever. `cel gc` removes a reviewer checkout
+(under `~/.local/state/cel/reviews`) once all of these are facts: its PR is
+merged or closed - asked of the repo's own forge, GitHub or Forgejo, and
+unreadable is kept - and closed more than `CEL_REVIEW_CHECKOUT_KEEP_DAYS`
+(default 3) days ago; no reviewer of the PR is recorded and no pane, process
+cwd or open file is in it; no retained Rex retirement packet cites it; and it
+holds nothing of its own - an untracked or modified file (ignored build output
+does not count) keeps it, and the sweep names it. A linked worktree goes by a
+plain `git worktree remove`. The verdicts and evidence under the workspace's
+`.cel` stay. At most `CEL_GC_REVIEW_CHECKOUT_CAP` (default 30) checkouts are
+asked of the forge per pass, oldest first, and the summary line counts what
+went and the space it freed (`cel gc --dry-run` shows what would).
+
 A reviewer's inbox watcher is owned infrastructure only while its every child
 is recognised. Its jq child counts if it runs the launch checkout's current
 `_INBOX_WATCH_JQ` (lib/inbox.sh) or a program an earlier release started
