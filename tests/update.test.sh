@@ -219,6 +219,59 @@ test_update_lands_on_the_release_tag_not_on_main_tip() {
   _upd_cleanup
 }
 
+# The process running `cel update` sourced lib/link.sh BEFORE its pull. When
+# the pull brings in vendored-skills.yaml and the link code that fetches a
+# vendored skill's npm inputs, the re-apply must run THAT code, not the copy
+# in memory: the update to #333 linked every skill but fetched nothing, and
+# left the old ~/.omp/skills and ~/.pi/skills links behind.
+test_update_links_with_the_code_its_pull_brought_in() {
+  local real_reapply out rc dev
+  real_reapply="$(declare -f _update_reapply)"
+  _upd_fixture
+  eval "$real_reapply"
+  export HOME="$T/home" CEL_MANIFEST_CACHE="$T/manifest-cache"
+  mkdir -p "$HOME"
+  # what this box ran before the update: link code that fetches nothing
+  link_all() { printf 'old link_all\n' >>"$LOG"; }
+  # v0.4.0 brings the real link layer, a vendored skill and its manifest; the
+  # fixture vendor.py stands in for the npm download
+  dev="$T/dev"
+  git clone -q "$ORIGIN" "$dev" 2>/dev/null
+  git -C "$dev" config user.email t@example.com
+  git -C "$dev" config user.name tester
+  git -C "$dev" checkout -q v0.3.0 -b release
+  cp -R "$_UPD_REPO/lib" "$dev/lib"
+  # the fixture manifest without its generated skill (that would run herdr)
+  awk '/^generated_skills:/{exit} {print}' "$_UPD_REPO/tests/fixtures/agents.yaml" >"$dev/agents.yaml"
+  mkdir -p "$dev/bin" "$dev/tools/skills" "$dev/core/skills/demo"
+  printf '#!/bin/sh\nexit 0\n' >"$dev/bin/cel"
+  chmod +x "$dev/bin/cel"
+  printf -- '---\nname: demo\ndescription: a vendored demo\n---\n' >"$dev/core/skills/demo/SKILL.md"
+  printf 'skills: {}\n' >"$dev/vendored-skills.yaml"
+  printf '%s\n' 'import pathlib, sys' \
+    'root = pathlib.Path(__file__).resolve().parents[2]' \
+    'assert sys.argv[1:] == ["fetch"], sys.argv' \
+    '(root / "core/skills/demo/fetched.txt").write_text("fetched\n")' \
+    'print("fetched demo: 1 file(s)")' >"$dev/tools/skills/vendor.py"
+  printf 'core/skills/demo/fetched.txt\n' >"$dev/.gitignore"
+  printf '0.4.0\n' >"$dev/VERSION"
+  git -C "$dev" add -A
+  git -C "$dev" commit -qm 'release 0.4.0: vendored skills'
+  git -C "$dev" tag v0.4.0
+  git -C "$dev" push -q origin v0.4.0
+
+  rc=0
+  out="$(cmd_update 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; _upd_cleanup; return 1; }
+  assert_eq "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse 'v0.4.0^{commit}')" || { _upd_cleanup; return 1; }
+  if grep -q 'old link_all' "$LOG"; then
+    echo "re-apply ran the link code from before the pull"; _upd_cleanup; return 1
+  fi
+  [ -f "$ROOT/core/skills/demo/fetched.txt" ] || { echo "vendored inputs not fetched: $out"; _upd_cleanup; return 1; }
+  [ -L "$HOME/.claude/skills/demo" ] || { echo "skill not linked by the new code"; _upd_cleanup; return 1; }
+  _upd_cleanup
+}
+
 # A red doctor after an update is the exact moment someone needs to be told
 # there is a way back, and rollback has to actually re-apply the old build.
 test_update_verify_failure_offers_rollback_and_rollback_restores() {

@@ -1,0 +1,2 @@
+### Fixed
+- `cel update` re-applies the symlink layer with the code its pull just installed, not the copy of `lib/link.sh` the running process loaded before the pull. The update that brought in the vendored UI skills linked them but never fetched Modern Web Guidance's CLI and index, and left the plane's old `~/.omp/skills` / `~/.pi/skills` links behind; a release that changes what linking does now takes effect in the same update.

@@ -111,6 +111,20 @@ _update_changelog_since() { # <installed> <available>
   done < <(grep -o '^## \[[0-9][^]]*\]' "$f" | sed 's/^## \[//; s/\]$//')
 }
 
+# The symlink layer is applied by the code the update just installed. This
+# process sourced lib/link.sh before its pull, so a release that changes what
+# linking does - fetching a vendored skill's npm inputs, retiring a skills
+# directory - would otherwise take effect only on the update after it (the
+# update to the vendored UI skills linked them all but fetched nothing). The
+# workspace, dashboard and pages steps below already run the new bin/cel.
+_update_link_fresh() {
+  if [ -f "$CEL_ROOT/lib/link.sh" ] && [ -f "$CEL_ROOT/lib/install.sh" ] && [ -z "${CEL_UPDATE_INPROC:-}" ]; then
+    CEL_ROOT="$CEL_ROOT" bash -c '. "$CEL_ROOT/lib/link.sh" && . "$CEL_ROOT/lib/install.sh" && link_all'
+  else
+    link_all
+  fi
+}
+
 # Everything the installation touched, in one place: the symlink layer and the
 # claude settings merge (link_all -> link_claude_prefs registers the hook block
 # in ~/.claude/settings.json), every workspace's scoped links, and the box
@@ -118,7 +132,7 @@ _update_changelog_since() { # <installed> <available>
 # timer is rewritten by the doctor run in _update_verify (lib/steward_timer.sh).
 _update_reapply() {
   c_hd "Re-applying"
-  link_all
+  _update_link_fresh
   local ws
   for ws in $(registry_names 2>/dev/null); do
     "$CEL_ROOT/bin/cel" ws sync "$ws" || c_warn "ws sync $ws failed"
