@@ -1,0 +1,20 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -4,6 +4,17 @@
+ license: MIT
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - `eas-cli init`, `build`, `build --auto-submit`, `submit`, `submit:retry`, `metadata:push`, `build:version:set`, `eas update`, and `npx testflight`.
++> - App Store Connect and Google Play Console release actions: adding testers or groups, submitting for review, releasing, expedited review, rollout changes.
++> - Workflow files that build or submit, and removing a `require-approval` gate.
++> - "Carry the user's existing authorization" (below) does not apply here: each of these needs the owner's approval.
++
+ # App Store Deployment
+ 
+ > **EAS service - costs apply.** Cloud builds use EAS plan resources, and EAS services have free-tier and paid-plan limits. Apple Developer and Google Play memberships are separate. Check https://expo.dev/pricing for the requested service.

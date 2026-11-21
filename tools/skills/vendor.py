@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Third-party skills vendored into core/skills/, pinned in vendored-skills.yaml.
+"""Third-party skills vendored into core/skills/ (every agent) or
+core/workspace-skills/ (a `set` of skills a workspace opts into with
+workspace.yaml `skill_sets:`), pinned in vendored-skills.yaml.
 
   vendor.py check                 offline: manifest, licences, committed-tree digests,
                                   fetched-file hashes, frontmatter
@@ -9,10 +11,13 @@
                                   no network
   vendor.py verify [NAME...]      network: rebuild each skill from its pins and compare
                                   byte for byte
-  vendor.py sync NAME...          network: rebuild from the pins into core/skills/NAME
-                                  and record the new digests in the manifest
+  vendor.py sync NAME...          network: rebuild from the pins into the skill's
+                                  directory and record the new digests in the manifest
   vendor.py names SKILL.md...     frontmatter every runtime accepts; one name per skill
   vendor.py description SKILL.md  print a skill's frontmatter description
+  vendor.py set SET...            the skills in those sets, one per line (an
+                                  unknown set is refused)
+  vendor.py scoped                every skill in a set, one per line
 
 COMMITTED: the upstream directory (`path` in `repo` at `commit`), each GitHub
 `extra` (a file or directory from another pinned commit), then `patch` (a
@@ -42,6 +47,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "vendored-skills.yaml"
 SKILLS = ROOT / "core" / "skills"
+WORKSPACE_SKILLS = ROOT / "core" / "workspace-skills"
 
 LICENSES = {"MIT", "Apache-2.0"}
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -53,7 +59,7 @@ NPM = re.compile(r"^([a-z0-9][a-z0-9._-]*)@([0-9]+\.[0-9]+\.[0-9]+)$")
 # single hyphens, at most 64 characters, equal to the skill's directory.
 NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 NAME_MAX, DESCRIPTION_MAX = 64, 1024
-SKILL_KEYS = {"repo", "commit", "path", "license", "license_files", "extra", "patch", "sha256"}
+SKILL_KEYS = {"repo", "commit", "path", "license", "license_files", "extra", "patch", "set", "sha256"}
 GIT_EXTRA_KEYS = {"repo", "commit", "path", "to", "license"}
 NPM_EXTRA_KEYS = GIT_EXTRA_KEYS | {"npm", "integrity", "files"}
 
@@ -105,6 +111,9 @@ def validate_entry(name, entry):
         relpath(f, f"{where}: license_files")
     if "patch" in entry and not (ROOT / relpath(entry["patch"], f"{where}: patch")).is_file():
         raise Failure(f"{where}: patch {entry['patch']} does not exist")
+    # A workspace-scoped skill names its set; a workspace opts into sets.
+    if "set" in entry and not (isinstance(entry["set"], str) and NAME.match(entry["set"])):
+        raise Failure(f"{where}: set must be a lowercase-hyphenated set name")
     for i, extra in enumerate(entry.get("extra", [])):
         at = f"{where}: extra[{i}]"
         if not isinstance(extra, dict):
@@ -141,6 +150,13 @@ def fetched(entry):
         for f, digest in extra["files"].items():
             out[(PurePosixPath(extra["to"]) / f).as_posix()] = digest
     return out
+
+
+def skill_dir(name, entry):
+    """core/workspace-skills/NAME for a skill in a set (linked only into the
+    launches of workspaces that opt into it), core/skills/NAME for one every
+    agent gets."""
+    return (WORKSPACE_SKILLS if "set" in entry else SKILLS) / name
 
 
 def sha256(path):
@@ -203,9 +219,14 @@ def check():
     skills = load_manifest()
     absent = 0
     for name, entry in skills.items():
-        d = SKILLS / name
+        d = skill_dir(name, entry)
         if not (d / "SKILL.md").is_file():
-            raise Failure(f"{name}: core/skills/{name}/SKILL.md is missing")
+            raise Failure(f"{name}: {d.relative_to(ROOT)}/SKILL.md is missing")
+        # The other tree must not hold it too: core/skills is linked into
+        # every agent, so a scoped skill there would reach them all.
+        other = (SKILLS if d.parent == WORKSPACE_SKILLS else WORKSPACE_SKILLS) / name
+        if other.exists():
+            raise Failure(f"{name}: also present as {other.relative_to(ROOT)}; it belongs in {d.parent.relative_to(ROOT)} only")
         for f in entry.get("license_files", []):
             if not (d / f).is_file() or not (d / f).stat().st_size:
                 raise Failure(f"{name}: licence file {f} is missing")
@@ -279,9 +300,11 @@ def _select(members, src, what):
 
 def _write(target, body, executable):
     """Atomic: a reader (or a concurrent `check`) never sees a partial file,
-    and the temporary is a dotfile in core/skills/, outside every skill's tree."""
+    and the temporary is a dotfile in core/skills/ (or core/workspace-skills/),
+    outside every skill's tree."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".vendor-", dir=SKILLS if target.is_relative_to(SKILLS) else target.parent)
+    root = next((r for r in (SKILLS, WORKSPACE_SKILLS) if target.is_relative_to(r)), target.parent)
+    fd, tmp = tempfile.mkstemp(prefix=".vendor-", dir=root)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(body)
@@ -333,7 +356,8 @@ def fetch(names):
     skills = load_manifest()
     fetcher = Fetcher()
     for name in names or skills:
-        entry, d = skills[name], SKILLS / name
+        entry = skills[name]
+        d = skill_dir(name, entry)
         pins = fetched(entry)
         if not pins:
             continue
@@ -355,13 +379,13 @@ def verify(names):
         for name in names or skills:
             entry = skills[name]
             built = build(name, entry, fetcher, Path(tmp) / name)
-            want, have = committed(built, entry), committed(SKILLS / name, entry)
+            want, have = committed(built, entry), committed(skill_dir(name, entry), entry)
             problems = [f"missing {r}" for r in sorted(set(want) - set(have))]
             problems += [f"not upstream {r}" for r in sorted(set(have) - set(want))]
             problems += [f"differs {r}" for r in sorted(set(want) & set(have))
                          if want[r].read_bytes() != have[r].read_bytes()]
             for rel in fetched(entry):
-                local = SKILLS / name / rel
+                local = skill_dir(name, entry) / rel
                 if local.is_file() and local.read_bytes() != (built / rel).read_bytes():
                     problems.append(f"fetched copy differs {rel}")
             tree = digest(want)
@@ -403,7 +427,7 @@ def sync(names):
         for name in names:
             entry = skills[name]
             built = build(name, entry, fetcher, Path(tmp) / name, repin=True)
-            dest = SKILLS / name
+            dest = skill_dir(name, entry)
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(built, dest)
@@ -432,6 +456,19 @@ def main(argv):
             check_names(args)
         elif cmd == "description" and len(args) == 1:
             print(frontmatter(args[0]).get("description", ""))
+        elif cmd == "set" and args:
+            skills = load_manifest()
+            known = {e["set"] for e in skills.values() if "set" in e}
+            unknown = [s for s in args if s not in known]
+            if unknown:
+                raise Failure(f"no skill set {', '.join(unknown)} (sets: {', '.join(sorted(known))})")
+            for name, entry in skills.items():
+                if entry.get("set") in args:
+                    print(name)
+        elif cmd == "scoped" and not args:
+            for name, entry in load_manifest().items():
+                if "set" in entry:
+                    print(name)
         else:
             print(__doc__, file=sys.stderr)
             return 2

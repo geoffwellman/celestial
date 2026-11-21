@@ -108,6 +108,12 @@ agent_guard_hook() { # <runtime> <flag|file>
   _mq -r --arg a "$1" --arg k "$2" '.agents[$a].guard_hook[$k] // "" | tostring'
 }
 
+# One field of an agent's `workspace_skills:` block (strategy, flag, env,
+# path), or "".
+agent_workspace_skills() { # <runtime> <key>
+  _mq -r --arg a "$1" --arg k "$2" '.agents[$a].workspace_skills[$k] // "" | tostring'
+}
+
 # How a runtime resumes a session: flag and value kind, or "".
 agent_resume() { # <runtime> <flag|value>
   _mq -r --arg a "$1" --arg k "$2" '.agents[$a].resume[$k] // "" | tostring'

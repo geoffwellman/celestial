@@ -8,3 +8,8 @@ useDefault = true
 description = "WebCrypto algorithm name in a vendored skill guide (vendored-skills.yaml: modern-web-guidance)"
 regexTarget = "secret"
 regexes = ['''^MLKEM768-X25519$''']
+
+[[allowlists]]
+description = "Placeholder in an upstream anti-pattern example (vendored-skills.yaml: workers-best-practices, references/configuration.md)"
+regexTarget = "secret"
+regexes = ['''^sk-live-abc123\.\.\.$''']

@@ -1,0 +1,19 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -3,6 +3,16 @@
+ description: Cloudflare Workers best practices for production applications. Use when writing, reviewing, or configuring Workers.
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - `wrangler deploy`, `wrangler versions deploy` or any other deploy, including one made to measure deployed request duration or Smart Placement.
++> - `wrangler secret put` / `secret delete`: each one creates and deploys a new Worker version immediately.
++> - Turning on Workers Logs or Traces for production (billed by volume), and creating Queues, Workflows, Hyperdrive, D1, KV or R2 resources.
++
+ Your knowledge of Cloudflare Workers APIs, types, and configuration may be outdated. **Prefer retrieval over pre-training** when writing or reviewing Workers code.
+ 
+ Use the project's installed versions, generated types, and Wrangler compatibility settings as the baseline for existing code. Retrieve relevant Cloudflare documentation to verify API, configuration, runtime behavior, and limit claims.

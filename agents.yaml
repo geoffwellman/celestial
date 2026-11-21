@@ -16,6 +16,19 @@
 #   role_injection     how a role prompt reaches a launched session
 #   launch_args        optional: extra flags cel run puts on every launch of
 #                      this agent, ahead of the role-injection args
+#   workspace_skills   how a launch for a workspace reaches the vendored skills
+#                      it opts into (workspace.yaml `skill_sets:`),
+#                      linked under <workspace>/.cel/skills by cel ws sync
+#                      (lib/workspace.sh ws_link_vendored_skills). None of the
+#                      five finds them by directory: claude, omp, pi and codex
+#                      stop at the repository's git root, and a reviewer's
+#                      checkout is outside the workspace. Strategies:
+#                        flag          `<flag> <dir>/<path>` ahead of the args
+#                        env           `<env>=<dir>/<path>` in the launch env
+#                        codex_config  `-c skills.config=[...]` enabling them;
+#                                      lib/link.sh keeps them linked into
+#                                      skills_dir and disabled in config.toml
+#                      A workspace with none declared gets nothing added.
 #   signal             optional: how `cel gc` asks an idle agent of this
 #                      runtime to stop. `term` (the default) sends SIGTERM;
 #                      `int` sends SIGINT first and only then TERM, for a
@@ -78,6 +91,9 @@ agents:
       x64: { url: "https://downloads.claude.ai/claude-code-releases/2.1.300/linux-x64/claude", sha256: 674deba0bba9aee479f4503c438b49303b6fdd304b9a471b14977aaec5215453 }
       arm64: { url: "https://downloads.claude.ai/claude-code-releases/2.1.300/linux-arm64/claude", sha256: ae2295ae2da156936bf5831ab01971ce924d0c9a0af174e28d96fffa8d5fa0a6 }
     skills_dir: ~/.claude/skills
+    # Loads <dir>/.claude/skills, unprefixed (2.1.330; --plugin-dir would
+    # prefix every name with the plugin's).
+    workspace_skills: { strategy: flag, flag: --add-dir, path: . }
     agents_dir: ~/.claude/agents
     herdr_integration: claude
     required: true
@@ -119,6 +135,8 @@ agents:
       arm64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.14.0/omp-linux-arm64", sha256: dba8d170499709bc87359e02e677821aa76a6ef998ca0254578fe4ea07aff5bc }
     # omp reads user skills from <agent root>/skills only (never ~/.omp/skills).
     skills_dir: ~/.omp/agent/skills
+    # A plugin directory's skills/, unprefixed (18.16; --add-dir loads none).
+    workspace_skills: { strategy: flag, flag: --plugin-dir, path: . }
     agents_dir: ~/.omp/agent/agents
     herdr_integration: omp
     required: false
@@ -184,6 +202,8 @@ agents:
     install: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_INSTALL_VERSION"'
     # pi reads user skills from <agent root>/skills only (never ~/.pi/skills).
     skills_dir: ~/.pi/agent/skills
+    # A directory of skills (1.5; repeatable).
+    workspace_skills: { strategy: flag, flag: --skill, path: skills }
     herdr_integration: pi
     extensions_file: tools/pi/extensions.txt
     required: false
@@ -225,6 +245,7 @@ agents:
     version: 0.154.0
     install: 'CODEX_NON_INTERACTIVE=1 install_script https://github.com/openai/codex/releases/download/rust-v0.154.0/install.sh ba92dd27e5c06f0d3bbc58bfa4b9cfb6599cd2742fbb1f92a2765e6c07dedb5a sh --release "$CEL_INSTALL_VERSION"'
     skills_dir: ~/.codex/skills
+    workspace_skills: { strategy: codex_config }
     herdr_integration: codex
     required: false
     # codex has no system-prompt flag: the role arrives as the positional
@@ -266,6 +287,9 @@ agents:
       x64: { url: "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-linux-x64-baseline.tar.gz", sha256: 09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e, member: opencode }
       arm64: { url: "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-linux-arm64.tar.gz", sha256: 5a528f42caf576c6cdece6a191eb273d3db54effa5518e0402684d8f8026aeb6, member: opencode }
     skills_dir: ~/.config/opencode/skills
+    # An extra config file merged over the global one (skills lists join);
+    # the scoped OPENCODE_CONFIG_CONTENT is untouched.
+    workspace_skills: { strategy: env, env: OPENCODE_CONFIG, path: opencode.json }
     herdr_integration: opencode
     required: false
     # OpenCode injects the role through its agent registry.

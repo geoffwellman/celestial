@@ -1,0 +1,21 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -1,8 +1,17 @@
+ ---
+-name: skill-creator
++name: anthropic-skill-creator
+ description: Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy.
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - The description-optimisation loop (`python -m scripts.run_loop`, and `scripts/run_eval.py` / `scripts/improve_description.py` on their own): by default about 300 headless `claude -p` calls, 10 at a time, billed to the account with no cost cap. Offering it to the user is fine; running it is not.
++> - Upstream this skill is `skill-creator`; here it is `anthropic-skill-creator`, because Codex bundles a system skill named `skill-creator`.
++
+ # Skill Creator
+ 
+ A skill for creating new skills and iteratively improving them.

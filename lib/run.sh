@@ -108,6 +108,33 @@ _run_keep_model_args() { # <runtime>
   [ "$1" != omp ] || AGENT_ARGS=(--no-prewalk "${AGENT_ARGS[@]}")
 }
 
+# THE WORKSPACE'S SCOPED SKILLS reach this launch and no other workspace's
+# (agents.yaml workspace_skills; linked by cel ws sync, lib/workspace.sh
+# ws_link_vendored_skills). Ahead of every other arg, so claude's variadic
+# --add-dir ends at the next flag. Nothing when none are linked.
+_run_workspace_skills() { # <runtime> <wsdir> -> AGENT_ARGS, LAUNCH_ENV_EXTRA
+  local rt="$1" d s n names=() strategy path list="" p
+  d="$(ws_skills_dir "$2")"
+  for s in "$d"/skills/*/; do
+    [ -f "$s/SKILL.md" ] || continue
+    n="${s%/}"; names+=("${n##*/}")
+  done
+  [ "${#names[@]}" -gt 0 ] || return 0
+  strategy="$(agent_workspace_skills "$rt" strategy)"
+  path="$(agent_workspace_skills "$rt" path)"
+  case "$path" in .|"") path="$d" ;; *) path="$d/$path" ;; esac
+  case "$strategy" in
+    flag) AGENT_ARGS=("$(agent_workspace_skills "$rt" flag)" "$path" "${AGENT_ARGS[@]}") ;;
+    env) LAUNCH_ENV_EXTRA+=("$(agent_workspace_skills "$rt" env)=$(printf '%q' "$path")") ;;
+    codex_config)
+      for n in "${names[@]}"; do
+        p="$(agent_skills_dir "$rt")/$n/SKILL.md"; p="${p//\\/\\\\}"; p="${p//\"/\\\"}"
+        list+="${list:+,}{path=\"$p\",enabled=true}"
+      done
+      AGENT_ARGS=(-c "skills.config=[$list]" "${AGENT_ARGS[@]}") ;;
+  esac
+}
+
 # WAIT OUT A SPENT BUDGET: a pool-wide 429 asks for a retry longer than omp's
 # default retry.maxDelayMs, so core, root and the orchestrators get a --config
 # overlay that waits in-process. Workers do not: one asleep for hours holds a slot.
@@ -3225,6 +3252,7 @@ $(_run_reviewer_focus_brief "$repo" "$pr" "$review_focus")"
       # The one branch a builder may push (lib/guard.sh _guard_builder_push).
       [ "$MEMBER_ROLE" != builder ] || LAUNCH_ENV_EXTRA+=("CEL_TEAM_BRANCH=$MEMBER_BRANCH") ;;
   esac
+  _run_workspace_skills "$runtime" "$wsdir"
   # A scrubbed helper (_run_launch_scrub) still needs the provider key its
   # profile authenticates with when it reaches a provider directly.
   local -a LAUNCH_ENV_KEEP=()

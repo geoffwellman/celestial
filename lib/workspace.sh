@@ -883,3 +883,59 @@ ws_link_skills() { # <wsdir> <targetdir>
   grep -qxF '.claude/skills' "$2/.gitignore" 2>/dev/null \
     || printf '.claude/skills\n' >> "$2/.gitignore"
 }
+
+# VENDORED SKILL SETS (vendored-skills.yaml `set:`, core/workspace-skills/)
+# reach only the agents cel launches for a workspace whose workspace.yaml
+# opts in (`skill_sets: [cloudflare, expo]`), and nothing is
+# written into a product repo. No runtime finds skills above a repository's
+# git root (except OpenCode), and a reviewer's checkout is not under the
+# workspace at all, so discovery by directory cannot scope them; every launch
+# names this directory instead (lib/run.sh _run_workspace_skills, per
+# agents.yaml `workspace_skills`). It sits under the workspace's gitignored
+# .cel/:
+#   skills/<name>   -> $CEL_ROOT/core/workspace-skills/<name>   pi --skill <dir>/skills, omp --plugin-dir <dir>
+#   .claude/skills  -> ../skills                                 claude --add-dir <dir>
+#   opencode.json   {"skills": ["<this dir>/skills"]}            OPENCODE_CONFIG
+# Codex has no per-launch skill directory: lib/link.sh links them into its
+# skills dir disabled, and a launch enables this workspace's.
+ws_skills_dir() { printf '%s/.cel/skills' "$1"; }
+
+# Links exactly the skills of the sets workspace.yaml `skill_sets:` names; a
+# link into core/workspace-skills that is no longer declared is removed, and
+# with none declared the directory goes (so a launch adds no flag). Anything
+# else in it is not the plane's and stays. An unknown set changes nothing.
+ws_link_vendored_skills() { # <wsdir>
+  local d n l sets names="" keep=" " tmp
+  d="$(ws_skills_dir "$1")"
+  [ -f "$CEL_ROOT/vendored-skills.yaml" ] || return 0
+  sets="$(_wsy "$1" '(.skill_sets // []) | join(" ")')" || return
+  # shellcheck disable=SC2086  # set names are single words
+  if [ -n "$sets" ] && ! names="$(python3 "$CEL_ROOT/tools/skills/vendor.py" set $sets 2>&1)"; then
+    c_warn "workspace $(_wsy "$1" .name): skill_sets not linked (${names##*vendor.py: })"
+    return 0
+  fi
+  for n in $names; do
+    mkdir -p "$d/skills" || return
+    ln -sfn "$CEL_ROOT/core/workspace-skills/$n" "$d/skills/$n" || return
+    keep+="$n "
+  done
+  for l in "$d"/skills/*; do
+    [ -L "$l" ] || continue
+    case "$(readlink "$l")" in
+      "$CEL_ROOT"/core/workspace-skills/*)
+        case "$keep" in *" ${l##*/} "*) ;; *) rm -f "$l" ;; esac ;;
+    esac
+  done
+  if [ "$keep" = " " ]; then
+    [ ! -L "$d/.claude/skills" ] || rm -f "$d/.claude/skills"
+    rm -f "$d/opencode.json"
+    rmdir "$d/.claude" "$d/skills" "$d" 2>/dev/null || true
+    return 0
+  fi
+  mkdir -p "$d/.claude" || return
+  ln -sfn ../skills "$d/.claude/skills" || return
+  tmp="$(mktemp "$d/.opencode.json.XXXXXX")" || return
+  jq -n --arg s "$d/skills" '{skills: [$s]}' > "$tmp" \
+    && mv -f "$tmp" "$d/opencode.json" || { rm -f "$tmp"; return 1; }
+  c_ok "workspace $(_wsy "$1" .name) skills ->$keep"
+}
