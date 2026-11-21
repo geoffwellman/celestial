@@ -34,14 +34,24 @@ _rc_fixture() { # [forge: github|forgejo]
   printf '{"widget#71":{"verdict":"approved","head":"x"}}\n' > "$T/ws/.cel/solo-reviews.json"
   printf 'notes\n' > "$T/ws/.cel/reviews/pr-71/role-reviewer.md"
   GC_PR_STATE=MERGED GC_CLOSED_DAYS=10 GC_GH="$T/gh"; : > "$GC_GH"
+  # GC_CLOSED_RAW, when set, is the closedAt the forge states verbatim;
+  # GC_GH_NUMBER/GC_GH_URL override the PR it names; GC_GH_SIDE runs while
+  # the forge is being asked - something changing between the pass's first
+  # look and the removal.
+  unset GC_CLOSED_RAW GC_GH_NUMBER GC_GH_URL GC_GH_SIDE
   RC_ROSTER='{"result":{"agents":[]}}'
   cel_agent_list() { printf '%s' "$RC_ROSTER"; }
   gh() {
     printf '%s\n' "$*" >> "$GC_GH"
+    [ -z "${GC_GH_SIDE:-}" ] || eval "$GC_GH_SIDE"
     [ "$GC_PR_STATE" != UNKNOWN ] || return 1
-    local at=""; [ "$GC_PR_STATE" = OPEN ] || at="$(date -u -d "-$GC_CLOSED_DAYS days" +%Y-%m-%dT%H:%M:%SZ)"
+    local at="" n="${GC_GH_NUMBER:-$3}"
+    [ "$GC_PR_STATE" = OPEN ] || at="$(date -u -d "-$GC_CLOSED_DAYS days" +%Y-%m-%dT%H:%M:%SZ)"
+    [ -z "${GC_CLOSED_RAW+set}" ] || at="$GC_CLOSED_RAW"
     jq -n --arg s "$GC_PR_STATE" --arg at "$at" --arg h "$(command git -C "$T/ws/repos/widget" rev-parse HEAD)" \
-      '{state:$s, closedAt:(if $at == "" then null else $at end), mergedAt:(if $s == "MERGED" then $at else null end), headRefOid:$h}'
+      --argjson n "$n" --arg u "${GC_GH_URL:-https://github.com/acme/widget/pull/$n}" \
+      '{state:$s, closedAt:(if $at == "" then null else $at end), mergedAt:(if $s == "MERGED" and $at != "" then $at else null end),
+        headRefOid:$h, number:$n, url:$u}'
   }
 }
 
@@ -288,5 +298,123 @@ test_rc_a_zombie_with_unreadable_files_does_not_keep_checkouts() {
   _gc_comm_of() { printf herdr-core; }
   _rc_run 0
   _rc_gone "$co" || { cat "$T/out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+_rc_packet() { # <checkout>: a retained Rex retirement packet citing it
+  (umask 077 && mkdir -p "$T/rex/retirements")
+  jq -n --arg c "$1" --arg r "$T/rex/widget-pr-71-review.json" \
+    '{version:1, stage:"prepared", identity:{backend:"rex", role:"reviewer", agent:"pi", name:"widget-pr-71-review", cwd:$c},
+      checkout:{path:$c}, artifacts:{cwd:$c}, receipt:{path:$r}}' > "$T/rex/retirements/late.json"
+  chmod 600 "$T/rex/retirements/late.json"
+}
+
+# EVERY VETO IS ASKED AGAIN RIGHT BEFORE THE REMOVE. The pass reads a checkout
+# once to choose it (here: already known merged long ago, so what it holds is
+# read before the forge is asked), then spends a forge lookup; whatever
+# appears in that window - a file, a commit, a retirement packet, a reviewer
+# row, a process, a symlink in its place - keeps it.
+test_rc_every_veto_is_taken_again_adjacent_to_the_removal() {
+  local c co want
+  for c in 'late.txt|unique' 'commit|unique' 'packet|evidence' 'row|reviewer' 'process|live' 'symlink|unresolved'; do
+    _rc_fixture
+    co="$(_rc_checkout widget-pr-71)"
+    jq -n --arg k "$co" --argjson c "$(( $(date +%s) - 864000 ))" '{($k): {state:"MERGED", at:0, closed:$c}}' > "$CEL_GC_REVIEW_CHECKOUT_STATE"
+    want="${c#*|}"
+    case "${c%%|*}" in
+      late.txt) GC_GH_SIDE='printf "mine\n" > "$co/late.txt"' ;;
+      commit)   GC_GH_SIDE='command git -C "$co" -c user.email=t@t -c user.name=t commit -q --allow-empty -m mine' ;;
+      packet)   GC_GH_SIDE='_rc_packet "$co"' ;;
+      row)      GC_GH_SIDE='reviewers_record "$T/ws" widget 71 w1:p3 widget-pr-71-review "$co"' ;;
+      process)  GC_GH_SIDE='( cd "$co" && exec sleep 30 ) >/dev/null 2>&1 & printf "%s" "$!" > "$T/late.pid"; sleep 0.3' ;;
+      symlink)  GC_GH_SIDE='mv "$co" "$co.real" && ln -s "$co.real" "$co"' ;;
+    esac
+    rm -f "$T/late.pid"
+    _rc_run 0
+    [ ! -s "$T/late.pid" ] || kill "$(cat "$T/late.pid")" 2>/dev/null || true
+    assert_eq "$(grep -c 'pr view' "$GC_GH")" 1 || { echo "$c: the forge was not asked"; rm -rf "$T"; return 1; }
+    assert_eq "$rc_removed" 0 || { echo "$c: removed"; cat "$T/out"; rm -rf "$T"; return 1; }
+    if [ "${c%%|*}" = symlink ]; then [ -d "$co.real" ] || { echo "symlink: target removed"; rm -rf "$T"; return 1; }
+    else [ -d "$co" ] && [ ! -L "$co" ] || { echo "$c: checkout gone"; rm -rf "$T"; return 1; }; fi
+    assert_contains "$(cat "$T/out")" "1 $want" || { echo "$c"; cat "$T/out"; rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
+}
+
+# A CLOSE TIME IS AN INSTANT THE FORGE STATED. `date -d` would read "now",
+# "@0" or "1 year ago", and Forgejo's zero time as ancient; none of those, an
+# empty one, a date alone or one before 2000 is a close time: kept. A real
+# ISO-8601 instant with an offset is one.
+test_rc_only_an_iso_close_time_from_2000_on_counts() {
+  local raw co
+  for raw in '0001-01-01T00:00:00Z' '' 'now' '@0' '1 year ago' '2026-11-01' '1999-12-31T00:00:00Z' 'junk'; do
+    _rc_fixture
+    co="$(_rc_checkout widget-pr-71)"
+    GC_CLOSED_RAW="$raw"
+    _rc_run 0
+    [ -d "$co" ] || { echo "removed on closedAt '$raw'"; rm -rf "$T"; return 1; }
+    assert_contains "$(cat "$T/out")" "1 unknown" || { echo "'$raw'"; cat "$T/out"; rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
+  _rc_fixture
+  co="$(_rc_checkout widget-pr-71)"
+  GC_CLOSED_RAW="$(TZ=Pacific/Auckland date -d '-10 days' +%Y-%m-%dT%H:%M:%S%:z)"
+  _rc_run 0
+  _rc_gone "$co" || { echo "an offset ISO time was refused: $GC_CLOSED_RAW"; cat "$T/out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A REVIEWER STARTING NOW WINS. The final check and the remove hold the lock
+# `cel run` holds while it starts an agent (<rex state>/launch.lock): while a
+# launch holds it past CEL_GC_LAUNCH_LOCK_WAIT, the checkout is kept as busy.
+test_rc_a_launch_in_progress_keeps_the_checkout() {
+  _rc_fixture
+  local co p; co="$(_rc_checkout widget-pr-71)"
+  (umask 077 && mkdir -p "$T/rex")
+  ( exec 9>>"$T/rex/launch.lock"; flock 9; exec sleep 30 ) & p=$!
+  sleep 0.3
+  CEL_GC_LAUNCH_LOCK_WAIT=1 _rc_run 0
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null || true
+  [ -d "$co" ] || { echo "removed while a launch held the lock"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/out")" "1 busy" || { cat "$T/out"; rm -rf "$T"; return 1; }
+  _rc_run 0
+  _rc_gone "$co" || { cat "$T/out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# GITHUB'S ANSWER MUST BE THIS PR, as Forgejo's must: its number, and its url
+# ending in /<owner>/<name>/pull/<n>.
+test_rc_a_github_answer_naming_another_pr_or_repo_keeps_the_checkout() {
+  local c co
+  for c in 'number|72' 'url|https://github.com/acme/other/pull/71' 'url|https://github.com/acme/widget/pull/711'; do
+    _rc_fixture
+    co="$(_rc_checkout widget-pr-71)"
+    case "${c%%|*}" in number) GC_GH_NUMBER="${c#*|}" ;; url) GC_GH_URL="${c#*|}" ;; esac
+    _rc_run 0
+    [ -d "$co" ] || { echo "$c: removed"; rm -rf "$T"; return 1; }
+    assert_contains "$(cat "$T/out")" "1 unknown" || { echo "$c"; cat "$T/out"; rm -rf "$T"; return 1; }
+    assert_contains "$(cat "$GC_GH")" "number,url" || { rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
+}
+
+# A PRIVATE CLONE (no worktree of the repo's clone) is named by its directory
+# alone, so it goes only when it proves it is that PR's: HEAD at or behind the
+# PR's head, or cloned from the repo. One that cannot is kept and named.
+test_rc_a_private_clone_goes_only_when_it_is_the_prs() {
+  _rc_fixture
+  local ok other
+  ok="$T/reviews/widget-pr-75"
+  git clone -q "$T/ws/repos/widget" "$ok"
+  other="$T/reviews/widget-pr-76"
+  git init -q "$other"
+  git -C "$other" -c user.email=t@t -c user.name=t commit -q --allow-empty -m elsewhere
+  git -C "$other" update-ref refs/remotes/origin/main HEAD
+  git -C "$other" remote add origin git@github.com:someone/else.git
+  _rc_run 0
+  [ ! -e "$ok" ] || { echo "the PR's own clone was kept"; cat "$T/out"; rm -rf "$T"; return 1; }
+  [ -d "$other/.git" ] || { echo "a clone not proven to be the PR's was removed"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/out")" "1 unproven" || { cat "$T/out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/out")" "$other" || { cat "$T/out"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
