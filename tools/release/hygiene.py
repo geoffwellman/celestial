@@ -20,7 +20,11 @@ STANDARD_PREFIXES = {"UTF", "SHA", "ISO", "RFC", "TLS", "HTTP", "CWE", "CVE", "N
                      # someone's private tracker.
                      "CC0", "CC", "BSD", "GPL", "LGPL", "AGPL", "EPL", "MPL", "CDDL", "APACHE",
                      # FOLLOWUPS-<yymmdd> is a file-naming word, not a ticket.
-                     "FOLLOWUPS"}
+                     "FOLLOWUPS",
+                     # Vendored upstream text (vendored-skills.yaml): the FIPS
+                     # 203/204 parameter sets ML-KEM-768 and ML-DSA-65, a UTC
+                     # offset (UTC-5), the Apache licence URL (LICENSE-2.0).
+                     "KEM", "DSA", "UTC", "LICENSE"}
 TICKET = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-[0-9]+\b")
 SECRET_RULES = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),

@@ -12,12 +12,18 @@ _CEL_LINK=1
 # A link into core/skills/ whose skill was retired (fanout, pr-loop) is
 # removed: a dangling skill link is listed by some runtimes and read as an
 # instruction to use a tool that no longer exists.
+#
+# The plane once linked omp's and pi's skills into ~/.omp/skills and
+# ~/.pi/skills, which neither reads (both read <agent root>/skills). Its links
+# left there are removed; anything else there is the user's and stays.
+_CEL_UNREAD_SKILLS_DIRS=(.omp/skills .pi/skills)
 link_core_skills() {
-  local a sd s l
+  local a sd s l d linked=" "
   for a in $(agent_names); do
     sd="$(agent_skills_dir "$a")"
     [ -z "$sd" ] && continue
     mkdir -p "$sd"
+    linked+="$sd "
     for s in "$CEL_ROOT"/core/skills/*/; do
       [ -d "$s" ] || continue
       ln -sfn "${s%/}" "$sd/$(basename "${s%/}")"
@@ -30,6 +36,30 @@ link_core_skills() {
     done
     c_ok "$a skills -> $sd"
   done
+  for d in "${_CEL_UNREAD_SKILLS_DIRS[@]}"; do
+    case "$linked" in *" $HOME/$d "*) continue ;; esac
+    for l in "$HOME/$d"/*; do
+      [ -L "$l" ] || continue
+      case "$(readlink "$l")" in "$CEL_ROOT"/core/skills/*) rm -f "$l" ;; esac
+    done
+  done
+  return 0
+}
+
+# A vendored skill's npm inputs (vendored-skills.yaml) are not committed; they
+# are fetched here, from the pinned tarball, into the skill's own directory.
+# Files already present with their pinned sha256 are kept, so once a box has
+# them this needs no network. A failed fetch leaves the skill linked and the
+# rest of the plane working, and says what is missing.
+fetch_vendored_skills() {
+  [ -f "$CEL_ROOT/vendored-skills.yaml" ] || return 0
+  local out l
+  if out="$(python3 "$CEL_ROOT/tools/skills/vendor.py" fetch 2>&1)"; then
+    while IFS= read -r l; do [ -z "$l" ] || c_ok "$l"; done <<< "$out"
+  else
+    c_warn "vendored skill inputs not fetched (${out##*vendor.py: }); rerun \`cel update\` online"
+  fi
+  return 0
 }
 
 # ONLY core/agents/ - genuine in-session subagents a worker calls mid-task.
@@ -146,6 +176,7 @@ link_claude_prefs() {
 
 link_all() {
   if declare -F generate_skills >/dev/null; then generate_skills || return; fi
+  fetch_vendored_skills
   c_hd "Linking core"
   unlink_stale_roles
   link_core_skills

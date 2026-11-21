@@ -1,0 +1,7 @@
+### Added
+- Seven UI skills for every agent, vendored into `core/skills/` and linked into claude, omp, pi, codex and opencode like the plane's own: `web-design-guidelines`, `vercel-react-best-practices`, `vercel-composition-patterns`, `vercel-react-native-skills` (vercel-labs/agent-skills), `frontend-design` (anthropics/skills), `ui-sdk` (vercel-labs/ui; its description says UI SDK is beta and applies only where a product already depends on `@ui-sdk/core`) and `modern-web-guidance` (Chrome Modern Web Guidance 1.0).
+- `vendored-skills.yaml` pins each to an exact upstream commit with its repository, path, licence (MIT or Apache-2.0 only) and a digest of the committed tree; `tools/skills/vendor.py` checks it offline (`check`), re-fetches every pin and compares byte for byte (`verify`), and rebuilds after a pin moves (`sync`).
+- Modern Web Guidance runs box-wide and offline instead of through its per-project `npx` installer: the guides are committed, and `cel setup` / `cel update` fetch its CLI and search index from the pinned npm 1.0.1 tarball (sha512 integrity, per-file sha256) into the skill directory, gitignored and kept once present. Telemetry is off; the `legacy-scan` bundle (ISC and BSD-2-Clause dependencies) is not installed.
+
+### Fixed
+- omp and pi agents now see the plane's skills: they were linked into `~/.omp/skills` and `~/.pi/skills`, which neither runtime reads; they now go to `<agent root>/skills` (`~/.omp/agent/skills`, `~/.pi/agent/skills`) and the plane's old links there are removed.

@@ -55,6 +55,18 @@ test_hygiene_rejects_letter_and_mixed_ticket_keys() {
   rm -rf "$T"
 }
 
+# Vendored upstream text names standards the same way a ticket looks: the FIPS
+# 203/204 parameter sets, a UTC offset, the Apache licence URL.
+test_hygiene_accepts_standard_identifiers_from_vendored_text() {
+  _hygiene_fixture
+  printf 'ML-KEM-768, ML-DSA-65, UTC-5 and LICENSE-2.0 are standards.\n' > "$T/repo/example.txt"
+  git -C "$T/repo" add example.txt
+  _hygiene_scan
+  printf 'DSAX-%s\n' 65 > "$T/repo/example.txt"
+  assert_fails _hygiene_scan
+  rm -rf "$T"
+}
+
 test_hygiene_rejects_credentials_without_echoing_values() {
   _hygiene_fixture
   local value out

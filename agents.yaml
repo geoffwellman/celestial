@@ -117,7 +117,8 @@ agents:
     assets:
       x64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.14.0/omp-linux-x64", sha256: e7dd2b606c4ebe9d1a7bcfad1b8820db968cd6b05409fed1c6bc8db0b6a95a8f }
       arm64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.14.0/omp-linux-arm64", sha256: dba8d170499709bc87359e02e677821aa76a6ef998ca0254578fe4ea07aff5bc }
-    skills_dir: ~/.omp/skills
+    # omp reads user skills from <agent root>/skills only (never ~/.omp/skills).
+    skills_dir: ~/.omp/agent/skills
     agents_dir: ~/.omp/agent/agents
     herdr_integration: omp
     required: false
@@ -181,7 +182,8 @@ agents:
       rollback: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_OLD_VERSION"'
     version: 1.4.0
     install: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_INSTALL_VERSION"'
-    skills_dir: ~/.pi/skills
+    # pi reads user skills from <agent root>/skills only (never ~/.pi/skills).
+    skills_dir: ~/.pi/agent/skills
     herdr_integration: pi
     extensions_file: tools/pi/extensions.txt
     required: false

@@ -11,7 +11,10 @@ boundary against the local user.
   commands. `lib/` owns the mechanisms; `agents.yaml` describes agent commands,
   injection strategies and fresh-install pins.
 - `core/roles/` contains role prompts. `core/skills/` contains reusable workflows
-  and their executables, including `cel-verify` and `cel-linear`.
+  and their executables, including `cel-verify` and `cel-linear`, plus
+  third-party skills pinned in `vendored-skills.yaml` and checked by
+  `tools/skills/vendor.py`. `lib/link.sh` links every one into each runtime's
+  skills directory (for omp and pi, `<agent root>/skills`).
 - A separately owned workspace contains `workspace.yaml`, optional layouts,
   skills and dependency overlays, plus product clones under `repos/`.
   Workspace content and credentials do not belong in this repository.
