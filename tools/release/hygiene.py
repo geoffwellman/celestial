@@ -23,9 +23,9 @@ STANDARD_PREFIXES = {"UTF", "SHA", "ISO", "RFC", "TLS", "HTTP", "CWE", "CVE", "N
                      "FOLLOWUPS"}
 # Exact standard identifiers in vendored upstream text (vendored-skills.yaml),
 # token for token and nothing wider: the FIPS 203/204 parameter sets ML-KEM-*
-# and ML-DSA-*, one UTC offset, and the Apache licence URL (LICENSE-2.0 is
-# matched as LICENSE-2).
-STANDARD_TOKENS = {"KEM-512", "KEM-768", "KEM-1024", "DSA-44", "DSA-65", "DSA-87", "UTC-5", "LICENSE-2"}
+# and ML-DSA-*, one UTC offset, the Apache licence URL (LICENSE-2.0 is
+# matched as LICENSE-2) and the SPDX id CC-BY-4.0 (matched as BY-4).
+STANDARD_TOKENS = {"KEM-512", "KEM-768", "KEM-1024", "DSA-44", "DSA-65", "DSA-87", "UTC-5", "LICENSE-2", "BY-4"}
 TICKET = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-[0-9]+\b")
 SECRET_RULES = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),

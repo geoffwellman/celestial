@@ -1,0 +1,18 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -3,6 +3,15 @@
+ description: Profile or debug CPU usage and memory allocation in deployed Cloudflare Workers and Durable Objects. Then use this information to optimize your code.
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - Profiling a deployed Worker or Durable Object: it runs against production.
++> - Enabling source maps and the redeploy that needs.
++
+ # Workers profiling
+ 
+ Find expensive functions or memory allocations in deployed code and come up with ways to fix them.

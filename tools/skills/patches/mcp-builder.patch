@@ -1,0 +1,17 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -4,6 +4,14 @@
+ license: Complete terms in LICENSE.txt
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - Running the evaluation harness (`scripts/evaluation.py`; Phase 4 and `reference/evaluation.md`): every question is a multi-turn Anthropic API conversation billed to `ANTHROPIC_API_KEY`, with no cost cap.
++
+ # MCP Server Development Guide
+ 
+ ## Overview

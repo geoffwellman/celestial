@@ -271,6 +271,9 @@ _ws_sync_one() {
     ws_link_skills "$wsdir" "$wsdir/repos/$r"
     ws_render_claude_block "$wsdir" "$wsdir/repos/$r"
   done
+  # Vendored skill sets this workspace opts into: one directory under its .cel/,
+  # named by every launch, never a file in a repo.
+  ws_link_vendored_skills "$wsdir"
 
   if [ -f "$wsdir/externals.yaml" ]; then
     install_externals "$wsdir/externals.yaml" || return

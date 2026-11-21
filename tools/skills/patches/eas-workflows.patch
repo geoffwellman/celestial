@@ -1,0 +1,23 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -1,10 +1,19 @@
+ ---
+ name: eas-workflows
+ description: Helps understand and write EAS workflow YAML files for Expo projects. Use this skill when the user asks about CI/CD or workflows in an Expo or EAS context, mentions .eas/workflows/, or wants help with EAS build pipelines or deployment automation.
+-allowed-tools: "Read,Write,Bash(node:*),Bash(npx *eas-cli@*)"
+ license: MIT License
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - `eas workflow:run`, or anything else that starts a workflow: each job spends build minutes, and jobs can build, submit or publish updates.
++> - Committing or pushing workflow files whose push, pull_request or schedule triggers start such jobs, and removing a `require-approval` gate.
++> - Writing YAML and `eas-cli workflow:validate` need no approval. Upstream's `allowed-tools` line, which pre-approved every `node` and `eas-cli` command, is removed here.
++
+ # EAS Workflows Skill
+ 
+ > **EAS service - costs apply.** EAS Workflows run on Expo Application Services, a paid product with free-tier limits. Each workflow job consumes your plan's build/compute minutes, and jobs that build or submit also need paid Apple Developer and Google Play accounts. Review https://expo.dev/pricing before triggering runs.

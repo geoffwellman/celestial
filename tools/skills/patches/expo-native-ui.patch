@@ -1,0 +1,17 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -4,6 +4,14 @@
+ license: MIT
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - `eas-cli build` (EAS cloud builds use the plan's paid build minutes). Local `npx expo run:ios|android` builds need no approval.
++
+ # Expo Native UI Guidelines
+ 
+ For routes, links, stacks, tabs, modals, sheets, and headers, use the `expo-router` skill. For any motion — entering/exiting, gestures, springs, keyboard-driven UI — use the `expo-animation` skill.

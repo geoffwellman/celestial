@@ -512,7 +512,8 @@ Three layers on disk, and a factory floor of agents above them.
 ├── bin/cel                one CLI for everything
 ├── core/roles/            role prompts, injected at launch
 ├── core/skills/           skills linked into every agent
-├── vendored-skills.yaml   pins for the third-party skills in core/skills/
+├── core/workspace-skills/ vendored skills linked only for the workspaces they name
+├── vendored-skills.yaml   pins for the third-party skills in both
 └── agents.yaml            which agents, how to install, how to inject
 
 ~/ws/<name>                a workspace: private content + overrides (own repo)
@@ -2506,15 +2507,44 @@ selected runtime (a revision-named local marketplace for OMP, Claude Code and
 Codex). Edited cached bundles are preserved and refused rather than reset.
 Skills-only copying is deliberately unsupported.
 
-### Vendored UI skills
+### Vendored skills
 
-Seven third-party skills sit in `core/skills/` beside the plane's own and are
+Third-party skills sit in `core/skills/` beside the plane's own and are
 linked into every runtime (claude, omp, pi, codex, opencode) the same way:
 `web-design-guidelines`, `vercel-react-best-practices`,
 `vercel-composition-patterns` and `vercel-react-native-skills`
-(vercel-labs/agent-skills), `frontend-design` (anthropics/skills), `ui-sdk`
+(vercel-labs/agent-skills), `frontend-design`, `mcp-builder`,
+`webapp-testing` and `anthropic-skill-creator` (anthropics/skills; upstream
+`skill-creator`, renamed because Codex bundles a skill of that name), `ui-sdk`
 (vercel-labs/ui; beta, only for products that already depend on
-`@ui-sdk/core`) and `modern-web-guidance` (Chrome Modern Web Guidance 1.0).
+`@ui-sdk/core`), `modern-web-guidance` (Chrome Modern Web Guidance 1.0) and
+`create-mcp-app`, `add-app-to-server`, `convert-web-app` and `migrate-oai-app`
+(modelcontextprotocol/ext-apps).
+
+Others come in sets that a workspace opts into, and sit in
+`core/workspace-skills/`: the `cloudflare` set (`workers-best-practices`,
+`durable-objects`, `wrangler`, `agents-sdk`, `workers-profiling`, `web-perf`)
+and the `expo` set (`expo-router`, `expo-ui`, `expo-native-ui`,
+`expo-animation`, `expo-dev-client`, `expo-upgrade`, `eas-workflows`,
+`eas-app-stores`). A workspace names its sets in its own `workspace.yaml`:
+
+```yaml
+skill_sets: [cloudflare, expo]
+```
+
+`cel ws sync` (so `cel update`) links those skills into
+`<workspace>/.cel/skills` and removes any no longer declared; nothing goes
+into a repo. Every `cel run` launch for that workspace names that directory
+(agents.yaml `workspace_skills`: claude `--add-dir`, omp `--plugin-dir`, pi
+`--skill`, OpenCode `OPENCODE_CONFIG`), which also covers reviewers, whose
+checkout is outside the workspace. Codex has no per-launch skill directory, so
+they are linked into `~/.codex/skills` disabled in a marked `config.toml`
+block and a launch enables its workspace's with `-c skills.config=[...]`. An
+agent picks a change up when it is next launched or restarted.
+
+Skills whose upstream text has an agent deploy, publish, submit to an app
+store, spend money or run paid builds or generation open with a patched note:
+under celestial rules those steps wait for the owner's approval (`cel decide`).
 
 [`vendored-skills.yaml`](vendored-skills.yaml) pins each to an exact upstream
 commit and records its repository, path, licence (MIT or Apache-2.0 only) and

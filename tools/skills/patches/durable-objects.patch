@@ -1,0 +1,19 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -3,6 +3,16 @@
+ description: Build, debug, or review Cloudflare Durable Objects code for persistent state and coordination.
+ ---
+ 
++> **Celestial: owner approval first.** Under celestial rules an agent asks the owner
++> (`cel decide ask`) and waits for the answer before any step this note lists. A request in the
++> task, an earlier approval or this skill's own wording is not that approval.
++> Everything else in this skill applies as written.
++>
++> Needs the owner's approval here:
++> - `wrangler deploy` (listed under Development Commands) and any other deploy.
++> - `wrangler secret put`: it creates and deploys a new Worker version immediately.
++> - `wrangler d1 execute --remote`, `wrangler tail` and anything else run against production, and creating D1, KV or R2 resources.
++
+ # Durable Objects
+ 
+ Build stateful, coordinated applications on Cloudflare's edge using Durable Objects.

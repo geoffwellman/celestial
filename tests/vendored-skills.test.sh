@@ -1,21 +1,43 @@
 # shellcheck shell=bash
-# Third-party skills vendored into core/skills/ (vendored-skills.yaml). Each is
-# a pinned copy of an upstream directory, linked into every runtime exactly
-# like the plane's own skills. These tests check the pins, the licences, the
-# set of skills, the committed bytes against the manifest and the link step
+# Third-party skills vendored into core/skills/ (every agent) and
+# core/workspace-skills/ (sets a workspace opts into with workspace.yaml
+# `skill_sets:`), per vendored-skills.yaml. Each is a pinned copy of an upstream directory; the
+# every-agent ones are linked into every runtime exactly like the plane's own
+# skills. These tests check the pins, the licences, the set of skills and
+# their scopes, the committed bytes against the manifest and the link step
 # offline. Only the modern-web-guidance test touches the network, and only on
 # a checkout that has never fetched that skill's npm inputs (as `cel setup`
 # does); `tools/skills/vendor.py verify` re-fetches every pin and compares.
+# Workspace scoping (linking and launch flags): tests/workspace-skills.test.sh.
 
 VENDORED="$CEL_ROOT/vendored-skills.yaml"
 VENDOR="$CEL_ROOT/tools/skills/vendor.py"
 
-# The owner-approved set, and nothing else from those upstream repositories.
-APPROVED_VENDORED_SKILLS="frontend-design modern-web-guidance ui-sdk vercel-composition-patterns vercel-react-best-practices vercel-react-native-skills web-design-guidelines"
+# The owner-approved sets, and nothing else from those upstream repositories.
+APPROVED_VENDORED_SKILLS="add-app-to-server anthropic-skill-creator convert-web-app create-mcp-app frontend-design mcp-builder migrate-oai-app modern-web-guidance ui-sdk vercel-composition-patterns vercel-react-best-practices vercel-react-native-skills web-design-guidelines webapp-testing"
+# Workspace-scoped, in sets a workspace opts into: <skill>=<set>.
+APPROVED_WORKSPACE_SKILLS="agents-sdk=cloudflare durable-objects=cloudflare eas-app-stores=expo eas-workflows=expo expo-animation=expo expo-dev-client=expo expo-native-ui=expo expo-router=expo expo-ui=expo expo-upgrade=expo web-perf=cloudflare workers-best-practices=cloudflare workers-profiling=cloudflare wrangler=cloudflare"
 # The plane's own skills; herdr is generated (agents.yaml generated_skills).
 NATIVE_CORE_SKILLS="linear publish review verify"
+# Skills the runtimes bring themselves (Codex system skills, Claude Code and
+# OpenCode built-ins, 2026-11-22): a vendored skill of the same name would
+# shadow one or be shadowed. Upstream `skill-creator` is why
+# anthropic-skill-creator is renamed.
+RUNTIME_BUILTIN_SKILLS="skill-creator skill-installer imagegen openai-docs review-agent opencode browser report deep-research design design-sync dataviz update-config debug code-review simplify batch fewer-permission-prompts doctor loop claude-api workflow-authoring run run-skill-generator plugin-authoring"
+# Each skill whose upstream text has an agent deploy, publish, submit to an
+# app store, spend money or run paid builds/generation: its patch puts the
+# owner-approval note at the top.
+APPROVAL_NOTE_SKILLS="mcp-builder anthropic-skill-creator workers-best-practices durable-objects wrangler agents-sdk workers-profiling expo-native-ui expo-dev-client eas-workflows eas-app-stores"
 
-_vendored_names() { yq -r '.skills | keys[]' "$VENDORED" | LC_ALL=C sort; }
+_vendored_names() { yq -r '.skills | to_entries[] | select(.value.set == null) | .key' "$VENDORED" | LC_ALL=C sort; }
+_scoped_names() { yq -r '.skills | to_entries[] | select(.value.set != null) | .key' "$VENDORED" | LC_ALL=C sort; }
+_skill_path() { # <name> -> its vendored directory
+  if [ -n "$(yq -r --arg n "$1" '.skills[$n].set // ""' "$VENDORED")" ]; then
+    printf '%s/core/workspace-skills/%s' "$CEL_ROOT" "$1"
+  else
+    printf '%s/core/skills/%s' "$CEL_ROOT" "$1"
+  fi
+}
 
 test_vendored_skill_pins_are_full_commit_shas() {
   local pins bad
@@ -34,10 +56,16 @@ test_vendored_skill_licenses_are_mit_or_apache() {
   [ -n "$licenses" ] || { echo "no licences"; return 1; }
   bad="$(printf '%s\n' "$licenses" | grep -vxE 'MIT|Apache-2\.0' || true)"
   assert_eq "$bad" ""
-  for n in $(_vendored_names); do
+  for n in $(_vendored_names) $(_scoped_names); do
     for f in $(yq -r --arg n "$n" '.skills[$n].license_files // [] | .[]' "$VENDORED"); do
-      [ -s "$CEL_ROOT/core/skills/$n/$f" ] || { echo "$n: licence file $f missing"; return 1; }
+      [ -s "$(_skill_path "$n")/$f" ] || { echo "$n: licence file $f missing"; return 1; }
     done
+    [ -n "$(yq -r --arg n "$n" '.skills[$n].license_files // [] | .[]' "$VENDORED")" ] \
+      || case " $APPROVED_VENDORED_SKILLS " in
+           # batch 1's Vercel skills: upstream ships no licence file (MIT by README)
+           *" $n "*) [ "${n#vercel-}" != "$n" ] ;;
+           *) false ;;
+         esac || { echo "$n: no licence file kept"; return 1; }
   done
 }
 
@@ -56,6 +84,45 @@ test_exactly_the_approved_vendored_skills_are_present() {
       d="${d%/}"; printf '%s\n' "$generated" | grep -qxF "$d" || printf '%s\n' "$d"
     done | LC_ALL=C sort)"
   assert_eq "$actual" "$expected"
+}
+
+test_exactly_the_approved_workspace_skills_are_present_and_scoped() {
+  local pair n set expected actual
+  expected="$(printf '%s\n' $APPROVED_WORKSPACE_SKILLS | cut -d= -f1 | LC_ALL=C sort)"
+  assert_eq "$(_scoped_names)" "$expected"
+  for pair in $APPROVED_WORKSPACE_SKILLS; do
+    n="${pair%%=*}" set="${pair#*=}"
+    assert_eq "$(yq -r --arg n "$n" '.skills[$n].set' "$VENDORED")" "$set"
+    [ -f "$CEL_ROOT/core/workspace-skills/$n/SKILL.md" ] || { echo "$n missing"; return 1; }
+    # never in core/skills, which every agent gets
+    [ ! -e "$CEL_ROOT/core/skills/$n" ] || { echo "$n is in core/skills"; return 1; }
+  done
+  actual="$(cd "$CEL_ROOT/core/workspace-skills" && for d in */; do printf '%s\n' "${d%/}"; done | LC_ALL=C sort)"
+  assert_eq "$actual" "$expected"
+  assert_eq "$(python3 "$VENDOR" set cloudflare | tr '\n' ' ')" "agents-sdk durable-objects web-perf workers-best-practices workers-profiling wrangler "
+  assert_eq "$(python3 "$VENDOR" set expo cloudflare | wc -l)" "14"
+  assert_fails python3 "$VENDOR" set no-such-set
+}
+
+# A set is one lowercase-hyphenated name.
+test_vendor_refuses_a_malformed_skill_set() {
+  local T out bad
+  T="$(mktemp -d)"
+  for bad in '[cloudflare]' '../x' 'Cloud' '""'; do
+    python3 - "$CEL_ROOT/tools/skills" "$bad" <<'PY' > "$T/out" 2>&1 && { cat "$T/out"; echo "accepted set: $bad"; return 1; }
+import sys, yaml
+sys.path.insert(0, sys.argv[1])
+import vendor
+entry = yaml.safe_load(open(vendor.MANIFEST))["skills"]["wrangler"]
+entry["set"] = yaml.safe_load(sys.argv[2])
+try:
+    vendor.validate_entry("wrangler", entry)
+except vendor.Failure as e:
+    print(e); sys.exit(1)
+PY
+    assert_contains "$(cat "$T/out")" "set must be"
+  done
+  rm -rf "$T"
 }
 
 test_vendored_skill_bytes_match_the_manifest() {
@@ -80,9 +147,76 @@ test_fetched_vendored_inputs_are_ignored_and_untracked() {
 # Claude Code, omp, pi, Codex and OpenCode all read name and description from
 # the frontmatter; the strictest rules (OpenCode, pi, the Agent Skills spec):
 # name is lowercase-hyphenated, at most 64 characters and equal to its
-# directory; description is 1-1024 characters. One name per skill, box-wide.
+# directory; description is 1-1024 characters. One name per skill, box-wide:
+# across both trees, and none a runtime's own.
 test_core_skill_names_are_unique_and_valid_for_every_runtime() {
-  python3 "$VENDOR" names "$CEL_ROOT"/core/skills/*/SKILL.md
+  python3 "$VENDOR" names "$CEL_ROOT"/core/skills/*/SKILL.md "$CEL_ROOT"/core/workspace-skills/*/SKILL.md || return 1
+  local n
+  for n in $RUNTIME_BUILTIN_SKILLS; do
+    [ ! -e "$CEL_ROOT/core/skills/$n" ] && [ ! -e "$CEL_ROOT/core/workspace-skills/$n" ] \
+      || { echo "$n is a runtime's own skill name"; return 1; }
+  done
+}
+
+# Upstream skill-creator keeps its body; only its name (and the note) change.
+test_anthropic_skill_creator_is_renamed_from_upstream() {
+  assert_eq "$(yq -r '.skills["anthropic-skill-creator"].path' "$VENDORED")" "skills/skill-creator"
+  assert_contains "$(head -3 "$CEL_ROOT/core/skills/anthropic-skill-creator/SKILL.md")" "name: anthropic-skill-creator"
+}
+
+# Every skill that has an agent deploy, publish, submit to a store, spend or
+# run paid builds/generation opens with the owner-approval note, carried by a
+# recorded patch so `vendor.py verify` reproduces it from upstream.
+test_flagged_skills_open_with_the_owner_approval_note() {
+  local n f body
+  for n in $APPROVAL_NOTE_SKILLS; do
+    assert_eq "$(yq -r --arg n "$n" '.skills[$n].patch' "$VENDORED")" "tools/skills/patches/$n.patch"
+    f="$(_skill_path "$n")/SKILL.md"
+    # first thing after the frontmatter
+    body="$(awk 'f == 2 && NF {print; exit} /^---$/ {f++}' "$f")"
+    assert_eq "$body" '> **Celestial: owner approval first.** Under celestial rules an agent asks the owner'
+    assert_contains "$(cat "$f")" "> Needs the owner's approval here:"
+  done
+  # and no other skill carries one
+  assert_eq "$(grep -l 'Celestial: owner approval first' "$CEL_ROOT"/core/skills/*/SKILL.md "$CEL_ROOT"/core/workspace-skills/*/SKILL.md | wc -l)" \
+    "$(printf '%s\n' $APPROVAL_NOTE_SKILLS | wc -l)"
+}
+
+# The notes name the commands that need approval, not only their kind.
+test_approval_notes_name_the_commands() {
+  local note
+  _note() { awk '/^> \*\*Celestial: owner approval first/ {f = 1} f && !/^>/ {exit} f' "$(_skill_path "$1")/SKILL.md"; }
+  note="$(_note eas-app-stores)"
+  for want in '`eas-cli credentials`' '`eas-cli login`' '`eas-cli deploy` (EAS Hosting)' '`eas update`' '`submit`' '`build`' '`metadata:push`' 'npx testflight'; do
+    assert_contains "$note" "$want" || return 1
+  done
+  note="$(_note wrangler)"
+  for want in 'wrangler deploy' 'wrangler d1 execute --remote' 'wrangler kv key put|delete --remote' 'wrangler r2 object put|delete --remote' 'wrangler secret put' 'wrangler login'; do
+    assert_contains "$note" "$want" || return 1
+  done
+  note="$(_note expo-dev-client)"
+  assert_contains "$note" '`eas-cli credentials`'
+  note="$(_note eas-workflows)"
+  assert_contains "$note" '`eas workflow:run`'
+}
+
+# allowed-tools pre-approves tools while a skill is active (Claude Code); no
+# vendored skill ships a shell pre-approval (vendor.py BASH_ALLOWED_TOOLS is
+# empty: upstream's eas-workflows and expo-ui ones are removed by patches).
+test_no_vendored_skill_pre_approves_shell_commands() {
+  local hits T
+  hits="$(grep -lE '^allowed[-_]tools:' "$CEL_ROOT"/core/skills/*/SKILL.md "$CEL_ROOT"/core/workspace-skills/*/SKILL.md || true)"
+  assert_eq "$hits" ""
+  assert_eq "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import vendor; print(vendor.BASH_ALLOWED_TOOLS)' "$CEL_ROOT/tools/skills")" "{}"
+  T="$(mktemp -d)"
+  for v in '"Bash(node:*)"' '"Read,Bash(npx *eas-cli@*)"' '[Read, "Bash(git status)"]'; do
+    mkdir -p "$T/x"
+    printf -- '---\nname: x\ndescription: d\nallowed-tools: %s\n---\n' "$v" > "$T/x/SKILL.md"
+    assert_fails python3 "$VENDOR" names "$T/x/SKILL.md" || { echo "accepted allowed-tools: $v"; return 1; }
+  done
+  printf -- '---\nname: x\ndescription: d\nallowed-tools: "Read,Write"\n---\n' > "$T/x/SKILL.md"
+  python3 "$VENDOR" names "$T/x/SKILL.md"
+  rm -rf "$T"
 }
 
 test_link_puts_vendored_skills_in_every_runtime_skills_dir() {

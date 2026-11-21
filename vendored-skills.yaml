@@ -1,8 +1,10 @@
 # Third-party skills vendored into core/skills/<name>/ and linked into every
 # runtime (claude, omp, pi, codex, opencode) exactly like the plane's own core
-# skills. Each is pinned like optional-plugins.yaml: an exact upstream commit,
-# never a branch, tag or @latest. The directory name is the upstream
-# frontmatter `name` (OpenCode and pi require the two to match).
+# skills - or, with `set:`, into core/workspace-skills/<name>/ and reached
+# only by the agents of workspaces that opt into that set. Each is pinned like
+# optional-plugins.yaml: an exact upstream commit, never a branch, tag or
+# @latest. The directory name is the upstream frontmatter `name` (OpenCode
+# and pi require the two to match).
 #
 # GitHub inputs are COMMITTED, so an agent reads reviewed bytes on every box
 # with no network. npm inputs are FETCHED AT INSTALL (`cel setup`,
@@ -18,11 +20,18 @@
 #                          commit (committed), or named files from an npm
 #                          tarball (fetched at install; `files` pins each)
 #   patch                  the plane's own edit, a zero-fuzz unified diff
+#   set                    optional: the skill set it belongs to. A workspace
+#                          opts into sets with workspace.yaml `skill_sets:`;
+#                          cel ws sync links their skills into its .cel/skills
+#                          and every launch there names that directory
+#                          (agents.yaml workspace_skills). Absent: every agent.
 #   sha256                 digest of the committed tree (tools/skills/vendor.py)
 #
 # Offline check (tests/vendored-skills.test.sh): python3 tools/skills/vendor.py check
 # Re-fetch every pin and compare byte for byte: python3 tools/skills/vendor.py verify
 # Move a pin: edit it, then python3 tools/skills/vendor.py sync <name>
+# Sets: cloudflare (Workers, Durable Objects, Wrangler, Agents SDK, profiling,
+# web performance) and expo (Expo Router, Expo UI, EAS).
 # Pins read from GitHub and npm on 2026-11-21.
 skills:
   web-design-guidelines:
@@ -135,3 +144,314 @@ skills:
           gen/query-words.scale.f32: 4067f3b83a2ae21ffa3df21db1b159b2c04f6058ab394a4e2647d81faf28deea
     patch: tools/skills/patches/modern-web-guidance.patch
     sha256: 6e1e9867179c589811261ffc740906000becc725b7190474d3795055c03c92f2
+
+  # --- AH-261122: second batch. Pins read from GitHub on 2026-11-22. ---
+  # Every patch below except skill-creator's rename only adds the owner-approval
+  # note at the top of the skill: its steps that deploy, publish, submit to an
+  # app store, spend money or run paid builds/generation wait for the owner
+  # under celestial rules (the note names each one).
+  mcp-builder:
+    repo: anthropics/skills
+    commit: e4bb5d960d87126ff3b3a8af1a104b7db67560ba
+    path: skills/mcp-builder
+    license: Apache-2.0
+    license_files: [LICENSE.txt]
+    patch: tools/skills/patches/mcp-builder.patch
+    sha256: f64d5c6a5d55e6c997b69eda6a72cf7e1ecb13b92f22fcbbf23bf2ec7a78f602
+  webapp-testing:
+    repo: anthropics/skills
+    commit: e4bb5d960d87126ff3b3a8af1a104b7db67560ba
+    path: skills/webapp-testing
+    license: Apache-2.0
+    license_files: [LICENSE.txt]
+    sha256: 31ebb48bce8e86083126a45fe62f42d1352259f07a410807d07f038bb1c954a3
+  anthropic-skill-creator:
+    # Upstream `skill-creator`, renamed: Codex bundles a system skill of that
+    # name (~/.codex/skills/.system/skill-creator) and Claude Code plugins
+    # carry one too, so the upstream name would shadow or be shadowed.
+    repo: anthropics/skills
+    commit: e4bb5d960d87126ff3b3a8af1a104b7db67560ba
+    path: skills/skill-creator
+    license: Apache-2.0
+    license_files: [LICENSE.txt]
+    patch: tools/skills/patches/anthropic-skill-creator.patch
+    sha256: e71421aed97e9c3decc78bea41ae24a7d597b29b809414d21237222b8ffd3023
+  add-app-to-server:
+    # MIT per the plugin's own manifest (plugins/mcp-apps/.claude-plugin/
+    # plugin.json "license": "MIT") and package.json. The repository LICENSE,
+    # vendored beside it, adds that new code is Apache-2.0 and that
+    # non-specification documentation is CC-BY-4.0.
+    repo: modelcontextprotocol/ext-apps
+    commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+    path: plugins/mcp-apps/skills/add-app-to-server
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: modelcontextprotocol/ext-apps
+        commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    sha256: c30e61e04a3f1191cac381240a30528b40f1f3b4b1936e237ada33cefe37f1b9
+  convert-web-app:
+    # MIT per the plugin's own manifest (plugins/mcp-apps/.claude-plugin/
+    # plugin.json "license": "MIT") and package.json. The repository LICENSE,
+    # vendored beside it, adds that new code is Apache-2.0 and that
+    # non-specification documentation is CC-BY-4.0.
+    repo: modelcontextprotocol/ext-apps
+    commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+    path: plugins/mcp-apps/skills/convert-web-app
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: modelcontextprotocol/ext-apps
+        commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    sha256: d943b6c613f5eca2d9e3eca64056f99cbd888fc1326f0fe8992e012021ac8851
+  create-mcp-app:
+    # MIT per the plugin's own manifest (plugins/mcp-apps/.claude-plugin/
+    # plugin.json "license": "MIT") and package.json. The repository LICENSE,
+    # vendored beside it, adds that new code is Apache-2.0 and that
+    # non-specification documentation is CC-BY-4.0.
+    repo: modelcontextprotocol/ext-apps
+    commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+    path: plugins/mcp-apps/skills/create-mcp-app
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: modelcontextprotocol/ext-apps
+        commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    sha256: d21030d30e5944480f108da0999487e1d91e7d847ec14c46eae852954db2c359
+  migrate-oai-app:
+    # MIT per the plugin's own manifest (plugins/mcp-apps/.claude-plugin/
+    # plugin.json "license": "MIT") and package.json. The repository LICENSE,
+    # vendored beside it, adds that new code is Apache-2.0 and that
+    # non-specification documentation is CC-BY-4.0.
+    repo: modelcontextprotocol/ext-apps
+    commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+    path: plugins/mcp-apps/skills/migrate-oai-app
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: modelcontextprotocol/ext-apps
+        commit: ea3e9d0e624a20bc1c51310292f09d9b8ed17161
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    sha256: ca4d529e045b37daec6befdf3b28ed9d875d32f26c9b269fde055a0987f6e772
+  agents-sdk:
+    repo: cloudflare/skills
+    commit: 5108325ecceabc899c761e07aa617b09c02445ee
+    path: skills/agents-sdk
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: cloudflare/skills
+        commit: 5108325ecceabc899c761e07aa617b09c02445ee
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+    patch: tools/skills/patches/agents-sdk.patch
+    set: cloudflare
+    sha256: 3a9db1cc9843aab8ce0d532193d798d02113c917de7a4bb0a1941fce54fb8cc2
+  durable-objects:
+    repo: cloudflare/skills
+    commit: 5108325ecceabc899c761e07aa617b09c02445ee
+    path: skills/durable-objects
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: cloudflare/skills
+        commit: 5108325ecceabc899c761e07aa617b09c02445ee
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+    patch: tools/skills/patches/durable-objects.patch
+    set: cloudflare
+    sha256: c4cea1031dc418d24f1fd3fc6159a19be3ea1ab672cd71cf7229572dde2f8e6a
+  web-perf:
+    repo: cloudflare/skills
+    commit: 5108325ecceabc899c761e07aa617b09c02445ee
+    path: skills/web-perf
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: cloudflare/skills
+        commit: 5108325ecceabc899c761e07aa617b09c02445ee
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+    set: cloudflare
+    sha256: 383cc5e9dd88f941e2726922b2348c5abfdff9abd11ec3cc338bfd2f27202cca
+  workers-best-practices:
+    repo: cloudflare/skills
+    commit: 5108325ecceabc899c761e07aa617b09c02445ee
+    path: skills/workers-best-practices
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: cloudflare/skills
+        commit: 5108325ecceabc899c761e07aa617b09c02445ee
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+    patch: tools/skills/patches/workers-best-practices.patch
+    set: cloudflare
+    sha256: d04a47c5405b69cb1db19ecbd60b27d13ed5e434cc740359b82ec136e039a1d0
+  workers-profiling:
+    repo: cloudflare/skills
+    commit: 5108325ecceabc899c761e07aa617b09c02445ee
+    path: skills/workers-profiling
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: cloudflare/skills
+        commit: 5108325ecceabc899c761e07aa617b09c02445ee
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+    patch: tools/skills/patches/workers-profiling.patch
+    set: cloudflare
+    sha256: 8ba9286d94a047009a11180ee8ce4b3f10fd4a9607ab82a3f69ec02c5085e44d
+  wrangler:
+    repo: cloudflare/skills
+    commit: 5108325ecceabc899c761e07aa617b09c02445ee
+    path: skills/wrangler
+    license: Apache-2.0
+    license_files: [LICENSE]
+    extra:
+      - repo: cloudflare/skills
+        commit: 5108325ecceabc899c761e07aa617b09c02445ee
+        path: LICENSE
+        to: LICENSE
+        license: Apache-2.0
+    patch: tools/skills/patches/wrangler.patch
+    set: cloudflare
+    sha256: ef56a25a77f08a6f86825238766497a664288b7935e37b4ea6f830232c374ad9
+  eas-app-stores:
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/eas-app-stores
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    patch: tools/skills/patches/eas-app-stores.patch
+    set: expo
+    sha256: 82e56d5fe7c93c8678149fa1200c589677a87ecdd71e1ada05f04e03edc40868
+  eas-workflows:
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/eas-workflows
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    patch: tools/skills/patches/eas-workflows.patch
+    set: expo
+    sha256: 86de7e45ee79dbebf53a4adef6bf406ace068af4337adf80e9fd704ca910ae52
+  expo-animation:
+    # Its own LICENSE (MIT, its author) ships upstream; the repository's
+    # MIT licence travels beside it.
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/expo-animation
+    license: MIT
+    license_files: [LICENSE, LICENSE-expo]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE-expo
+        license: MIT
+    set: expo
+    sha256: d90aecdaad6d9e1d0674952db751a64d7fb33d5a9c273e03b04351966fe06f99
+  expo-dev-client:
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/expo-dev-client
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    patch: tools/skills/patches/expo-dev-client.patch
+    set: expo
+    sha256: 0415da7ee2eacc4d43d48e899992832ce42a21d8f0de4f0a066e954b021dd33c
+  expo-native-ui:
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/expo-native-ui
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    patch: tools/skills/patches/expo-native-ui.patch
+    set: expo
+    sha256: 2c426165b5ee49ce43274f3358a8a08680ec41e55e5a9bb3d59b8ff2a61424ea
+  expo-router:
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/expo-router
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    set: expo
+    sha256: 307647dff78500c90ae81c0c0be17a352067b31915beef9e782a4e198a7b7482
+  expo-ui:
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/expo-ui
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    # The patch drops upstream's allowed-tools pre-approval of
+    # `node *expo-ui/scripts/list-components.js *`, whose leading `*` also
+    # admits `node -e <code> ...` (vendor.py BASH_ALLOWED_TOOLS).
+    patch: tools/skills/patches/expo-ui.patch
+    set: expo
+    sha256: accc50fe02ab2788983e03d25796e21b098ebbb66fe1276b7d8034f9358b90a5
+  expo-upgrade:
+    repo: expo/skills
+    commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+    path: plugins/expo/skills/expo-upgrade
+    license: MIT
+    license_files: [LICENSE]
+    extra:
+      - repo: expo/skills
+        commit: 88d9bd79f3fa8452a778fbac65bae162c0b32ce4
+        path: LICENSE
+        to: LICENSE
+        license: MIT
+    set: expo
+    sha256: 4d1863eabe5bd788be2f4552027a0eb7e980476a36c51b73dd769f6f6f6ed5ab
