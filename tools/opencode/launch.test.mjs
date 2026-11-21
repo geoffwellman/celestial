@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -43,7 +44,7 @@ async function run(options = {}, args = ['--standalone', '--auto'], interrupt = 
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'owned native generation survived launcher exit');
   }
   await rm(dir, { recursive: true, force: true });
-  return { code, rows, output, directory: dir };
+  return { code, rows, output, directory: dir, config };
 }
 
 test('private server admission precedes TUI; transient empty plugin inventory is awaited', async () => {
@@ -124,6 +125,42 @@ test('existing exact native session is read before admission and passed unchange
     sessionID: 'ses_SavedNative', directory: result.directory, agent: 'cel-orchestrator',
     model: { providerID: 'ompgw-codex', id: 'gpt-6.1-sol', variant: 'medium' },
   });
+});
+
+// OpenCode 2.2.5 unloads a location's services 60 minutes after its last
+// session activity and boots them again only for the next request; the
+// celestial plugin, whose observer delivers inbox mail on idle, is one of
+// them. The private server keeps its agent's location for its whole life,
+// fresh or resumed, whatever else its canonical config says.
+for (const [kind, args] of [['fresh', ['--standalone', '--auto', '--prompt', 'kickoff']], ['resumed', ['--standalone', '--auto', '--session', 'ses_SavedNative']]]) {
+  test(`the private server never unloads its location (${kind})`, async () => {
+    const result = await run({}, args);
+    assert.equal(result.code, 0, result.output);
+    const { experimental, ...served } = result.rows.find(row => row.event === 'serve').config;
+    assert.deepEqual(experimental, { location_idle_timeout: false });
+    assert.deepEqual(served, result.config, 'everything else reaches the server exactly as validated');
+  });
+}
+
+// The setting is only as good as the native decoder: 2.2.5 silently drops an
+// invalid value (true, a misspelt key) from a config document. Where the
+// binary is installed, the server's exact value must survive it.
+test('the native config decoder keeps the server location setting', async (t) => {
+  const binary = (process.env.PATH ?? '').split(':').map(dir => path.join(dir, 'opencode')).find(file => path.isAbsolute(file) && existsSync(file));
+  if (!binary) { t.skip('opencode not installed'); return; }
+  const { rows } = await run({}, ['--standalone', '--auto']);
+  const { experimental } = rows.find(row => row.event === 'serve').config;
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-decoder-'));
+  try {
+    const env = { PATH: process.env.PATH, HOME: dir, XDG_CONFIG_HOME: path.join(dir, 'config'), XDG_DATA_HOME: path.join(dir, 'data'),
+      XDG_STATE_HOME: path.join(dir, 'state'), XDG_CACHE_HOME: path.join(dir, 'cache'), OPENCODE_DISABLE_AUTOUPDATE: '1',
+      OPENCODE_DISABLE_MODELS_FETCH: '1', OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental }) };
+    // --standalone: a private server, never the box's background service.
+    const listed = spawnSync(binary, ['debug', 'config', '--standalone'], { cwd: dir, env, encoding: 'utf8', timeout: 30000 });
+    assert.equal(listed.status, 0, listed.stderr);
+    const documents = JSON.parse(listed.stdout).filter(entry => entry.type === 'document');
+    assert.deepEqual(documents.map(entry => entry.info.experimental), [{ location_idle_timeout: false }]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('unfinished migration never attaches or creates a session', async () => {

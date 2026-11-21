@@ -23,6 +23,19 @@ export const PLUGIN_WAIT_MS = 45000;
 const pluginDirectory = fileURLToPath(new URL('./plugin', import.meta.url));
 const exited = child => child.exitCode !== null || child.signalCode !== null;
 
+// THE AGENT'S LOCATION STAYS LOADED FOR THE LIFE OF ITS PRIVATE SERVER.
+// OpenCode 2.2.5 unloads a location's services after 60 minutes without
+// session activity (experimental.location_idle_timeout) and boots them again
+// only for the next request. The celestial plugin is one of them, and its
+// observer is what delivers inbox mail on idle: an agent idle for an hour
+// stopped waking for mail until something else touched its location
+// (a product orchestrator, 22 Nov: unloaded at 01:50, root's 02:28 mail read
+// only by the 02:46 relaunch). This server serves one agent and ends with
+// it, so its copy of the config says never (false). The canonical scoped
+// config is still validated as written; OPENCODE_CONFIG_CONTENT is read after
+// every config source but managed system config, so this value applies.
+const serverConfig = config => ({ ...config, experimental: { ...config.experimental, location_idle_timeout: false } });
+
 // EVERY REFUSAL SAYS WHICH STEP REFUSED. Native and config errors may carry
 // credentials or session content, so their text is never printed; what is
 // printed is a code from this file's own fixed vocabulary - the step and how
@@ -103,11 +116,11 @@ export async function admit(binary, suppliedArgs, env = process.env) {
     // before the compatibility guard has been admitted.
     refuse('unsupported_argument');
   }
-  return { directory, agent, catalog, allowedModels, args, session };
+  return { config, directory, agent, catalog, allowedModels, args, session };
 }
 
 export async function launch(binary, suppliedArgs, env = process.env) {
-  const { directory, agent, catalog, allowedModels, args, session } = await admit(binary, suppliedArgs, env);
+  const { config, directory, agent, catalog, allowedModels, args, session } = await admit(binary, suppliedArgs, env);
   let selection = { ...DEFAULT_SELECTION };
   const privateDirectory = await step('private_directory', async () => {
     const created = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-launch-'));
@@ -116,7 +129,7 @@ export async function launch(binary, suppliedArgs, env = process.env) {
   });
   const admission = path.join(privateDirectory, 'admitted');
   const password = randomBytes(32).toString('base64url');
-  const childEnv = { ...env, OPENCODE_PASSWORD: password, CEL_OPENCODE_ADMISSION_FILE: admission };
+  const childEnv = { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(serverConfig(config)), OPENCODE_PASSWORD: password, CEL_OPENCODE_ADMISSION_FILE: admission };
   delete childEnv.OPENCODE_SERVER_PASSWORD;
   let server, tui, stopping = false;
   const interrupted = () => { stopping = true; tui?.kill('SIGTERM'); server?.stdin?.end(); };

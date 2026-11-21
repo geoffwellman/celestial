@@ -17,7 +17,7 @@ export async function runFixture(args = process.argv.slice(2), env = process.env
   const matchesSelection = actual => actual?.providerID === selection.providerID && actual?.id === selection.id && actual?.variant === selection.variant;
   if (args[0] === 'serve') {
     if (args.join(' ') !== 'serve --stdio --hostname 127.0.0.1 --port 0') process.exit(2);
-    record('serve', { admission: existsSync(env.CEL_OPENCODE_ADMISSION_FILE) });
+    record('serve', { admission: existsSync(env.CEL_OPENCODE_ADMISSION_FILE), config });
     // A native server that dies before it is ready (a store still held by
     // the previous generation, a crash on start).
     if (env.CEL_FIXTURE_SERVE === 'exit') process.exit(5);
