@@ -9,6 +9,13 @@
 #   bin                the executable to look for on PATH
 #   install            trusted GNU/Linux installation command, with exact pins
 #   version            release installed when missing; existing CLIs are retained
+#   npm_package        optional: the npm package an npm-global agent installs.
+#                      Such an agent lives under ONE node: when mise's node
+#                      alias moves, its shim is left with no version behind it
+#                      ("No version is set for shim"). cel setup and cel update
+#                      then reinstall it under the active node at the newer of
+#                      `version` and the release the previous node holds; a
+#                      working bin is retained.
 #   assets             architecture-specific URLs, SHA-256 and optional tar member
 #   skills_dir         where this agent discovers skills/<name>/SKILL.md
 #   agents_dir         optional: where it discovers agent role definitions
@@ -203,6 +210,7 @@ agents:
       latest: 'npm view @earendil-works/pi-coding-agent version'
       rollback: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_OLD_VERSION"'
     version: 1.4.0
+    npm_package: '@earendil-works/pi-coding-agent'
     install: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_INSTALL_VERSION"'
     # pi reads user skills from <agent root>/skills only (never ~/.pi/skills).
     skills_dir: ~/.pi/agent/skills

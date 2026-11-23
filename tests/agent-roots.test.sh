@@ -32,8 +32,31 @@ test_agent_roots_pi_ignores_an_inherited_omp_root() {
   assert_eq "$(gateway_pi_dir)" "$HOME/.pi/agent"
   local got; got="$(bash -c "$(_ar_line pi) printenv PI_CODING_AGENT_DIR")"
   assert_eq "$got" "$HOME/.pi/agent"
-  got="$(bash -c "$(_ar_line omp) printenv PI_CODING_AGENT_DIR")"
-  assert_eq "$got" "$HOME/.omp/agent"
+  # omp's own default root rides in no variable: the leaked value is removed
+  got="$(bash -c "$(_ar_line omp) sh -c 'printf %s \"\${PI_CODING_AGENT_DIR-unset}\"'")"
+  assert_eq "$got" unset
+  _ar_teardown
+}
+
+# OMP'S ROOT STAYS OMP'S. A value in omp's environment is in every child it
+# runs - a bash tool's `pi` or `rea setup --client pi` from core's shell took
+# ~/.omp/agent for pi's root. omp's own default root is therefore not exported
+# (and an inherited one is removed), so a shell under omp sees none and pi
+# resolves its own; a custom omp root, which omp takes only from the
+# variable, is still pinned.
+test_agent_roots_omp_default_root_does_not_reach_its_child_shells() {
+  _ar_setup
+  export PI_CODING_AGENT_DIR="$HOME/.omp/agent"   # core's shell, before the fix
+  local line got
+  line="$(_ar_line omp)"
+  case "$line" in *"PI_CODING_AGENT_DIR=$HOME"*) echo "omp's default root is exported: $line"; _ar_teardown; return 1 ;; esac
+  # the runtime (a stand-in), then the shell its bash tool would start
+  printf '#!/bin/sh\nexec sh -c %s\n' "'printf %s \"\${PI_CODING_AGENT_DIR-unset}\"'" > "$T/omp-standin"
+  chmod +x "$T/omp-standin"
+  got="$(bash -c "$line $T/omp-standin")"
+  assert_eq "$got" unset || { _ar_teardown; return 1; }
+  export CEL_OMP_AGENT_DIR="$T/myomp"
+  assert_eq "$(bash -c "$(_ar_line omp) printenv PI_CODING_AGENT_DIR")" "$T/myomp" || { _ar_teardown; return 1; }
   _ar_teardown
 }
 
@@ -43,7 +66,7 @@ test_agent_roots_custom_pi_root_is_one_resolution_everywhere() {
   export PI_CODING_AGENT_DIR="$HOME/.omp/agent"      # leaked, must lose
   assert_eq "$(gateway_pi_dir)" "$T/mypi"
   assert_eq "$(bash -c "$(_ar_line pi) printenv PI_CODING_AGENT_DIR")" "$T/mypi"
-  assert_eq "$(bash -c "$(_ar_line omp) printenv PI_CODING_AGENT_DIR")" "$HOME/.omp/agent"
+  assert_eq "$(bash -c "$(_ar_line omp) sh -c 'printf %s \"\${PI_CODING_AGENT_DIR-unset}\"'")" unset
   # the gateway model writer targets the same directory the child reads
   cat >"$T/gw" <<'EOS'
 #!/usr/bin/env bash

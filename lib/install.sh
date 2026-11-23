@@ -128,6 +128,75 @@ install_base() {
   done
 }
 
+# NPM GLOBALS LIVE UNDER ONE NODE. What a node that is no longer active
+# still holds - the release the box last ran - read from mise's node
+# installs (each real release directory once; aliases such as `lts` are
+# symlinks and skipped). Nothing is printed when no node holds it.
+_mise_node_installs() { # -> one real node release directory per line
+  local d
+  for d in "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/node/*/; do
+    d="${d%/}"
+    [ -d "$d" ] && [ ! -L "$d" ] && printf '%s\n' "$d"
+  done
+}
+npm_stranded() { # <npm package> -> "<version>\t<node release>" of the newest release any node holds
+  local d v best="" node=""
+  while IFS= read -r d; do
+    v="$(jq -r '.version // empty' "$d/lib/node_modules/$1/package.json" 2>/dev/null)" || continue
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    if [ -z "$best" ] || cel_version_lt "$best" "$v"; then best="$v"; node="${d##*/}"; fi
+  done < <(_mise_node_installs)
+  [ -z "$best" ] || printf '%s\t%s\n' "$best" "$node"
+}
+# Which npm package put <bin> into a node's bin directory, from that link.
+npm_bin_owner() { # <bin> -> "<package>\t<version>\t<node release>" (newest), or nothing
+  local d link pkg v best="" out=""
+  while IFS= read -r d; do
+    link="$(readlink "$d/bin/$1" 2>/dev/null)" || continue
+    [[ "$link" =~ lib/node_modules/((@[^/]+/)?[^/@]+)/ ]] || continue
+    pkg="${BASH_REMATCH[1]}"
+    v="$(jq -r '.version // empty' "$d/lib/node_modules/$pkg/package.json" 2>/dev/null)" || continue
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    if [ -z "$best" ] || cel_version_lt "$best" "$v"; then best="$v"; out="$pkg"$'\t'"$v"$'\t'"${d##*/}"; fi
+  done < <(_mise_node_installs)
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
+# The release a (re)install writes: the pin, or - for an npm agent - the
+# newer release a node that is no longer active still holds, so a node switch
+# puts back what the box ran instead of downgrading it to the pin.
+_install_agent_version() { # <agent>
+  local pin pkg old
+  pin="$(agent_get "$1" version)" || return
+  pkg="$(agent_get "$1" npm_package)" || return
+  if [ -n "$pkg" ] && old="$(npm_stranded "$pkg")" && [ -n "$old" ] && cel_version_lt "$pin" "${old%%$'\t'*}"; then
+    pin="${old%%$'\t'*}"
+  fi
+  printf '%s' "$pin"
+}
+
+# An agent whose bin is a dead mise shim is reinstalled with its own
+# installer under the active node; a working bin is never touched. 0 when the
+# bin is not a dead shim (or no longer is); 1 with the reason and the fix.
+install_agent_revive() { # <agent>
+  local a="$1" bin cmd version why
+  bin="$(agent_get "$a" bin)" || return
+  shim_dead "$bin" || return 0
+  why="$SHIM_ERR"
+  cmd="$(agent_get "$a" install)" || return
+  [ -n "$cmd" ] || { c_err "$a: $bin is a dead mise shim ($why) and $a declares no installer"; return 1; }
+  version="$(_install_agent_version "$a")" || return
+  c_warn "$a: $bin is a dead mise shim ($why) - reinstalling $version under the active node"
+  install_command "$a" "$cmd" "$version" \
+    || { c_err "$a: reinstalling $version failed - fix the cause above, then run: cel setup --agents $a"; return 1; }
+  ! have mise || mise reshim >/dev/null 2>&1 || true
+  if ! have "$bin" || shim_dead "$bin"; then
+    c_err "$a: $bin still does not run after reinstalling ${SHIM_ERR:+($SHIM_ERR) }- run: cel setup --agents $a"
+    return 1
+  fi
+  c_ok "$a reinstalled ($version) under the active node"
+}
+
 install_agents() {
   local want="${1:-}" names a required bin cmd version
   c_hd "Agents"
@@ -140,8 +209,10 @@ install_agents() {
     bin="$(agent_get "$a" bin)" || return
     cmd="$(agent_get "$a" install)" || return
     version="$(agent_get "$a" version)" || return
-    if have "$bin"; then
+    if have "$bin" && ! shim_dead "$bin"; then
       c_ok "$a already installed (retained; setup does not enforce its version)"
+    elif have "$bin"; then
+      install_agent_revive "$a" || return
     else
       install_command "$a" "$cmd" "$version" || return
       have "$bin" || { c_err "$a still missing after installation"; return 1; }

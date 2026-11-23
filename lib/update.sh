@@ -245,6 +245,12 @@ _update_agents() { # returns 1 when any component failed or is still behind
     if ! have "$bin"; then
       printf '  %s not installed - cel setup installs it\n' "$a"; continue
     fi
+    # A dead mise shim (its npm package under a node that is no longer
+    # active) is put back under the active node first: its updater would only
+    # run through the dead shim. Nothing else is installed here.
+    if ! install_agent_revive "$a"; then
+      rc=1; shown=1; continue
+    fi
     shown=1
     old="$(_update_agent_version "$a")" || old="?"
     if _update_held "$a"; then
@@ -488,6 +494,10 @@ _update_components() {
   _update_agents || rc=1
   _update_pi_extensions || rc=1
   _update_pi_mcp || rc=1
+  # npm tools follow the active node, as cel setup installs them
+  # (externals.yaml npm_tools): one missing from its global root is installed
+  # at the verified pin, one at or above it is kept.
+  install_npm_tools || rc=1
   c_hd "Gateway"
   if ! gateway_refresh; then
     c_err "gateway registration refresh FAILED - cel gateway status, then rerun cel update"
