@@ -175,6 +175,7 @@ _rc_smbd() { # <share path, or "" when testparm and smb.conf both fail>
     command find "$@"
   }
   _gc_smb_conf() { printf '%s' "$T/none.conf"; }
+  eval "_gc_testparm_param() { [ \"\$1\" = 'usershare path' ] && printf '%s' '$T/no-usershares'; }"
   if [ -n "$1" ]; then eval "_gc_testparm() { printf '[s]\n\tpath = %s\n' '$1'; }"
   else _gc_testparm() { return 1; }; fi
   _gc_cwd_reset

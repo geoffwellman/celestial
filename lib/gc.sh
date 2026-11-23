@@ -177,10 +177,14 @@ _gc_smb_conf_text() { # <file> [depth]
   done <<< "$text"
 }
 # Every share's path from smb.conf text (testparm -s or the file itself): a
-# share without one takes [global]'s; [homes] without one is this user's home.
-# Fails when one cannot be named - none at all, relative, or a %-macro.
+# share without one takes [global]'s; [homes] without one is this user's
+# passwd home (Samba's pw_dir, not $HOME). A header is `[name]` with anything
+# after the `]` ignored, as Samba does. Fails when one cannot be named - none
+# at all, relative, a %-macro - or when a line is neither a comment, a header
+# nor `key = value`: text it cannot parse may hide a share.
+_gc_pw_home() { local e; e="$(getent passwd "$(id -un)" 2>/dev/null)" || return 1; e="$(printf '%s' "$e" | cut -d: -f6)"; [ -n "$e" ] && printf '%s' "$e"; }
 _gc_smb_share_paths() { # stdin: smb.conf text -> one path per line
-  awk -v home="$HOME" '
+  awk -v home="$(_gc_pw_home)" '
     function flush() {
       if (sec == "" || sec == "global") return
       p = (path != "") ? path : (sec == "homes" ? home : gpath)
@@ -188,30 +192,73 @@ _gc_smb_share_paths() { # stdin: smb.conf text -> one path per line
     }
     { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, "") }
     /^[#;]/ || $0 == "" { next }
-    /^\[.*\]$/ { flush(); sec = tolower(substr($0, 2, length($0) - 2)); gsub(/^[ \t]+|[ \t]+$/, "", sec); path = ""; next }
+    /^\[[^]]*\]/ { flush(); sec = tolower(substr($0, 2, index($0, "]") - 2)); gsub(/^[ \t]+|[ \t]+$/, "", sec); path = ""; next }
     index($0, "=") {
       k = tolower(substr($0, 1, index($0, "=") - 1)); gsub(/[ \t]/, "", k)
       v = substr($0, index($0, "=") + 1); gsub(/^[ \t]+|[ \t]+$/, "", v)
       if (k == "path" || k == "directory") { if (sec == "global") gpath = v; else path = v }
+      next
     }
+    { bad = 1 }
     END { flush(); exit bad }'
 }
+# A [global] parameter: testparm's answer when it runs (defaults included),
+# else the value in <text>, else <default>.
+_gc_testparm_param() { have testparm || return 1; timeout 20 testparm -s --parameter-name="$1" 2>/dev/null; }
+_gc_smb_param() { # <name> <text> <default>
+  local v
+  if v="$(_gc_testparm_param "$1")" && [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  v="$(printf '%s\n' "$2" | awk -v want="$(printf '%s' "$1" | tr -d ' \t' | tr '[:upper:]' '[:lower:]')" '
+    { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, "") }
+    /^\[[^]]*\]/ { s = tolower(substr($0, 2, index($0, "]") - 2)); gsub(/^[ \t]+|[ \t]+$/, "", s); g = (s == "global"); next }
+    g && index($0, "=") { k = tolower(substr($0, 1, index($0, "=") - 1)); gsub(/[ \t]/, "", k)
+      if (k == want) { v = substr($0, index($0, "=") + 1); gsub(/^[ \t]+|[ \t]+$/, "", v); out = v } }
+    END { if (out != "") print out }')"
+  printf '%s' "${v:-$3}"
+}
+# `net usershare` exports live outside smb.conf: one file per share under
+# `usershare path`, a `path=` line in each. With usershares disabled
+# (`usershare max shares` 0, the default) there are none. Enabled, every
+# file must be read and name one absolute path, and the directory must be
+# listable; anything less fails.
+_gc_usershare_paths() { # <smb.conf text> -> one path per line
+  local max dir f p n line
+  max="$(_gc_smb_param 'usershare max shares' "$1" 0)"
+  [[ "$max" =~ ^[0-9]+$ ]] || return 1
+  dir="$(_gc_smb_param 'usershare path' "$1" /var/lib/samba/usershares)"
+  [ -d "$dir" ] || return 0
+  if ! [ -r "$dir" ] || ! [ -x "$dir" ]; then [ "$max" -eq 0 ] && return 0; return 1; fi
+  for f in "$dir"/* "$dir"/.[!.]*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    [ -f "$f" ] && [ -r "$f" ] || return 1
+    n=0 p=""
+    while IFS= read -r line; do
+      case "$line" in path=*) p="${line#path=}"; n=$((n + 1)) ;; esac
+    done < "$f" || true
+    [ "$n" -eq 1 ] || return 1
+    case "$p" in /*) ;; *) return 1 ;; esac
+    case "$p" in *%*) return 1 ;; esac
+    printf '%s\n' "$p"
+  done
+}
 # The exported directories, symlinks resolved, into _GC_SMB_SHARES (one per
-# line); fails when they cannot be determined. Read once per run.
+# line); fails when they cannot be determined. Read once per run - except by
+# the live check right before a removal, which reads them afresh.
 _GC_SMB_STATE="" _GC_SMB_SHARES=""
 _gc_samba_shares() {
   case "$_GC_SMB_STATE" in ok) return 0;; unknown) return 1;; esac
-  local text raw p r out=""
+  local text raw us p r out=""
   _GC_SMB_STATE=unknown
   if text="$(_gc_testparm)" && [ -n "$text" ]; then :
   else text="$(_gc_smb_conf_text "$(_gc_smb_conf)")" || return 1; fi
   raw="$(printf '%s\n' "$text" | _gc_smb_share_paths)" || return 1
+  us="$(_gc_usershare_paths "$text")" || return 1
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     r="$(readlink -f -- "$p" 2>/dev/null)" && [ -n "$r" ] || r="$p"
     [ "$r" = / ] || r="${r%/}"
     out="$out$r"$'\n'
-  done <<< "$raw"
+  done <<< "$raw"$'\n'"$us"
   _GC_SMB_SHARES="$out" _GC_SMB_STATE=ok
 }
 # THE ONE RULE both passes apply to a live own-uid pid whose cwd or files
@@ -270,7 +317,7 @@ _gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
 
 # The live check, run only right before a removal: a fresh /proc walk.
 _gc_has_process_live() { # <worktree-dir> -> 0 present/unknown, 1 absent
-  local _GC_CWDS="" _GC_CWDS_STATE="" _GC_CWD_SHARES=""
+  local _GC_CWDS="" _GC_CWDS_STATE="" _GC_CWD_SHARES="" _GC_SMB_STATE="" _GC_SMB_SHARES=""
   _gc_has_process "$1"
 }
 
@@ -1482,7 +1529,9 @@ _gc_rc_state() { printf '%s' "${CEL_GC_REVIEW_CHECKOUT_STATE:-${XDG_STATE_HOME:-
 # out as "smbd:<pid><TAB><share>" lines: one may be above <prefix>.
 _gc_open_paths() { # <prefix> -> "<proc link><TAB><target>" lines, or fail
   local pids pid err out line pat="$1" rc args=() s occ=""
+  # Called right before a removal too: the shares are read afresh.
   local -A seen=()
+  local _GC_SMB_STATE="" _GC_SMB_SHARES=""
   if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
     rc=$?; [ "$rc" -eq 1 ] && return 0
     return 1

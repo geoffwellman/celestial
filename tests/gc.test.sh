@@ -1530,7 +1530,58 @@ _gc_smb_fixture() { # <comm> [state] -> T with share at $T/srv/share, smb.conf s
   _gc_argv0_of() { return 1; }
   eval "_gc_testparm() { printf '[global]\n\tworkgroup = WG\n\n[s1]\n\tpath = %s\n\tread only = No\n\n[s2]\n\tpath = %s\n' '$T/srv/share' '$T/srv/linked'; }"
   eval "_gc_smb_conf() { printf '%s' '$T/none.conf'; }"
+  # usershares: disabled, in a directory of the fixture's own
+  mkdir -p "$T/us"; GC_US_MAX=0
+  eval "_gc_testparm_param() { case \"\$1\" in 'usershare path') printf '%s' '$T/us';; 'usershare max shares') printf '%s' \"\$GC_US_MAX\";; *) return 1;; esac; }"
+  _gc_pw_home() { printf '%s' /home/pw-owner; }
   _gc_cwd_reset
+}
+# A header may carry text after its `]`; a line that is neither a comment,
+# a header nor key = value makes the list unknown.
+test_gc_smb_share_paths_headers_with_trailing_text() {
+  local out
+  out="$(printf '[global]\n[a]\n path=/srv/a\n[b] ; note\n path=/srv/b\n[c]#x\n path=/srv/c\n' | _gc_smb_share_paths)" \
+    || { echo "valid conf failed"; return 1; }
+  assert_eq "$out" $'/srv/a\n/srv/b\n/srv/c'
+  assert_fails eval "printf '[a]\n path=/srv/a\nstray words\n' | _gc_smb_share_paths >/dev/null"
+}
+# [homes] is the passwd home, as Samba reads it - not $HOME.
+test_gc_smb_homes_is_the_passwd_home() {
+  _gc_pw_home() { printf '%s' /home/pw-owner; }
+  assert_eq "$(printf '[homes]\n browseable = no\n' | HOME=/elsewhere _gc_smb_share_paths)" /home/pw-owner
+}
+# `net usershare` exports are not in smb.conf: each file's path= is a share;
+# a file that cannot be read or parsed, or an unlistable directory while
+# usershares are enabled, keeps everything.
+test_gc_unreadable_smbd_occupies_usershares() {
+  _gc_smb_fixture smbd
+  printf '#VERSION 2\npath=%s\ncomment=\n' "$T/srv/other" > "$T/us/one"
+  _gc_has_process "$T/srv/other" || { echo "usershare not occupied"; return 1; }
+  _gc_has_process "$T/link-target/y" || { echo "smb.conf share lost beside usershares"; return 1; }
+  _gc_cwd_reset; printf 'comment=no path\n' > "$T/us/two"
+  _gc_has_process "$T/elsewhere" || { echo "usershare without a path did not keep everything"; return 1; }
+  rm -f "$T/us/two"
+  if [ "$(id -u)" -ne 0 ]; then
+    _gc_cwd_reset; printf 'path=/x\n' > "$T/us/three"; chmod 000 "$T/us/three"
+    _gc_has_process "$T/elsewhere" || { echo "unreadable usershare did not keep everything"; return 1; }
+    rm -f "$T/us/three"
+    rm -f "$T/us/one"; chmod 000 "$T/us"
+    _gc_cwd_reset
+    _gc_has_process "$T/elsewhere" && { chmod 755 "$T/us"; echo "unlistable dir with usershares disabled vetoed"; return 1; }
+    _gc_cwd_reset; GC_US_MAX=100
+    _gc_has_process "$T/elsewhere" || { chmod 755 "$T/us"; echo "unlistable dir with usershares enabled did not keep everything"; return 1; }
+    chmod 755 "$T/us"
+  fi
+  rm -rf "$T"
+}
+# The live check right before a removal reads the shares afresh: a share
+# added since the run's first read is seen.
+test_gc_live_recheck_rereads_the_shares() {
+  _gc_smb_fixture smbd
+  _gc_has_process "$T/srv/other" && { echo "outside path vetoed"; return 1; }
+  printf 'path=%s\n' "$T/srv/other" > "$T/us/late"
+  _gc_has_process_live "$T/srv/other" || { echo "live recheck used the cached share list"; return 1; }
+  rm -rf "$T"
 }
 test_gc_unreadable_smbd_vetoes_only_exported_paths() {
   local c
