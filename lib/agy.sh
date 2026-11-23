@@ -21,10 +21,14 @@ _CEL_AGY=1
 # shellcheck source=lib/manifest.sh
 . "${BASH_SOURCE[0]%/*}/manifest.sh"
 
-# THE TOOLS A CEL AGENT FILE GRANTS: agy 1.5.14's main-agent toolset, by the
-# names its agent-file registry resolves (one it does not know refuses the
-# launch; none at all leaves six read-only tools). MCP servers come on top.
-AGY_AGENT_TOOLS='read_file, run_command, write_file, edit_file, manage_task, send_message, schedule, invoke_subagent, define_subagent, manage_subagents, search_web, run_workflow, ask_question'
+# THE TOOLS A CEL AGENT FILE GRANTS, by the names agy 1.5.14's agent-file
+# registry resolves (one it does not know refuses the launch; none at all
+# leaves six read-only tools): only those whose every argument the guard
+# judges or that carry nothing it judges (tools/hooks/agy-guard.sh). Left
+# out: schedule (a prompt that runs later), invoke_subagent, define_subagent
+# and manage_subagents (agents the guard does not launch), run_workflow (a
+# Python program). MCP servers come on top and are NOT guarded.
+AGY_AGENT_TOOLS='read_file, run_command, write_file, edit_file, manage_task, send_message, search_web, ask_question'
 
 # This workspace's scoped skills (lib/workspace.sh ws_link_vendored_skills),
 # one directory per line, in glob order - the order _run_workspace_skills
@@ -97,10 +101,20 @@ agy_kickoff() { # <agent-name> -> the first turn of every cel agy launch
 
 agy_hooks_file() { printf '%s/.gemini/config/hooks.json' "$HOME"; }
 
-agy_hooks_entry() { # -> the `celestial` value, script paths resolved here
-  local hook guard
-  printf -v hook 'bash %q' "$CEL_ROOT/tools/hooks/agy-hook.sh"
-  printf -v guard 'bash %q' "$CEL_ROOT/tools/hooks/agy-guard.sh"
+# THE INSTALLED PLANE, never the checkout this code runs from: the entry is
+# box-wide and outlives a worktree or a review checkout. It is the root of the
+# `cel` on PATH (cel shellenv puts the installed one there).
+agy_hooks_root() {
+  local c
+  c="$(type -P cel 2>/dev/null)" && c="$(readlink -f -- "$c")" && [ "${c%/bin/cel}" != "$c" ] \
+    && { printf '%s' "${c%/bin/cel}"; return 0; }
+  printf '%s' "$CEL_ROOT"
+}
+
+agy_hooks_entry() { # [root] -> the `celestial` value, script paths resolved
+  local root="${1:-$(agy_hooks_root)}" hook guard
+  printf -v hook 'bash %q' "$root/tools/hooks/agy-hook.sh"
+  printf -v guard 'bash %q' "$root/tools/hooks/agy-guard.sh"
   jq -cn --arg h "$hook" --arg g "$guard" '{
     SessionStart:  [{type: "command", command: ($h + " session"), timeout: 10}],
     PreInvocation: [{type: "command", command: ($h + " invoke"), timeout: 15}],
@@ -116,20 +130,36 @@ agy_hooks_current() {
 
 # ONE KEY, `celestial`, merged into the user's file: herdr's and Hindsight's
 # entries, and the user's own, stay as they are. A file that is not a JSON
-# object is the user's to fix, and nothing is installed over it.
+# object is the user's to fix, and nothing is installed over it. A symlinked
+# hooks.json (a dotfile manager's) is written through to its target, which
+# keeps its mode; the read-modify-write holds a lock beside it. An installed
+# plane without these hook scripts (older than this one) is refused: the
+# entry would name scripts that are not there, and a missing guard is silent.
 agy_hooks_link() {
-  local f merged tmp
-  f="$(agy_hooks_file)"
-  if agy_hooks_current; then c_ok "agy hooks already carry the celestial entry"; return 0; fi
+  local f target root merged tmp lk rc=0
+  f="$(agy_hooks_file)"; root="$(agy_hooks_root)"
+  [ -f "$root/tools/hooks/agy-guard.sh" ] && [ -f "$root/tools/hooks/agy-hook.sh" ] \
+    || { c_err "agy: the installed plane at $root has no agy hooks - cel update first; the celestial guard and inbox hooks are NOT installed"; return 1; }
   mkdir -p "${f%/*}" || return 1
-  if [ -f "$f" ]; then
-    merged="$(jq --argjson e "$(agy_hooks_entry)" \
-      'if type == "object" then .celestial = $e else error("not an object") end' "$f" 2>/dev/null)" \
-      || { c_err "agy: $f is not a JSON object - fix it and re-run; the celestial guard and inbox hooks are NOT installed"; return 1; }
-  else
-    merged="$(jq -n --argjson e "$(agy_hooks_entry)" '{celestial: $e}')" || return 1
+  target="$(readlink -f -- "$f")" || return 1
+  mkdir -p "${target%/*}" || return 1
+  exec {lk}>>"$target.cel.lock" || return 1
+  flock -w 10 "$lk" || { exec {lk}>&-; c_err "agy: $target is locked by another writer"; return 1; }
+  if agy_hooks_current; then
+    exec {lk}>&-; c_ok "agy hooks already carry the celestial entry"; return 0
   fi
-  tmp="$(mktemp "$f.XXXXXX")" || return 1
-  if ! printf '%s\n' "$merged" > "$tmp" || ! mv -f -- "$tmp" "$f"; then rm -f -- "$tmp"; return 1; fi
+  if [ -f "$target" ]; then
+    merged="$(jq --argjson e "$(agy_hooks_entry "$root")" \
+      'if type == "object" then .celestial = $e else error("not an object") end' "$target" 2>/dev/null)" \
+      || { exec {lk}>&-; c_err "agy: $f is not a JSON object - fix it and re-run; the celestial guard and inbox hooks are NOT installed"; return 1; }
+  else
+    merged="$(jq -n --argjson e "$(agy_hooks_entry "$root")" '{celestial: $e}')" || { exec {lk}>&-; return 1; }
+  fi
+  tmp="$(mktemp "$target.XXXXXX")" || { exec {lk}>&-; return 1; }
+  [ ! -f "$target" ] || chmod --reference="$target" "$tmp" || rc=1
+  if [ "$rc" = 1 ] || ! printf '%s\n' "$merged" > "$tmp" || ! mv -f -- "$tmp" "$target"; then
+    rm -f -- "$tmp"; exec {lk}>&-; return 1
+  fi
+  exec {lk}>&-
   c_ok "agy hooks: celestial entry merged into $f"
 }

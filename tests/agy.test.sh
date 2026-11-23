@@ -94,7 +94,7 @@ test_agy_role_and_workspace_skills_travel_in_a_per_agent_agent_file() {
   assert_eq "$(sed -n 2p "$f")" "name: cel-widget-orch"
   assert_contains "$(cat "$f")" "subagent: false"
   assert_contains "$(cat "$f")" "mainAgent: true"
-  assert_contains "$(cat "$f")" "tools: [read_file, run_command, write_file, edit_file, manage_task, send_message, schedule, invoke_subagent, define_subagent, manage_subagents, search_web, run_workflow, ask_question]"
+  assert_contains "$(cat "$f")" "tools: [read_file, run_command, write_file, edit_file, manage_task, send_message, search_web, ask_question]"
   assert_contains "$(cat "$f")" "  - \"$T/.cel/skills/skills/web-perf\""
   assert_contains "$(cat "$f")" "  - \"$T/.cel/skills/skills/wrangler\""
   assert_eq "$(tail -n 2 "$f")" $'# Solo\nbuild and ship'
@@ -181,22 +181,35 @@ test_agy_resume_takes_the_conversation_id_herdr_or_rex_reported() {
 
 # --- the global hooks.json entry ----------------------------------------------
 
+_agy_installed() { # <root> -> an installed plane at <root>, its cel first on PATH
+  mkdir -p "$1/bin" "$1/tools/hooks"
+  printf '#!/bin/sh\n' > "$1/bin/cel"; chmod +x "$1/bin/cel"
+  : > "$1/tools/hooks/agy-guard.sh"; : > "$1/tools/hooks/agy-hook.sh"
+  export PATH="$1/bin:$PATH"
+}
 test_agy_hooks_link_merges_one_celestial_entry_and_keeps_the_rest() {
   T="$(mktemp -d)"; export HOME="$T/home"
   source "$CEL_ROOT/lib/agy.sh"
+  # the entry names the INSTALLED plane (the cel on PATH), never this checkout
+  local I="$T/celestial-plane"; _agy_installed "$I"
   local f="$HOME/.gemini/config/hooks.json"
-  mkdir -p "${f%/*}"
-  printf '{"herdr":{"SessionStart":[{"type":"command","command":"sh x session"}]},"hindsight":{"Stop":[]}}\n' > "$f"
+  mkdir -p "${f%/*}" "$T/dotfiles"
+  # a dotfile manager's symlink, mode 0644: written through, mode kept
+  printf '{"herdr":{"SessionStart":[{"type":"command","command":"sh x session"}]},"hindsight":{"Stop":[]}}\n' > "$T/dotfiles/hooks.json"
+  chmod 0644 "$T/dotfiles/hooks.json"; ln -s "$T/dotfiles/hooks.json" "$f"
   ! agy_hooks_current || { echo "current before linking"; rm -rf "$T"; return 1; }
   agy_hooks_link >/dev/null || { echo "link failed"; rm -rf "$T"; return 1; }
   agy_hooks_current || { echo "not current after linking"; rm -rf "$T"; return 1; }
+  [ -L "$f" ] || { echo "the symlink was replaced"; rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/dotfiles/hooks.json")" 644
   assert_eq "$(jq -r 'keys | join(" ")' "$f")" "celestial herdr hindsight"
   assert_eq "$(jq -r '.herdr.SessionStart[0].command' "$f")" "sh x session"
-  assert_eq "$(jq -r '.celestial.PreToolUse[0].hooks[0].command' "$f")" "bash $(printf '%q' "$CEL_ROOT/tools/hooks/agy-guard.sh")"
+  assert_eq "$(jq -r '.celestial.PreToolUse[0].hooks[0].command' "$f")" "bash $(printf '%q' "$I/tools/hooks/agy-guard.sh")"
   local e
   for e in SessionStart:session PreInvocation:invoke Stop:stop; do
-    assert_eq "$(jq -r --arg e "${e%%:*}" '.celestial[$e][0].command' "$f")" "bash $(printf '%q' "$CEL_ROOT/tools/hooks/agy-hook.sh") ${e#*:}"
+    assert_eq "$(jq -r --arg e "${e%%:*}" '.celestial[$e][0].command' "$f")" "bash $(printf '%q' "$I/tools/hooks/agy-hook.sh") ${e#*:}"
   done
+  case "$(cat "$f")" in *"$CEL_ROOT"/tools*) echo "named the checkout"; rm -rf "$T"; return 1 ;; esac
   local before; before="$(cat "$f")"
   agy_hooks_link >/dev/null
   assert_eq "$(cat "$f")" "$before"
@@ -204,18 +217,42 @@ test_agy_hooks_link_merges_one_celestial_entry_and_keeps_the_rest() {
   printf 'not json' > "$f"
   assert_fails agy_hooks_link
   assert_eq "$(cat "$f")" "not json"
+  # an installed plane without the agy hooks installs nothing
+  rm -f "$f"; rm "$I/tools/hooks/agy-guard.sh"
+  assert_fails agy_hooks_link
+  [ ! -e "$f" ] || { echo "named scripts that are not installed"; rm -rf "$T"; return 1; }
   rm -rf "$T"
+}
+
+# Exactly what a cel agent file grants: every argument of each is judged by
+# the guard or carries nothing it judges. schedule, subagents and workflows
+# are left out.
+test_agy_agent_file_grants_only_tools_the_guard_can_judge() {
+  source "$CEL_ROOT/lib/agy.sh"
+  assert_eq "$AGY_AGENT_TOOLS" "read_file, run_command, write_file, edit_file, manage_task, send_message, search_web, ask_question"
 }
 
 # --- the guard: PreToolUse, under --dangerously-skip-permissions too ----------
 
-_agy_guard() { # <cwd> <tool> <args-json> -> the hook's JSON answer
+_agy_guard() { # <cwd> <tool> <args-json> -> the hook's stdout
   jq -cn --arg cwd "$1" --arg t "$2" --argjson a "$3" --arg c "$AGY_CONV" \
     '{hookEventName:"PreToolUse",cwd:$cwd,workspacePaths:[$cwd],conversationId:$c,toolCall:{name:$t,args:$a}}' \
     | bash "$AGY_GUARD_HOOK"
 }
 _agy_gws() { T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"; mkdir -p "$T/repos/widget/src" "$T/.cel"; }
-_agy_decision() { jq -r .decision <<<"$1"; }
+# A pass is SILENCE: measured with agy 1.5.14, no output leaves agy's own
+# permission policy in charge (as with no hook), {"decision":"allow"} also
+# defers, {"decision":"auto_approve"} overrides it, and {} blocks the call.
+_agy_decision() { if [ -n "$1" ]; then jq -r .decision <<<"$1"; else printf pass; fi; }
+
+test_agy_guard_passes_in_silence_and_never_approves() {
+  _agy_gws
+  assert_eq "$(_agy_guard /tmp run_command '{"CommandLine":"ls"}')" ""
+  assert_eq "$(CEL_ROLE=solo _agy_guard "$T/repos/widget" run_command '{"CommandLine":"git status"}')" ""
+  local out; out="$(_agy_guard "$T/repos/widget" run_command '{"CommandLine":"git commit -m x"}')"
+  assert_eq "$(jq -c 'keys' <<<"$out")" '["decision","reason"]'
+  rm -rf "$T"
+}
 
 test_agy_guard_refuses_what_the_shared_classifier_refuses() {
   _agy_gws
@@ -228,12 +265,12 @@ test_agy_guard_refuses_what_the_shared_classifier_refuses() {
   out="$(_agy_guard "$T/repos/widget" edit_file "{\"Path\":\"$T/repos/widget/src/a.ts\",\"Target\":\"a\",\"Replacement\":\"b\"}")"
   assert_eq "$(_agy_decision "$out")" deny || { rm -rf "$T"; return 1; }
   out="$(_agy_guard "$T/repos/widget" write_file "{\"Path\":\"$T/.cel/spec.md\",\"Content\":\"x\"}")"
-  assert_eq "$(_agy_decision "$out")" allow || { rm -rf "$T"; return 1; }
+  assert_eq "$(_agy_decision "$out")" pass || { rm -rf "$T"; return 1; }
   out="$(_agy_guard "$T/repos/widget" read_file "{\"Path\":\"$T/repos/widget/src/a.ts\"}")"
-  assert_eq "$(_agy_decision "$out")" allow || { rm -rf "$T"; return 1; }
+  assert_eq "$(_agy_decision "$out")" pass || { rm -rf "$T"; return 1; }
   # a solo agent builds: it commits and pushes, but never merges by hand
   out="$(CEL_ROLE=solo _agy_guard "$T/repos/widget" run_command '{"CommandLine":"git commit -m x"}')"
-  assert_eq "$(_agy_decision "$out")" allow || { rm -rf "$T"; return 1; }
+  assert_eq "$(_agy_decision "$out")" pass || { rm -rf "$T"; return 1; }
   out="$(CEL_ROLE=solo _agy_guard "$T/repos/widget" run_command '{"CommandLine":"gh pr merge 3 --squash"}')"
   assert_eq "$(_agy_decision "$out")" deny || { rm -rf "$T"; return 1; }
   assert_contains "$(jq -r .reason <<<"$out")" "cel solo land"
@@ -241,38 +278,56 @@ test_agy_guard_refuses_what_the_shared_classifier_refuses() {
   out="$(CEL_ROLE=solo _agy_guard "$T/repos/widget" manage_task '{"Action":"send_input","TaskId":"t-1","Input":"gh pr merge 3"}')"
   assert_eq "$(_agy_decision "$out")" deny || { rm -rf "$T"; return 1; }
   out="$(CEL_ROLE=solo _agy_guard "$T/repos/widget" manage_task '{"Action":"status","TaskId":"t-1"}')"
-  assert_eq "$(_agy_decision "$out")" allow || { rm -rf "$T"; return 1; }
-  # a Python workflow script is code the classifier cannot read: refused
-  out="$(CEL_ROLE=solo _agy_guard "$T/repos/widget" run_workflow '{"Script":"import subprocess"}')"
-  assert_eq "$(_agy_decision "$out")" deny || { rm -rf "$T"; return 1; }
-  # the waiter every agy launch arms is allowed in every role
+  assert_eq "$(_agy_decision "$out")" pass || { rm -rf "$T"; return 1; }
+  # code, later prompts and new agents the guard cannot follow: refused
+  local t
+  for t in run_workflow schedule invoke_subagent define_subagent swarm some_new_tool; do
+    out="$(CEL_ROLE=solo _agy_guard "$T/repos/widget" "$t" '{"Prompt":"x"}')"
+    assert_eq "$(_agy_decision "$out")" deny || { echo "$t passed"; rm -rf "$T"; return 1; }
+  done
+  # the waiter every agy launch arms passes in every role
   local r
   for r in solo orchestrator root reviewer; do
     out="$(CEL_ROLE=$r _agy_guard "$T/repos/widget" run_command '{"CommandLine":"cel inbox wait"}')"
-    assert_eq "$(_agy_decision "$out")" allow || { echo "$r cannot arm its waiter"; rm -rf "$T"; return 1; }
+    assert_eq "$(_agy_decision "$out")" pass || { echo "$r cannot arm its waiter"; rm -rf "$T"; return 1; }
   done
   rm -rf "$T"
 }
 test_agy_guard_lets_panes_outside_the_plane_through_and_honours_the_opt_out() {
-  assert_eq "$(_agy_decision "$(_agy_guard /tmp run_command '{"CommandLine":"git push origin main"}')")" allow
+  assert_eq "$(_agy_decision "$(_agy_guard /tmp run_command '{"CommandLine":"git push origin main"}')")" pass
   _agy_gws
-  assert_eq "$(_agy_decision "$(CEL_GUARD=0 _agy_guard "$T/repos/widget" run_command '{"CommandLine":"git commit -m x"}')")" allow
+  assert_eq "$(_agy_decision "$(CEL_GUARD=0 _agy_guard "$T/repos/widget" run_command '{"CommandLine":"git commit -m x"}')")" pass
   rm -rf "$T"
 }
-# Its own failure: open for everyone but a member, closed on a deadline.
-test_agy_guard_fails_open_except_for_a_member_and_a_timeout() {
-  local R; R="$(mktemp -d)"
-  assert_eq "$(printf 'not json' | bash "$CEL_ROOT/tools/hooks/agy-guard.sh" | jq -r .decision)" allow
-  assert_eq "$(_agy_decision "$(CEL_ROOT="$R" _agy_guard /tmp run_command '{"CommandLine":"ls"}')")" allow
-  assert_eq "$(_agy_decision "$(CEL_ROOT="$R" CEL_ROLE=member _agy_guard /tmp run_command '{"CommandLine":"ls"}')")" deny
-  assert_eq "$(_agy_decision "$(CEL_ROOT="$R" CEL_ROLE=solo _agy_guard /tmp run_command '{"CommandLine":"gh pr review 3 --approve"}')")" deny
-  mkdir -p "$R/tools/hooks" "$R/lib"
-  cp "$CEL_ROOT/lib/"*.sh "$R/lib/"
-  printf 'exec sleep 30\n' > "$R/tools/hooks/guard-classify.sh"
-  local out
-  out="$(CEL_ROOT="$R" CEL_GUARD_TIMEOUT=1 CEL_ROLE=solo _agy_guard /tmp run_command '{"CommandLine":"ls"}')"
+# What the guard cannot judge: refused to any agent cel launched; silent in a
+# session cel did not launch, unless it looks like a forge verdict.
+test_agy_guard_fails_closed_for_cel_agents() {
+  local R who; R="$(mktemp -d)"
+  for who in CEL_ROLE=solo CEL_ROLE=member CEL_INBOX_ME=widget-orch; do
+    assert_eq "$(printf 'not json' | env "$who" bash "$AGY_GUARD_HOOK" | jq -r .decision)" deny || { echo "$who: garbage"; return 1; }
+    assert_eq "$(printf '{"cwd":"/tmp"}' | env "$who" bash "$AGY_GUARD_HOOK" | jq -r .decision)" deny || { echo "$who: no toolCall"; return 1; }
+    assert_eq "$(_agy_decision "$(export "$who"; CEL_ROOT="$R" _agy_guard /tmp run_command '{"CommandLine":"ls"}')")" deny \
+      || { echo "$who: no lib/guard.sh"; return 1; }
+    assert_eq "$(_agy_decision "$(export "$who"; _agy_guard /tmp write_file '{"TargetPath":"/tmp/x","Content":"x"}')")" deny \
+      || { echo "$who: a write with its path under an unknown name"; return 1; }
+    assert_eq "$(_agy_decision "$(export "$who"; _agy_guard /tmp read_file '{"Path":""}')")" deny \
+      || { echo "$who: a read with an empty path"; return 1; }
+  done
+  # no jq on PATH
+  mkdir -p "$R/nojq"; ln -s "$(command -v bash)" "$R/nojq/bash"; ln -s "$(command -v cat)" "$R/nojq/cat"
+  assert_contains "$(printf '{}' | CEL_ROLE=solo PATH="$R/nojq" bash "$AGY_GUARD_HOOK")" '"decision":"deny"'
+  # a classifier that fails, or misses its deadline
+  mkdir -p "$R/root/tools/hooks" "$R/root/lib"; cp "$CEL_ROOT/lib/"*.sh "$R/root/lib/"
+  printf 'exit 7\n' > "$R/root/tools/hooks/guard-classify.sh"
+  assert_eq "$(_agy_decision "$(CEL_ROOT="$R/root" CEL_ROLE=solo _agy_guard /tmp run_command '{"CommandLine":"ls"}')")" deny || { rm -rf "$R"; return 1; }
+  printf 'exec sleep 30\n' > "$R/root/tools/hooks/guard-classify.sh"
+  local out; out="$(CEL_ROOT="$R/root" CEL_GUARD_TIMEOUT=1 CEL_ROLE=solo _agy_guard /tmp run_command '{"CommandLine":"ls"}')"
   assert_eq "$(_agy_decision "$out")" deny || { rm -rf "$R"; return 1; }
   assert_contains "$(jq -r .reason <<<"$out")" "did not finish"
+  # a session cel did not launch: silent, except for a forge verdict
+  assert_eq "$(printf 'not json' | bash "$AGY_GUARD_HOOK")" ""
+  assert_eq "$(CEL_ROOT="$R" _agy_guard /tmp run_command '{"CommandLine":"ls"}')" ""
+  assert_eq "$(_agy_decision "$(CEL_ROOT="$R" _agy_guard /tmp run_command '{"CommandLine":"gh pr review 3 --approve"}')")" deny
   rm -rf "$R"
 }
 
@@ -438,4 +493,30 @@ test_inbox_wait_goes_when_its_parent_goes() {
   kill "$parent"; wait "$parent" 2>/dev/null || true
   _aw_gone "$w" || { echo "the waiter outlived its parent"; kill "$w"; _aw_down; return 1; }
   _aw_down
+}
+
+# A waiter that stops without mail says so and exits non-zero (never a wake
+# with mail), and one no agent runtime owns is bounded, freeing its lock.
+test_inbox_wait_orphan_is_bounded_and_stops_without_claiming_mail() {
+  _aw_setup
+  local o rc=0; o="$(mktemp)"
+  ( CEL_INBOX_WAIT_MAX=2 CEL_WATCH_PARENT_POLL=1 _inbox_wait --for widget-lane-a --workspace demo > "$o" 2>&1 ) || rc=$?
+  assert_eq "$rc" 3 || { cat "$o"; _aw_down; return 1; }
+  assert_contains "$(cat "$o")" "stopped without mail"
+  _agy_sub _inbox_wait --check --for widget-lane-a --workspace demo && { echo "still armed"; _aw_down; return 1; }
+  rm -f "$o"; _aw_down
+}
+
+# agy's gateway route is not wired: such a profile is refused, not rerouted.
+test_a_gateway_profile_on_agy_is_refused() {
+  _agy_ws
+  printf 'worker_profiles:\n  gw: { runtime: agy, model: claude-opus-5-5, via: gateway }\n' >> "$T/workspace.yaml"
+  # a box whose gateway is installed, answering and holding an account
+  gateway_installed() { return 0; }; gateway_ready() { return 0; }
+  gateway_usable_count() { printf 1; }; gateway_pi_provider_for_model() { printf ompgw-claude; }
+  local out rc=0
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --profile gw --dry-run 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "launched"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "agy has no gateway route"
+  rm -rf "$T"
 }

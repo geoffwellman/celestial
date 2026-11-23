@@ -653,14 +653,20 @@ say so, and the retired `review.post: github` no longer posts anything
 --comment`, `gh pr comment`) stay where they were allowed.
 The human's one-off `CEL_GUARD_ALLOW_ONCE=1 <command>` (spelled exactly)
 is decided in one place, `guard_override_honoured` in lib/guard.sh, which
-every adapter - claude, omp/pi and OpenCode - asks: it never covers a forge
-verdict, a `gh alias` write or a team member. An adapter whose classifier
-cannot run fails open for everyone but a member, except for a shell command
-that looks like a verdict (the same `VERDICT_SHAPED` text in each adapter),
-which it refuses.
+every adapter - claude, omp/pi, OpenCode and agy - asks: it never covers a
+forge verdict, a `gh alias` write or a team member. An adapter whose
+classifier cannot run fails open for everyone but a member, except for a
+shell command that looks like a verdict (the same `VERDICT_SHAPED` text in
+each adapter), which it refuses. agy's adapter (`tools/hooks/agy-guard.sh`,
+a PreToolUse entry in the global `~/.gemini/config/hooks.json`) is stricter:
+for any agent cel launched it refuses whatever it cannot judge (no
+classifier, no jq, a tool call it cannot parse, a file tool without its path,
+a tool it does not know), and it never approves - a pass prints nothing,
+which leaves agy's own permission policy in charge. agy's MCP tools are not
+guarded.
 
 The guard reads a command line as bash does (`_guard_lines` in
-lib/guard.sh), whichever adapter hands it in - all three pass the tool
+lib/guard.sh), whichever adapter hands it in - all of them pass the tool
 call's text as it is, newlines included, to `guard-classify.sh`. A newline
 ends a command, like `;`, `&&`, `||`, `|` and `&`, so a command on a later
 line is held to every rule the first line is. What bash runs nothing from is

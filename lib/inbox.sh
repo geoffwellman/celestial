@@ -482,7 +482,9 @@ cel inbox - messages between agents that never type into a pane
       wake for an idle conversation is one of its own background tasks
       finishing (agy): the agent starts it as one. One per reader: a second
       says it is already armed and exits; --check exits 0 while one runs.
-      It goes with --parent, by default the agent runtime it was started by.
+      It goes with --parent, by default the agent runtime it was started by,
+      and ends after CEL_INBOX_WAIT_MAX seconds (default 86400) regardless.
+      Stopping without mail says so and exits 3, never 0.
   cel inbox open [--for <who>] [--workspace w|--all-workspaces] [--json] [--ranked]
       UNRESOLVED decisions and blockers for that recipient - regardless of the
       read cursor. Reading a decision does not resolve it; only `resolve` does.
@@ -1021,7 +1023,12 @@ _inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
     exec {lkfd}>&-; return 0
   fi
   [ -n "$parent" ] || parent="$(_inbox_runtime_ancestor)" || parent=""
-  local f n tfd tpid line rc waited=0 me="${BASHPID:-$$}" tick="${CEL_WATCH_PARENT_POLL:-5}" poll="${CEL_INBOX_WAIT_POLL:-30}" follow=()
+  local f n tfd tpid line rc why="" waited=0 me="${BASHPID:-$$}" tick="${CEL_WATCH_PARENT_POLL:-5}" poll="${CEL_INBOX_WAIT_POLL:-30}" follow=()
+  # A WAITER IS BOUNDED. One with no agent runtime above it would never be
+  # ended, and while it holds the lock every --check says armed; so every
+  # waiter ends after CEL_INBOX_WAIT_MAX seconds (its agent's Stop hook
+  # starts another; an orphan's lock is freed).
+  local deadline=$(( $(date +%s) + ${CEL_INBOX_WAIT_MAX:-86400} ))
   f="$(_inbox_file "$ws")"; mkdir -p "$(dirname "$f")"; touch "$f"
   # The tail follows THIS waiter (killed, it takes its tail with it); the
   # parent is checked between reads. It never inherits the lock.
@@ -1039,8 +1046,15 @@ _inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
     while :; do
       rc=0; read -r -t "$tick" line <&"$tfd" || rc=$?
       [ "$rc" -eq 0 ] && break
-      if [ "$rc" -le 128 ] || { [ -n "$parent" ] && ! kill -0 "$parent" 2>/dev/null; }; then
-        kill "$tpid" 2>/dev/null; exec {tfd}<&- {lkfd}>&-; trap - INT TERM EXIT; return 0
+      if [ "$rc" -le 128 ]; then why="its mailbox tail ended"
+      elif [ -n "$parent" ] && ! kill -0 "$parent" 2>/dev/null; then why="the agent that started it ($parent) is gone"
+      elif [ "$(date +%s)" -ge "$deadline" ]; then why="it reached its ${CEL_INBOX_WAIT_MAX:-86400}s limit"
+      fi
+      if [ -n "$why" ]; then
+        kill "$tpid" 2>/dev/null; exec {tfd}<&- {lkfd}>&-; trap - INT TERM EXIT
+        # NOT A WAKE WITH MAIL: no mail is claimed, and the exit status says so
+        printf 'cel inbox wait: stopped without mail for %s in %s - %s. Start cel inbox wait again if you are still running.\n' "$who" "$ws" "$why"
+        return 3
       fi
       waited=$((waited + tick))
       [ "$waited" -lt "$poll" ] || { waited=0; break; }
