@@ -9,6 +9,8 @@ _CEL_INSTALL=1
 . "${BASH_SOURCE[0]%/*}/externals.sh"
 # shellcheck source=lib/version.sh
 . "${BASH_SOURCE[0]%/*}/version.sh"
+# shellcheck source=lib/gateway.sh
+. "${BASH_SOURCE[0]%/*}/gateway.sh"   # gateway_omp_dir, gateway_pi_dir
 
 # Verify a complete download before anything can execute it. A failing curl must
 # not be hidden by a successful shell on the other side of a pipeline.
@@ -320,13 +322,43 @@ _npm_tool_fetch() ( # package version integrity destination
   [ "${got%% *}" = "$want" ] || { echo "integrity mismatch: $package@$version" >&2; exit 1; }
 )
 
-# REA reads PI_CODING_AGENT_DIR for omp's root AND pi's, and OPENCODE_CONFIG
-# for OpenCode's file - a caller inside a cel launch carries a workspace
-# overlay there. So each runs with exactly the root cel launches that agent
-# with (agents.yaml skills_dir's parent), and no inherited overlay or profile.
+# The package's own engines range for node, read from the verified tarball,
+# against the node npm would install it under: only `^X.Y.Z`, `>=X.Y.Z` and
+# `X.Y.Z` clauses joined by `||` are understood, and a range with none of
+# them is refused rather than guessed at.
+_npm_engine_ok() { # node-version range
+  local v="${1#v}" range="$2" clause min known=0
+  local IFS='|'
+  for clause in $range; do
+    clause="${clause// /}"
+    [ -n "$clause" ] || continue
+    case "$clause" in
+      '^'*) min="${clause#^}" ;;
+      '>='*) min="${clause#>=}" ;;
+      *) min="$clause" ;;
+    esac
+    [[ "$min" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    known=1
+    case "$clause" in
+      '^'*) [ "${v%%.*}" = "${min%%.*}" ] && ! cel_version_lt "$v" "$min" && return 0 ;;
+      '>='*) ! cel_version_lt "$v" "$min" && return 0 ;;
+      *) [ "$v" = "$min" ] && return 0 ;;
+    esac
+  done
+  [ "$known" = 1 ] || return 2
+  return 1
+}
+
+# REA reads PI_CODING_AGENT_DIR for omp's root AND pi's, OPENCODE_CONFIG,
+# OPENCODE_CONFIG_DIR and CLAUDE_CONFIG_DIR for those clients' files - and a
+# caller inside a cel launch carries a workspace overlay or private dir in
+# them. So each call gets exactly the root cel launches that agent with
+# (gateway_omp_dir / gateway_pi_dir, which honour CEL_OMP_AGENT_DIR and
+# CEL_PI_AGENT_DIR) and none of the inherited overlays or profiles.
 _npm_tool_run() { # agent-root command...
   local root="$1"; shift
-  env -u OPENCODE_CONFIG -u OMP_PROFILE -u PI_PROFILE -u PI_CONFIG_DIR PI_CODING_AGENT_DIR="$root" "$@" </dev/null
+  env -u OPENCODE_CONFIG -u OPENCODE_CONFIG_CONTENT -u OPENCODE_CONFIG_DIR -u CLAUDE_CONFIG_DIR \
+    -u OMP_PROFILE -u PI_PROFILE -u PI_CONFIG_DIR PI_CODING_AGENT_DIR="$root" "$@" </dev/null
 }
 
 _npm_tool_align() { # name bin profile agent-root client...
@@ -344,11 +376,6 @@ _npm_tool_align() { # name bin profile agent-root client...
   c_ok "$name: registered $* ($profile)"
 }
 
-_npm_tool_root() { # agent default-root
-  local d; d="$(agent_skills_dir "$1")"
-  if [ -n "$d" ]; then printf '%s' "${d%/skills}"; else printf '%s' "$2"; fi
-}
-
 install_npm_tools() {
   local rows name package version integrity bin profile clients prefix have_v tmp c pi
   rows="$(_npm_tools_rows)" || { c_err "invalid npm_tools in externals.yaml - nothing installed"; return 1; }
@@ -362,11 +389,24 @@ install_npm_tools() {
       c_ok "$name: $package $have_v installed (pin $version; kept)"
     else
       tmp="$(mktemp -d)" || return
-      if ! _npm_tool_fetch "$package" "$version" "$integrity" "$tmp/$package.tgz"; then
+      # one flat name: a scoped package's own name would need a directory
+      if ! _npm_tool_fetch "$package" "$version" "$integrity" "$tmp/package.tgz"; then
         rm -rf "$tmp"; c_err "$name: $package@$version not installed (download or integrity check failed)"; return 1
       fi
+      # Its own engines range, from the verified bytes, before npm runs: an
+      # older node is retained by install_base, and npm would only fail late.
+      local engines node_v
+      engines="$(tar -xzOf "$tmp/package.tgz" package/package.json 2>/dev/null | jq -r '.engines.node // empty' 2>/dev/null)" || engines=""
+      if [ -n "$engines" ]; then
+        node_v="$(node --version 2>/dev/null)" || node_v=""
+        if [ -z "$node_v" ] || ! _npm_engine_ok "$node_v" "$engines"; then
+          rm -rf "$tmp"
+          c_err "$name: $package@$version needs node $engines, but this node is ${node_v:-missing} - select a supported node (mise use -g node@lts, which agents.yaml base_tools records), then rerun cel setup"
+          return 1
+        fi
+      fi
       # npm runs the package's install scripts (REA's frida binding needs one).
-      npm install -g --no-fund --no-audit "$tmp/${package##*/}.tgz" || { rm -rf "$tmp"; c_err "$name: npm install failed"; return 1; }
+      npm install -g --no-fund --no-audit "$tmp/package.tgz" || { rm -rf "$tmp"; c_err "$name: npm install failed"; return 1; }
       rm -rf "$tmp"
       ! have mise || mise reshim >/dev/null 2>&1 || true
       c_ok "$name: $package $version installed"
@@ -376,10 +416,10 @@ install_npm_tools() {
     pi=0
     for c in $clients; do if [ "$c" = pi ]; then pi=1; else main+=("$c"); fi; done
     if [ "${#main[@]}" -gt 0 ]; then
-      _npm_tool_align "$name" "$prefix/bin/$bin" "$profile" "$(_npm_tool_root omp "$HOME/.omp/agent")" "${main[@]}" || return
+      _npm_tool_align "$name" "$prefix/bin/$bin" "$profile" "$(gateway_omp_dir)" "${main[@]}" || return
     fi
     if [ "$pi" = 1 ]; then
-      _npm_tool_align "$name" "$prefix/bin/$bin" "$profile" "$(_npm_tool_root pi "$HOME/.pi/agent")" pi || return
+      _npm_tool_align "$name" "$prefix/bin/$bin" "$profile" "$(gateway_pi_dir)" pi || return
     fi
   done <<< "$rows"
 }

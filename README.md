@@ -2446,7 +2446,9 @@ workspace overlays cannot. The first is
 MCP server. `cel setup` downloads the exact registry tarball and checks its
 sha512 integrity before npm installs it, and keeps any release at or above the
 pin. It then runs `rea doctor` and runs `rea setup` only for agent roots that
-doctor does not report as healthy. omp and pi are registered as separate roots.
+doctor does not report as healthy. omp and pi are registered as separate roots,
+the ones cel launches them with (`CEL_OMP_AGENT_DIR`, `CEL_PI_AGENT_DIR`). A node
+outside the package's own `engines` range is refused before npm runs.
 REA's `reverse-engineer-anything` skill comes from `rea setup` and is not
 vendored. REA's tools can run commands, debuggers and browsers, and write files.
 No runtime's celestial guard inspects MCP tool calls.

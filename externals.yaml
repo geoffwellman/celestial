@@ -18,7 +18,8 @@ herdr_plugins:
 # registry tarball must match `integrity` (npm dist.integrity, sha512) before
 # npm installs it; the package's own npm-shrinkwrap.json pins its
 # dependencies. A release at or above `version` is kept. `register` runs the
-# tool's own `doctor` (for omp's and pi's agent roots separately) and its
+# tool's own `doctor` (for omp's and pi's agent roots separately, as cel
+# launches them: CEL_OMP_AGENT_DIR / CEL_PI_AGENT_DIR) and its
 # `setup` only when doctor is not healthy; doctor does not check the catalog
 # profile, so a box already registered with another profile keeps it.
 # The tool's skill is its own (rea setup writes reverse-engineer-anything into

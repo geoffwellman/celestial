@@ -3,17 +3,27 @@
 # `npm_tools`; today REA). `cel setup` installs the exact registry tarball
 # only after its sha512 integrity matches, keeps a release at or above the
 # pin, and runs the tool's own registration only when its doctor says the
-# box is not aligned - omp and pi as two agent roots, never through an
-# inherited OpenCode overlay. npm, curl and the tool are stubs: nothing is
+# box is not aligned - omp and pi as two agent roots (the ones cel launches
+# them with), never through an inherited OpenCode/claude config dir or
+# overlay - and refuses a node outside the package's own engines range
+# before npm runs. npm, node, curl and the tool are stubs: nothing is
 # downloaded, installed or registered for real.
 
 _nt_setup() {
   T="$(mktemp -d)"; LOG="$T/log"; : > "$LOG"
-  export HOME="$T/home" NT_T="$T"
-  mkdir -p "$HOME" "$T/bin" "$T/prefix/bin" "$T/prefix/lib/node_modules" "$T/cel"
+  export HOME="$T/home" NT_T="$T" NT_PKG=rea-agents
+  mkdir -p "$HOME" "$T/bin" "$T/prefix/bin" "$T/prefix/lib/node_modules" "$T/cel" "$T/pkg/package"
   export CEL_MANIFEST="$CEL_ROOT/agents.yaml" CEL_MANIFEST_CACHE="$T/cache"
-  printf 'fixture tarball bytes\n' > "$T/tarball"
+  unset CEL_OMP_AGENT_DIR CEL_PI_AGENT_DIR
+  # a real tarball carrying REA's engines range
+  printf '{"name":"rea-agents","version":"6.10.1","engines":{"node":"^22.23.4 || ^24.22.1 || >=26.12.1"}}\n' > "$T/pkg/package/package.json"
+  tar -czf "$T/tarball" -C "$T/pkg" package
   NT_INTEGRITY="$(python3 -c 'import base64,hashlib,sys; print("sha512-"+base64.b64encode(hashlib.sha512(open(sys.argv[1],"rb").read()).digest()).decode())' "$T/tarball")"
+  printf 'v24.22.3\n' > "$T/node.ver"
+  cat > "$T/bin/node" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = --version ] && cat "$NT_T/node.ver"
+SH
   cat > "$T/bin/curl" <<'SH'
 #!/usr/bin/env bash
 out=""; url=""
@@ -28,16 +38,22 @@ case "$*" in
   'root -g') printf '%s\n' "$NT_T/prefix/lib/node_modules" ;;
   'install -g '*)
     printf 'npm %s\n' "$*" >> "$NT_T/log"
-    mkdir -p "$NT_T/prefix/lib/node_modules/rea-agents"
-    printf '{"name":"rea-agents","version":"6.10.1"}\n' > "$NT_T/prefix/lib/node_modules/rea-agents/package.json"
+    [ -f "${*: -1}" ] || { echo "no such tarball: ${*: -1}" >&2; exit 1; }
+    mkdir -p "$NT_T/prefix/lib/node_modules/$NT_PKG"
+    printf '{"name":"%s","version":"6.10.1"}\n' "$NT_PKG" > "$NT_T/prefix/lib/node_modules/$NT_PKG/package.json"
     ;;
   *) exit 2 ;;
 esac
 SH
-  # the tool: its doctor says aligned when $NT_T/healthy exists
+  # the tool: its doctor says aligned when $NT_T/healthy exists; it logs the
+  # root it was given and every inherited config variable REA would obey
   cat > "$T/prefix/bin/rea" <<'SH'
 #!/usr/bin/env bash
-printf 'rea root=%s opencode=%s %s\n' "${PI_CODING_AGENT_DIR-unset}" "${OPENCODE_CONFIG-unset}" "$*" >> "$NT_T/log"
+inherited=""
+for v in OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR CLAUDE_CONFIG_DIR OMP_PROFILE PI_PROFILE PI_CONFIG_DIR; do
+  [ -z "${!v+x}" ] || inherited+="$v "
+done
+printf 'rea root=%s inherited=[%s] %s\n' "${PI_CODING_AGENT_DIR-unset}" "$inherited" "$*" >> "$NT_T/log"
 if [ "$1" = doctor ]; then
   if [ -e "$NT_T/healthy" ]; then echo '{"healthy":true}'; else echo '{"healthy":false}'; exit 1; fi
 fi
@@ -53,11 +69,11 @@ SH
   _nt_manifest MIT
 }
 
-_nt_manifest() { # <licence>
+_nt_manifest() { # <licence> [package]
   cat > "$CEL_ROOT/externals.yaml" <<YAML
 npm_tools:
   rea:
-    package: rea-agents
+    package: "${2:-rea-agents}"
     version: 6.10.1
     integrity: $NT_INTEGRITY
     license: $1
@@ -76,21 +92,66 @@ _nt_installed() { # <version>
 
 test_npm_tool_installs_the_verified_tarball_then_registers_each_agent_root() {
   _nt_setup
-  # a caller inside an OpenCode or omp launch carries these; REA would write
-  # into the workspace overlay or the wrong agent root
-  export OPENCODE_CONFIG="$T/ws/.cel/skills/opencode.json" PI_CODING_AGENT_DIR="$T/elsewhere" OMP_PROFILE=other
+  # a caller inside an OpenCode, claude or omp launch carries these; REA
+  # would write into the workspace overlay, a private dir or the wrong root
+  export OPENCODE_CONFIG="$T/ws/.cel/skills/opencode.json" OPENCODE_CONFIG_CONTENT='{"mcp":{}}' \
+    OPENCODE_CONFIG_DIR="$T/oc" CLAUDE_CONFIG_DIR="$T/claude" PI_CODING_AGENT_DIR="$T/elsewhere" \
+    OMP_PROFILE=other PI_PROFILE=other PI_CONFIG_DIR=.other
   install_npm_tools >/dev/null 2>&1 || { cat "$LOG"; echo "install_npm_tools failed"; return 1; }
   local want
   want="curl https://registry.npmjs.org/rea-agents/-/rea-agents-6.10.1.tgz"
   assert_eq "$(sed -n 1p "$LOG")" "$want" || return 1
   assert_contains "$(sed -n 2p "$LOG")" "npm install -g " || return 1
-  assert_contains "$(sed -n 2p "$LOG")" ".tgz" || return 1
+  assert_contains "$(sed -n 2p "$LOG")" "/package.tgz" || return 1
   local main="--client claude_code --client codex --client opencode --client antigravity --client omp"
-  assert_eq "$(sed -n 3p "$LOG")" "rea root=$HOME/.omp/agent opencode=unset doctor $main --skill --format json" || return 1
-  assert_eq "$(sed -n 4p "$LOG")" "rea root=$HOME/.omp/agent opencode=unset setup --yes $main --tool-catalog-profile hot-cold" || return 1
-  assert_eq "$(sed -n 5p "$LOG")" "rea root=$HOME/.pi/agent opencode=unset doctor --client pi --skill --format json" || return 1
-  assert_eq "$(sed -n 6p "$LOG")" "rea root=$HOME/.pi/agent opencode=unset setup --yes --client pi --tool-catalog-profile hot-cold" || return 1
+  assert_eq "$(sed -n 3p "$LOG")" "rea root=$HOME/.omp/agent inherited=[] doctor $main --skill --format json" || return 1
+  assert_eq "$(sed -n 4p "$LOG")" "rea root=$HOME/.omp/agent inherited=[] setup --yes $main --tool-catalog-profile hot-cold" || return 1
+  assert_eq "$(sed -n 5p "$LOG")" "rea root=$HOME/.pi/agent inherited=[] doctor --client pi --skill --format json" || return 1
+  assert_eq "$(sed -n 6p "$LOG")" "rea root=$HOME/.pi/agent inherited=[] setup --yes --client pi --tool-catalog-profile hot-cold" || return 1
   assert_eq "$(wc -l < "$LOG")" 6 || return 1
+  rm -rf "$T"
+}
+
+# A box whose agents cel launches from custom roots (CEL_OMP_AGENT_DIR,
+# CEL_PI_AGENT_DIR) is registered and checked in those roots.
+test_npm_tool_registers_the_custom_agent_roots_cel_launches_with() {
+  _nt_setup
+  export CEL_OMP_AGENT_DIR="$T/roots/omp" CEL_PI_AGENT_DIR="$T/roots/pi"
+  install_npm_tools >/dev/null 2>&1 || { cat "$LOG"; return 1; }
+  assert_eq "$(grep -c "^rea root=$T/roots/omp inherited=\[\] " "$LOG")" 2 || return 1
+  assert_eq "$(grep -c "^rea root=$T/roots/pi inherited=\[\] .*--client pi " "$LOG")" 2 || return 1
+  if grep -q "root=$HOME/" "$LOG"; then echo "a default root was used"; return 1; fi
+  rm -rf "$T"
+}
+
+test_npm_tool_scoped_package_downloads_and_installs_one_flat_tarball() {
+  _nt_setup
+  export NT_PKG=@fixture/tool
+  _nt_manifest MIT @fixture/tool
+  install_npm_tools >/dev/null 2>&1 || { cat "$LOG"; return 1; }
+  assert_eq "$(sed -n 1p "$LOG")" "curl https://registry.npmjs.org/@fixture/tool/-/tool-6.10.1.tgz" || return 1
+  assert_contains "$(sed -n 2p "$LOG")" "/package.tgz" || return 1
+  rm -rf "$T"
+}
+
+# An installed node below the package's engines range is retained by setup;
+# npm is never reached with it, and the refusal names the node and the fix.
+test_npm_tool_refuses_a_node_outside_its_engines_range_before_npm() {
+  _nt_setup
+  printf 'v24.21.0\n' > "$T/node.ver"
+  local out
+  if out="$(install_npm_tools 2>&1)"; then echo "installed under node 24.21.0"; return 1; fi
+  assert_contains "$out" "v24.21.0" || return 1
+  assert_contains "$out" "^24.22.1" || return 1
+  assert_contains "$out" "mise use -g node@lts" || return 1
+  if grep -q '^npm \|^rea ' "$LOG"; then echo "npm or the tool ran"; return 1; fi
+  local v
+  for v in v24.22.1 v22.23.4 v26.12.1 v27.0.0; do
+    _npm_engine_ok "$v" "^22.23.4 || ^24.22.1 || >=26.12.1" || { echo "$v refused"; return 1; }
+  done
+  for v in v24.21.0 v22.20.0 v25.9.0 v26.12.0; do
+    if _npm_engine_ok "$v" "^22.23.4 || ^24.22.1 || >=26.12.1"; then echo "$v accepted"; return 1; fi
+  done
   rm -rf "$T"
 }
 
