@@ -41,6 +41,11 @@ _rc_fixture() { # [forge: github|forgejo]
   unset GC_CLOSED_RAW GC_GH_NUMBER GC_GH_URL GC_GH_SIDE
   RC_ROSTER='{"result":{"agents":[]}}'
   cel_agent_list() { printf '%s' "$RC_ROSTER"; }
+  # /proc is real, but only THIS test's processes are asked about: each test
+  # runs in its own session (tests/run.sh: setsid), and the box's own
+  # processes - an smbd or sshd-session whose cwd this uid cannot read -
+  # would otherwise keep every checkout and fail the test on that box only.
+  pgrep() { command pgrep -s 0 "$@"; }
   gh() {
     printf '%s\n' "$*" >> "$GC_GH"
     [ -z "${GC_GH_SIDE:-}" ] || eval "$GC_GH_SIDE"
