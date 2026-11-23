@@ -20,15 +20,19 @@
 #                      it opts into (workspace.yaml `skill_sets:`),
 #                      linked under <workspace>/.cel/skills by cel ws sync
 #                      (lib/workspace.sh ws_link_vendored_skills). None of the
-#                      five finds them by directory: claude, omp, pi and codex
-#                      stop at the repository's git root, and a reviewer's
-#                      checkout is outside the workspace. Strategies:
+#                      six finds them by directory: claude, omp, pi, codex
+#                      and agy stop at the repository's git root, and a
+#                      reviewer's checkout is outside the workspace.
+#                      Strategies:
 #                        flag          `<flag> <dir>/<path>` ahead of the args
 #                        env           `<env>=<dir>/<path>` in the launch env
 #                        codex_config  `-c skills.config=[...]` enabling them;
 #                                      lib/link.sh keeps them linked into
 #                                      skills_dir and disabled in config.toml
-#                      A workspace with none declared gets nothing added.
+#                        agent_file    listed by path in the launch's own
+#                                      agent file (role_injection agent_file)
+#                      A workspace with none declared gets nothing added; one
+#                      whose skills a launch cannot scope refuses the launch.
 #   signal             optional: how `cel gc` asks an idle agent of this
 #                      runtime to stop. `term` (the default) sends SIGTERM;
 #                      `int` sends SIGINT first and only then TERM, for a
@@ -306,6 +310,69 @@ agents:
     notes: >
       anomalyco/opencode. Native release binary, not a Node global package.
 
+  agy:
+    bin: agy
+    # Google Antigravity CLI. Its own updater (`agy update`, and the auto
+    # update it runs at start unless AGY_CLI_DISABLE_AUTO_UPDATE=true, which
+    # every cel launch sets) would move the binary off this pin, so `cel
+    # update` reinstalls the pinned release in place, as for OpenCode.
+    update:
+      command: 'source "$CEL_ROOT/lib/install.sh"; existing="$(type -P agy || true)"; destination="$HOME/.local/bin"; [ -z "$existing" ] || destination="${existing%/*}"; install_pinned_binary agents agy agy "$destination"'
+      latest: "curl -fsSL -m 20 https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json | jq -er .version"
+    version: 1.5.14
+    install: 'existing="$(type -P agy || true)"; destination="$HOME/.local/bin"; [ -z "$existing" ] || destination="${existing%/*}"; install_pinned_binary agents agy agy "$destination"'
+    # The artifacts install.sh fetches (never run here): its manifest
+    # https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_<arch>.json
+    # names them with a sha512 (checked on download, 2026-11-23); these are
+    # their sha256. The tarball's one member is the binary, `antigravity`.
+    assets:
+      x64: { url: "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.14-5302690847260672/linux-x64/cli_linux_x64.tar.gz", sha256: d58386322d2073e96b33f7cc32b4e9ae2db6228f58440369725967b2de48c7b5, member: antigravity }
+      arm64: { url: "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.14-5302690847260672/linux-arm/cli_linux_arm64.tar.gz", sha256: e5f69a3123fac66974b303d9a201f381a0fb32b3ef869d9139da85d5caf67a2a, member: antigravity }
+    # CLI-only global skills: agy also reads ~/.gemini/config/skills and
+    # ~/.gemini/skills, which the Antigravity app shares or other CLIs read.
+    skills_dir: ~/.gemini/antigravity-cli/skills
+    # Named in the launch's agent file (`skills:`, absolute paths); --add-dir
+    # would make the skills dir a workspace folder, and agy runs commands in
+    # the alphabetically first one.
+    workspace_skills: { strategy: agent_file }
+    # Herdr 0.9 ships agy screen detection (kind `agy`) and a SessionStart
+    # hook that reports the conversation id for the pane.
+    herdr_integration: antigravity-cli
+    # The Hindsight MCP server (~/.gemini/config/mcp_config.json, written by
+    # the Hindsight installer) runs as agy's direct child.
+    owned_children:
+      - { argv0: node, argv_suffix: /.hindsight/coding-agents/dist/mcp-server.js }
+    required: false
+    # No system-prompt flag. The role is a custom agent selected with
+    # `--agent cel-<agent name>`: its body IS the system prompt (it replaces
+    # agy's own identity text, not its tools), so it survives compaction and
+    # resume. Written per agent name by lib/agy.sh, never into a repository.
+    role_injection: { strategy: agent_file, dir: ~/.gemini/config/agents }
+    # The approval bypass, as claude's. Hooks still run under it: the guard
+    # (tools/hooks/agy-guard.sh, PreToolUse in ~/.gemini/config/hooks.json)
+    # refuses at the tool call. Inbox and session hooks live in the same
+    # global file (lib/agy.sh agy_hooks_link): agy loads none from --settings.
+    launch_args: [--dangerously-skip-permissions]
+    # The conversation UUID agy's SessionStart hook reports (Rex: cel
+    # sessions note; Herdr: its antigravity-cli integration).
+    resume: { flag: --conversation, value: id }
+    model_flag: --model
+    # `--effort` is validated per model: low, medium and high are the levels
+    # every adjustable model has; xhigh/max exist on a few and would refuse
+    # the launch elsewhere, so they clamp to high. A model with a fixed
+    # budget (Orchestrator, or a gateway model agy does not know) refuses any
+    # --effort: give such a profile no thinking level.
+    thinking:
+      strategy: flag
+      flag: --effort
+      levels: [low, medium, high]
+    notes: >
+      Google Antigravity CLI (antigravity.google/docs/cli). Signs in with a
+      Google account (token in the OS keyring), or `modelProvider: gemini` in
+      ~/.gemini/antigravity-cli/settings.json plus GEMINI_API_KEY, or an
+      OpenAI/Gemini-shaped gateway via AGY_LLM_GATEWAY_URL/_API_KEY/
+      _WIRE_PROTOCOL. Never install with the piped install.sh.
+
 # Model providers a profile can name, and the credential each one needs.
 #
 # This exists for ONE job: deciding whether a profile's primary model is
@@ -326,6 +393,7 @@ agents:
 # answer to "how do I reach <provider>" and a moved endpoint is one edit.
 # Anthropic speaks its own Messages API; everything else here is
 # OpenAI-compatible chat completions.
+
 providers:
   anthropic:    { key_env: ANTHROPIC_API_KEY,  api: https://api.anthropic.com/v1/messages, console: https://console.anthropic.com/settings/keys }
   openai:       { key_env: OPENAI_API_KEY,     api: https://api.openai.com/v1/chat/completions, console: https://platform.openai.com/api-keys }
