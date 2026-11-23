@@ -1518,6 +1518,97 @@ test_gc_unreadable_state_of_an_existing_pid_is_alive() {
   _gc_alive 999001 && { echo "gone pid reported alive"; return 1; }
   return 0
 }
+# A SAMBA SERVER is an own-uid process (smbd forks one per client, running as
+# the connecting user) whose cwd and fd table are unreadable. It may hold files
+# open anywhere under what it exports, and nowhere else: so it occupies every
+# exported path - a worktree inside, equal to, or containing one is kept - and
+# vetoes nothing else. Unknown exports keep everything, as before.
+_gc_smb_fixture() { # <comm> [state] -> T with share at $T/srv/share, smb.conf stubs
+  T="$(mktemp -d)"; mkdir -p "$T/srv/share/wt" "$T/srv/other" "$T/link-target"
+  ln -s "$T/link-target" "$T/srv/linked"
+  _gc_fake_proc "$1" "${2:-S}"
+  _gc_argv0_of() { return 1; }
+  eval "_gc_testparm() { printf '[global]\n\tworkgroup = WG\n\n[s1]\n\tpath = %s\n\tread only = No\n\n[s2]\n\tpath = %s\n' '$T/srv/share' '$T/srv/linked'; }"
+  eval "_gc_smb_conf() { printf '%s' '$T/none.conf'; }"
+  _gc_cwd_reset
+}
+test_gc_unreadable_smbd_vetoes_only_exported_paths() {
+  local c
+  for c in 'smbd' 'smbd[192.0.2.7'; do
+    _gc_smb_fixture "$c"
+    _gc_has_process "$T/srv/share/wt" || { echo "$c: worktree inside a share removable"; return 1; }
+    _gc_has_process "$T/srv/share" || { echo "$c: worktree equal to a share removable"; return 1; }
+    _gc_has_process "$T/srv" || { echo "$c: worktree containing a share removable"; return 1; }
+    _gc_has_process "$T/link-target/x" || { echo "$c: symlinked share not resolved"; return 1; }
+    _gc_has_process "$T/srv/other" && { echo "$c: worktree outside every share vetoed"; return 1; }
+    _gc_has_process "$T/srv/share-wt" && { echo "$c: sibling with a share's prefix vetoed"; return 1; }
+    rm -rf "$T"
+  done
+  return 0
+}
+test_gc_unreadable_smbd_matched_by_its_cmdline() {
+  _gc_smb_fixture something-else
+  _gc_argv0_of() { printf '%s' 'smbd: client [192.0.2.7]          '; }
+  _gc_has_process "$T/srv/other" && { echo "smbd by cmdline not recognised"; return 1; }
+  _gc_has_process "$T/srv/share/wt" || { echo "smbd by cmdline did not occupy its share"; return 1; }
+  rm -rf "$T"
+}
+test_gc_unreadable_smbd_with_unknown_shares_keeps_everything() {
+  _gc_smb_fixture smbd
+  _gc_testparm() { return 1; }
+  _gc_has_process "$T/srv/other" || { echo "unknown share list did not keep everything"; return 1; }
+  # A path Samba substitutes per connection names no fixed directory.
+  _gc_cwd_reset
+  _gc_testparm() { printf '[s]\n\tpath = /srv/%%U\n'; }
+  _gc_has_process "$T/srv/other" || { echo "macro share path did not keep everything"; return 1; }
+  _gc_cwd_reset
+  _gc_testparm() { printf '[s]\n\tread only = No\n'; }
+  _gc_has_process "$T/srv/other" || { echo "share without a path did not keep everything"; return 1; }
+  rm -rf "$T"
+}
+test_gc_unreadable_smbd_falls_back_to_smb_conf_and_includes() {
+  _gc_smb_fixture smbd
+  _gc_testparm() { return 1; }
+  printf '[global]\n  workgroup = WG\n  include = %s\n' "$T/inc.conf" > "$T/smb.conf"
+  printf '; comment\n[s1]\n  Path = %s\n' "$T/srv/share" > "$T/inc.conf"
+  eval "_gc_smb_conf() { printf '%s' '$T/smb.conf'; }"
+  _gc_has_process "$T/srv/other" && { echo "smb.conf fallback not used"; return 1; }
+  _gc_has_process "$T/srv/share/wt" || { echo "share from an include not occupied"; return 1; }
+  _gc_cwd_reset; rm -f "$T/inc.conf"
+  _gc_has_process "$T/srv/other" || { echo "unreadable include did not keep everything"; return 1; }
+  rm -rf "$T"
+}
+test_gc_unreadable_non_smbd_still_vetoes_with_known_shares() {
+  _gc_smb_fixture herdr-core
+  _gc_has_process "$T/srv/other" || { echo "non-smbd unreadable process no longer vetoes"; return 1; }
+  rm -rf "$T"
+}
+test_gc_zombie_smbd_vetoes_nothing() {
+  _gc_smb_fixture smbd Z
+  _gc_testparm() { return 1; }
+  _gc_has_process "$T/srv/share/wt" && { echo "zombie smbd vetoed"; return 1; }
+  rm -rf "$T"
+}
+# The review-checkout pass reads cwd AND open files with one find: an smbd
+# whose links are refused occupies its shares there too, and only them.
+_gc_smb_find() { # stub find: every link of pid 999001 refused
+  find() { printf "find: '/proc/999001/cwd': Permission denied\nfind: '/proc/999001/fd': Permission denied\n" >&2; return 1; }
+}
+test_gc_open_paths_smbd_occupies_only_its_shares() {
+  _gc_smb_fixture smbd; _gc_smb_find
+  local out
+  out="$(_gc_open_paths "$T/srv/other")" || { echo "smbd failed the read"; return 1; }
+  [ -z "$out" ] || { echo "checkout outside every share occupied: $out"; return 1; }
+  out="$(_gc_open_paths "$T/srv/share/wt")" && [ -n "$out" ] || { echo "checkout inside a share not occupied"; return 1; }
+  out="$(_gc_open_paths "$T/srv")" && [ -n "$out" ] || { echo "dir containing a share not occupied"; return 1; }
+  _gc_testparm() { return 1; }
+  assert_fails _gc_open_paths "$T/srv/other"
+  _gc_smb_fixture herdr-core; _gc_smb_find
+  assert_fails _gc_open_paths "$T/srv/other"
+  _gc_smb_fixture smbd Z; _gc_smb_find; _gc_testparm() { return 1; }
+  out="$(_gc_open_paths "$T/srv/share")" && [ -z "$out" ] || { echo "zombie smbd occupied or failed"; return 1; }
+  rm -rf "$T"
+}
 # The reap wait is bounded: a pid whose state stays unreadable is waited
 # for the grace, then reported still alive (kept), never looped on forever.
 test_gc_reap_wait_on_an_unreadable_pid_is_bounded() {

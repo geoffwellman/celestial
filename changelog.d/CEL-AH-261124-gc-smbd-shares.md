@@ -1,0 +1,2 @@
+### Fixed
+- `cel gc` no longer keeps every worktree and review checkout because an own-uid Samba server (`smbd`, serving a share to the owner) has an unreadable cwd and fd table. Both the worktree live check and the review-checkout pass now treat such an `smbd` as occupying every directory Samba exports (from `testparm -s`, falling back to `smb.conf` and its includes; symlinks resolved): a worktree or checkout inside, equal to, or containing a share is kept, and nothing else is. When the shares cannot be determined, everything is still kept.

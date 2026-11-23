@@ -118,9 +118,10 @@ _gc_panes_settled() { # <pane-list-json>
 # snapshot's word alone: _gc_has_process_live re-walks /proc for that one
 # worktree immediately before any removal, so a process started mid-sweep is
 # still seen.
-_GC_CWDS="" _GC_CWDS_STATE=""
-_gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE=""; }
-# AN UNREADABLE cwd IS A VETO - EXCEPT FOR A FIXED SET OF SYSTEM PROCESSES.
+_GC_CWDS="" _GC_CWDS_STATE="" _GC_CWD_SHARES=""
+_gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE="" _GC_CWD_SHARES="" _GC_SMB_STATE="" _GC_SMB_SHARES=""; }
+# AN UNREADABLE cwd IS A VETO - EXCEPT FOR A FIXED SET OF SYSTEM PROCESSES,
+# AND SAMBA, WHICH OCCUPIES ONLY WHAT IT EXPORTS.
 # Our own uid runs privilege-separated or non-dumpable processes whose cwd the
 # kernel will not show us: the user systemd manager and its (sd-pam),
 # ssh-agent, sshd-session, sftp-server. Left as vetoes, any one of them would
@@ -136,11 +137,110 @@ _gc_unreadable_is_system() { # <comm>
   case "$1" in systemd|'(sd-pam)'|ssh-agent|sshd-session|sftp-server) return 0;; esac
   return 1
 }
+# smbd forks one server per client that runs as the connecting user, so a
+# Samba share served to the owner is an own-uid process with an unreadable cwd
+# and fd table - and it can hold files open anywhere under the shares it
+# exports, a shared checkout included. It is not ignored: it occupies every
+# exported path, so a worktree inside, equal to or containing one is kept, and
+# nothing else is. When the exports cannot be named it vetoes, as before.
+# Its comm is `smbd` or, once it names its client, `smbd[<client ip>`
+# (truncated); its argv `smbd: client [<ip>]`.
+_gc_argv0_of() { local a=""; { IFS= read -r -d '' a < "/proc/$1/cmdline"; } 2>/dev/null; [ -n "$a" ] && printf '%s' "$a"; }
+_gc_is_smbd() { # <pid>
+  case "$(_gc_comm_of "$1")" in smbd|smbd\[*) return 0;; esac
+  case "$(_gc_argv0_of "$1")" in smbd|smbd:*|*/smbd) return 0;; esac
+  return 1
+}
+_gc_testparm() { have testparm || return 1; timeout 20 testparm -s 2>/dev/null; }
+_gc_smb_conf() { printf /etc/samba/smb.conf; }
+# smb.conf with continuation lines joined and every `include` inlined where it
+# stands, as Samba reads it; fails on a file it cannot read, an include it
+# cannot name (relative, or with a per-connection %-macro), or a
+# `config file` that moves the configuration elsewhere.
+_gc_smb_conf_text() { # <file> [depth]
+  local f="$1" n="${2:-0}" text line key val
+  [ "$n" -lt 8 ] && [ -f "$f" ] && [ -r "$f" ] || return 1
+  text="$(cat -- "$f" 2>/dev/null)" || return 1
+  text="${text//$'\\\n'/}"
+  while IFS= read -r line; do
+    key=""
+    if [[ "$line" == *=* ]]; then key="${line%%=*}"; key="${key//[[:space:]]/}"; key="${key,,}"; fi
+    case "$key" in
+      include)
+        val="${line#*=}"; val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+        case "$val" in /*) ;; *) return 1;; esac
+        case "$val" in *%*) return 1;; esac
+        _gc_smb_conf_text "$val" $((n + 1)) || return 1 ;;
+      configfile) return 1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <<< "$text"
+}
+# Every share's path from smb.conf text (testparm -s or the file itself): a
+# share without one takes [global]'s; [homes] without one is this user's home.
+# Fails when one cannot be named - none at all, relative, or a %-macro.
+_gc_smb_share_paths() { # stdin: smb.conf text -> one path per line
+  awk -v home="$HOME" '
+    function flush() {
+      if (sec == "" || sec == "global") return
+      p = (path != "") ? path : (sec == "homes" ? home : gpath)
+      if (p == "" || p !~ /^\// || p ~ /%/) bad = 1; else print p
+    }
+    { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, "") }
+    /^[#;]/ || $0 == "" { next }
+    /^\[.*\]$/ { flush(); sec = tolower(substr($0, 2, length($0) - 2)); gsub(/^[ \t]+|[ \t]+$/, "", sec); path = ""; next }
+    index($0, "=") {
+      k = tolower(substr($0, 1, index($0, "=") - 1)); gsub(/[ \t]/, "", k)
+      v = substr($0, index($0, "=") + 1); gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (k == "path" || k == "directory") { if (sec == "global") gpath = v; else path = v }
+    }
+    END { flush(); exit bad }'
+}
+# The exported directories, symlinks resolved, into _GC_SMB_SHARES (one per
+# line); fails when they cannot be determined. Read once per run.
+_GC_SMB_STATE="" _GC_SMB_SHARES=""
+_gc_samba_shares() {
+  case "$_GC_SMB_STATE" in ok) return 0;; unknown) return 1;; esac
+  local text raw p r out=""
+  _GC_SMB_STATE=unknown
+  if text="$(_gc_testparm)" && [ -n "$text" ]; then :
+  else text="$(_gc_smb_conf_text "$(_gc_smb_conf)")" || return 1; fi
+  raw="$(printf '%s\n' "$text" | _gc_smb_share_paths)" || return 1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    r="$(readlink -f -- "$p" 2>/dev/null)" && [ -n "$r" ] || r="$p"
+    [ "$r" = / ] || r="${r%/}"
+    out="$out$r"$'\n'
+  done <<< "$raw"
+  _GC_SMB_SHARES="$out" _GC_SMB_STATE=ok
+}
+# THE ONE RULE both passes apply to a live own-uid pid whose cwd or files
+# cannot be read: 0 when it can be tolerated, with the paths it may still
+# occupy in _GC_OCCUPIES (none for a system process, the shares for smbd);
+# 1 when it must keep everything.
+_GC_OCCUPIES=""
+_gc_unreadable_occupies() { # <pid>
+  _GC_OCCUPIES=""
+  _gc_unreadable_is_system "$(_gc_comm_of "$1")" && return 0
+  _gc_is_smbd "$1" && _gc_samba_shares || return 1
+  _GC_OCCUPIES="$_GC_SMB_SHARES"
+}
+# 0 when <dir> is one of <paths>, inside one, or contains one.
+_gc_overlaps() { # <dir> <paths, one per line>
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ "$p" = / ] && return 0
+    case "$p" in "$1"|"$1"/*) return 0;; esac
+    case "$1" in "$p"/*) return 0;; esac
+  done <<< "$2"
+  return 1
+}
 _gc_cwd_of() { readlink "/proc/$1/cwd" 2>/dev/null; }
 _gc_pid_exists() { [ -d "/proc/$1" ]; }
 _gc_comm_of() { local c=""; read -r c < "/proc/$1/comm" 2>/dev/null; printf '%s' "$c"; }
-_gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknown
-  local pids pid cwd rc out=""
+_gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines, _GC_CWD_SHARES; state ok|none|unknown
+  local pids pid cwd rc out="" occ=""
   if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
     rc=$?; [ "$rc" -eq 1 ] && { _GC_CWDS_STATE=none; return 0; }
     _GC_CWDS_STATE=unknown; return 0
@@ -149,11 +249,11 @@ _gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknow
     if cwd="$(_gc_cwd_of "$pid")"; then
       out="$out$pid"$'\t'"$cwd"$'\n'
     elif _gc_pid_exists "$pid" && _gc_alive "$pid"; then
-      _gc_unreadable_is_system "$(_gc_comm_of "$pid")" && continue
-      _GC_CWDS_STATE=unknown; return 0
+      _gc_unreadable_occupies "$pid" || { _GC_CWDS_STATE=unknown; return 0; }
+      occ="$occ$_GC_OCCUPIES"
     fi
   done
-  _GC_CWDS="$out" _GC_CWDS_STATE=ok
+  _GC_CWDS="$out" _GC_CWD_SHARES="$occ" _GC_CWDS_STATE=ok
 }
 _gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
   [ -n "$_GC_CWDS_STATE" ] || _gc_cwd_load
@@ -164,12 +264,13 @@ _gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
     cwd="${line#*$'\t'}"
     case "$cwd" in "$1"|"$1"/*) return 0;; esac
   done <<< "$_GC_CWDS"
+  _gc_overlaps "$1" "$_GC_CWD_SHARES" && return 0
   return 1
 }
 
 # The live check, run only right before a removal: a fresh /proc walk.
 _gc_has_process_live() { # <worktree-dir> -> 0 present/unknown, 1 absent
-  local _GC_CWDS="" _GC_CWDS_STATE=""
+  local _GC_CWDS="" _GC_CWDS_STATE="" _GC_CWD_SHARES=""
   _gc_has_process "$1"
 }
 
@@ -1347,8 +1448,9 @@ _gc_idle_stop_last() { printf '%s' "${CEL_GC_IDLE_STOP_LAST:-${XDG_STATE_HOME:-$
 #   - no reviewer of that PR is recorded (reviewers.json), and no pane, and no
 #     process of this user - its cwd or an open file - is in it (only this
 #     user's processes are visible in /proc; one whose cwd or files cannot be
-#     read keeps every checkout, bar a zombie or a system process
-#     _gc_unreadable_is_system names);
+#     read keeps every checkout, bar a zombie, a system process
+#     _gc_unreadable_is_system names, and smbd, which keeps only a checkout
+#     inside, equal to or containing a share it exports: _gc_unreadable_occupies);
 #   - its PR is merged or closed, asked of the repo's own forge as the
 #     reviewer pass asks (GitHub by its declared owner/name, Forgejo through
 #     forge_pr_view), the answer naming exactly that PR, and closed - an
@@ -1375,9 +1477,12 @@ _gc_rc_state() { printf '%s' "${CEL_GC_REVIEW_CHECKOUT_STATE:-${XDG_STATE_HOME:-
 # Every path under <prefix> that a process of this user has as its cwd or holds
 # open, one find over /proc. A pid that has gone is nothing; a zombie has no
 # files; any other process whose cwd or files cannot be read fails the read,
-# unless it is one of the fixed system processes - unknown is never "unused".
+# unless _gc_unreadable_occupies tolerates it - unknown is never "unused". The
+# paths a tolerated one may occupy (smbd's shares) that overlap <prefix> come
+# out as "smbd:<pid><TAB><share>" lines: one may be above <prefix>.
 _gc_open_paths() { # <prefix> -> "<proc link><TAB><target>" lines, or fail
-  local pids pid err out line pat="$1" rc args=()
+  local pids pid err out line pat="$1" rc args=() s occ=""
+  local -A seen=()
   if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
     rc=$?; [ "$rc" -eq 1 ] && return 0
     return 1
@@ -1392,12 +1497,17 @@ _gc_open_paths() { # <prefix> -> "<proc link><TAB><target>" lines, or fail
     [[ "$line" =~ /proc/([0-9]+)/ ]] || { rm -f -- "$err"; return 1; }
     pid="${BASH_REMATCH[1]}"
     case "$line" in *'No such file or directory'*) continue ;; esac
+    [ -z "${seen[$pid]:-}" ] || continue
+    seen[$pid]=1
     _gc_pid_exists "$pid" && _gc_alive "$pid" || continue
-    _gc_unreadable_is_system "$(_gc_comm_of "$pid")" && continue
-    rm -f -- "$err"; return 1
+    _gc_unreadable_occupies "$pid" || { rm -f -- "$err"; return 1; }
+    while IFS= read -r s; do
+      [ -n "$s" ] && _gc_overlaps "$1" "$s" && occ="${occ}smbd:$pid"$'\t'"$s"$'\n'
+    done <<< "$_GC_OCCUPIES"
   done < "$err"
   rm -f -- "$err"
   [ -z "$out" ] || printf '%s\n' "$out"
+  [ -z "$occ" ] || printf '%s' "$occ"
 }
 
 _gc_rc_in() { # <dir> <paths, one per line> -> 0 when one is <dir> or below it
@@ -1597,7 +1707,7 @@ _gc_rc_lock() { # sets rc_lfd, or fails
 _gc_rc_unlock() { [ -z "${rc_lfd:-}" ] || { flock -u "$rc_lfd"; exec {rc_lfd}>&-; rc_lfd=""; }; }
 
 _gc_review_checkouts() { # <dry>; sets rc_removed rc_kib rc_fragment
-  local dry="$1" dir rows roster panes open clones cache='{}' now days cap looked=0 f
+  local dry="$1" dir rows roster panes open shares clones cache='{}' now days cap looked=0 f
   local d ident wsdir repo pr common cstate cached_at cclosed old out state ts head closed kib age res frc rc_lfd=""
   local -A rc_why=()
   local -a rc_own=() items=()
@@ -1614,7 +1724,9 @@ _gc_review_checkouts() { # <dry>; sets rc_removed rc_kib rc_fragment
     && panes="$(printf '%s' "$roster" | jq -r '.result.agents[] | .cwd // "" | strings')" \
     || { _gc_rc_blind "the agent roster is unreadable"; return 0; }
   open="$(_gc_open_paths "$dir")" || { _gc_rc_blind "cannot read every process's cwd and open files"; return 0; }
-  open="$(printf '%s' "$open" | cut -f2-)"
+  # smbd's shares overlap the reviews dir, so one may contain a checkout.
+  shares="$(printf '%s' "$open" | awk -F'\t' '$1 ~ /^smbd:/' | cut -f2-)"
+  open="$(printf '%s' "$open" | awk -F'\t' '$1 !~ /^smbd:/' | cut -f2-)"
   clones="$(_gc_rc_clones)"
   f="$(_gc_rc_state)"
   if [ -s "$f" ]; then cache="$(jq -c 'if type == "object" then . else {} end' "$f" 2>/dev/null)" || cache='{}'; fi
@@ -1629,7 +1741,7 @@ _gc_review_checkouts() { # <dry>; sets rc_removed rc_kib rc_fragment
     if printf '%s' "$rows" | jq -e --arg r "$repo" --arg p "$pr" 'any(.[]; .repo == $r and (.pr | tostring) == $p)' >/dev/null 2>&1; then
       _gc_rc_keep reviewer; continue
     fi
-    if _gc_rc_in "$d" "$panes" || _gc_rc_in "$d" "$open"; then _gc_rc_keep live; continue; fi
+    if _gc_rc_in "$d" "$panes" || _gc_rc_in "$d" "$open" || _gc_overlaps "$d" "$shares"; then _gc_rc_keep live; continue; fi
     cstate=- cached_at=0 cclosed=0
     IFS=$'\x1f' read -r cstate cached_at cclosed < <(printf '%s' "$cache" | jq -r --arg k "$d" \
       '.[$k] // {} | [(.state // "-"), (.at // 0 | tostring), (.closed // 0 | tostring)] | join("\u001f")')
