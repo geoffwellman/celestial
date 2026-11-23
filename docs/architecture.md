@@ -105,7 +105,11 @@ one `env K=V ...` prefix - never an `export` into the pane shell, which outlives
 the agent. Pi and OMP agent roots are resolved once (`gateway_pi_dir`,
 `gateway_omp_dir`; custom roots via `CEL_PI_AGENT_DIR` / `CEL_OMP_AGENT_DIR`),
 shared by the models writers, the child and `cel doctor`, and pinned into the
-child as `PI_CODING_AGENT_DIR`; an inherited value is ignored. They must not
+child; an inherited value is ignored. Pi gets `PI_CODING_AGENT_DIR`. OMP at
+its own default root gets none, and an inherited one is removed (`env -u`
+after the PATH step), because whatever OMP carries reaches every child it runs
+(its bash tool's `pi`, `rea setup`); only a custom OMP root is pinned by value.
+They must not
 overlap (`agent_roots_check`): OMP's startup renames Pi-style session
 directories under its root with no liveness check. This prevents new
 collisions only; it does not repair already-relocated sessions or running

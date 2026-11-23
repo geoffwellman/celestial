@@ -60,7 +60,9 @@ test_update_components_leave_an_lts_mise_config_alone() {
   export CEL_CONFIG_FILE="$T/config.yaml" CEL_UPDATE_DIR="$T/update"
   source "$CEL_ROOT/lib/update.sh"
   local sum; sum="$(cksum < "$HOME/.config/mise/config.toml")"
-  _update_components >/dev/null 2>&1
+  # (its npm tools step fails here - this fixture has no npm - which is not
+  # what is under test)
+  _update_components >/dev/null 2>&1 || true
   assert_eq "$(cat "$LOG")" '' || { echo "cel update ran mise"; return 1; }
   assert_eq "$(cksum < "$HOME/.config/mise/config.toml")" "$sum" || return 1
   rm -rf "$T"

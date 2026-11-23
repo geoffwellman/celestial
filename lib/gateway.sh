@@ -451,8 +451,9 @@ _gateway_start() {
 # --- the pi provider ------------------------------------------------------
 
 # pi's agent dir. An AMBIENT PI_CODING_AGENT_DIR is deliberately not read here:
-# omp exports that same variable for itself, so a pane that ever ran an omp
-# launch carries omp's root, and a pi launched from it would put its sessions
+# omp reads that same variable, and a shell under an omp that carries it (a
+# custom CEL_OMP_AGENT_DIR, or one launched before cel stopped exporting omp's
+# default) holds omp's root - a pi launched from it would put its sessions
 # in omp's tree, where omp's startup renames them from under the live process.
 # A custom pi-only root is an explicit choice, spelled CEL_PI_AGENT_DIR (the
 # twin of CEL_OMP_AGENT_DIR). Every consumer - the models writer, the child's

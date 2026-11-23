@@ -205,3 +205,22 @@ test_rea_is_recorded_as_a_pinned_npm_tool() {
   source "$CEL_ROOT/lib/install.sh"
   assert_contains "$(declare -f cmd_setup)" install_npm_tools || return 1
 }
+
+# CEL UPDATE PUTS IT BACK UNDER THE ACTIVE NODE. A node switch (mise's `lts`
+# alias moving) leaves the tool's package under the old node only; the
+# active node's global root lacks it, so update installs the verified pin
+# there, exactly as setup does, and leaves an installed one alone.
+test_update_installs_an_npm_tool_the_active_node_lacks() {
+  local repo="$CEL_ROOT"
+  _nt_setup
+  touch "$T/healthy"
+  export CEL_CONFIG_FILE="$T/config.yaml" CEL_UPDATE_DIR="$T/update"
+  source "$repo/lib/update.sh"
+  gateway_refresh() { :; }
+  _update_components >/dev/null 2>&1 || { cat "$LOG"; echo "update components failed"; return 1; }
+  assert_contains "$(cat "$LOG")" "npm install -g " || return 1
+  : > "$LOG"
+  _update_components >/dev/null 2>&1 || return 1
+  if grep -q '^curl \|^npm ' "$LOG"; then echo "update reinstalled a tool the active node holds"; cat "$LOG"; return 1; fi
+  rm -rf "$T"
+}

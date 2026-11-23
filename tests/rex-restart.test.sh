@@ -173,3 +173,73 @@ test_rex_restart_recovery_line_without_a_recorded_relaunch_is_a_hand_restart() {
   out="$(_REX_RELAUNCH='["run","core","--session-backend","rex"]'; _run_restart_back core core)"
   assert_eq "$out" 'Bring it back with: cel run core --session-backend rex'
 }
+
+# A DEAD RUNTIME SHIM IS REFUSED BEFORE ANYTHING MOVES. The runtime's bin is a
+# mise shim with no version behind it (its npm package under a node that is
+# no longer active): `command -v` finds it, and it dies at exec. A --restart
+# that found out only after stopping the agent closed its terminal and left a
+# dead relaunch behind. It is refused first: the live agent keeps running in
+# its terminal, Rex is asked to close and open nothing, and a new launch
+# opens no session.
+_rr_dead_shim() { # the runtime's bin becomes a dead mise shim
+  mkdir -p "$RT/mise"
+  cat > "$RT/mise/mise" <<'SH'
+#!/bin/bash
+n="${0##*/}"
+if [ "$n" != mise ]; then echo "mise ERROR No version is set for shim: $n" >&2; exit 1; fi
+[ "${1:-}" = which ] && { echo "mise ERROR $2 is a mise bin however it is not currently active." >&2; exit 1; }
+exit 2
+SH
+  chmod +x "$RT/mise/mise"
+  ln -sfn "$RT/mise/mise" "$RT/bin/runtime"
+}
+
+test_rex_restart_with_a_dead_runtime_shim_stops_nothing() {
+  _rr_setup
+  local out rc=0 old calls
+  out="$(cmd_run core --session-backend rex --fresh 2>&1)" || { echo "$out"; _rr_down; return 1; }
+  _rr_idle core || { _rr_down; return 1; }
+  old="$(jq -r .pid "$CEL_REX_STATE/core.json")"
+  calls="$(wc -l < "$FAKE_REX_DIR/calls")"
+  # the launch script has exec'd the runtime (it waits for its receipt first)
+  local i; for ((i = 0; i < 100; i++)); do [ "$(cat "/proc/$old/comm" 2>/dev/null)" = sleep ] && break; sleep 0.1; done
+  [ "$(cat "/proc/$old/comm" 2>/dev/null)" = sleep ] || { echo 'the runtime never started'; _rr_down; return 1; }
+  _rr_dead_shim
+  out="$( (unset CEL_SESSION_BACKEND; cmd_run core --restart --fresh) 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a restart onto a dead shim reported success: $out"; _rr_down; return 1; }
+  assert_contains "$out" "omp cannot start" || { _rr_down; return 1; }
+  assert_contains "$out" "No version is set for shim: runtime" || { _rr_down; return 1; }
+  assert_contains "$out" "Nothing was stopped, claimed or launched" || { _rr_down; return 1; }
+  assert_contains "$out" "cel setup --agents omp" || { _rr_down; return 1; }
+  _rex_live "$CEL_REX_STATE/core.json" || { echo 'the live agent was stopped'; _rr_down; return 1; }
+  assert_eq "$(jq -r .pid "$CEL_REX_STATE/core.json")" "$old" || { _rr_down; return 1; }
+  # Rex was not asked anything: no terminal closed, no session opened
+  assert_eq "$(wc -l < "$FAKE_REX_DIR/calls")" "$calls" || { tail -n +"$((calls + 1))" "$FAKE_REX_DIR/calls"; _rr_down; return 1; }
+  assert_eq "$(_rr_terminals)" 1 || { _rr_down; return 1; }
+  _rr_down
+}
+
+test_rex_launch_with_a_dead_runtime_shim_opens_no_session() {
+  _rr_setup
+  _rr_dead_shim
+  local out rc=0
+  out="$(cd "$RT/ws" && cmd_run solo --product widget --session-backend rex --fresh 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a launch onto a dead shim reported success: $out"; _rr_down; return 1; }
+  assert_contains "$out" "No version is set for shim: runtime" || { _rr_down; return 1; }
+  [ ! -s "$FAKE_REX_DIR/calls" ] || { echo "Rex was called:"; cat "$FAKE_REX_DIR/calls"; _rr_down; return 1; }
+  ! compgen -G "$CEL_REX_STATE/*.json*" >/dev/null || { echo 'launch markers left behind'; ls "$CEL_REX_STATE"; _rr_down; return 1; }
+  _rr_down
+}
+
+# The first claim of a session finds no claim file: that is said nothing
+# about (it read as a missing session-claims directory on every launch).
+test_first_session_claim_prints_nothing() {
+  local t err rc=0
+  t="$(mktemp -d)"
+  err="$( (export CEL_ORCH_SESSIONS="$t/state/orch-sessions.json"; _run_session_claim /x/session.jsonl rex/s/b && _run_session_release /x/session.jsonl "$_RUN_SESSION_CLAIM_TOKEN") 2>&1 >/dev/null)" || rc=$?
+  assert_eq "$rc" 0 || { rm -rf "$t"; return 1; }
+  assert_eq "$err" "" || { rm -rf "$t"; return 1; }
+  err="$( (export CEL_ORCH_SESSIONS="$t/state/orch-sessions.json"; _run_session_release /x/other.jsonl tok) 2>&1 >/dev/null)"
+  assert_eq "$err" "" || { rm -rf "$t"; return 1; }
+  rm -rf "$t"
+}

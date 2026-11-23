@@ -2245,11 +2245,15 @@ own alias as the session affinity key.
 OMP's startup renames every Pi-style `--home-...--` session directory under its
 root, with no check that a Pi process is live; Pi never re-creates a vanished
 directory, so its later session writes fail (this lost the unsaved tail of two
-live agents on 2026-10-17). Every launch therefore *pins*
-`PI_CODING_AGENT_DIR` to the launched runtime's own resolved root - Pi
-`~/.pi/agent`, OMP `~/.omp/agent` - and an inherited `PI_CODING_AGENT_DIR` is
-ignored, never forwarded. Deliberate custom roots are explicit:
-`CEL_PI_AGENT_DIR` (Pi) and `CEL_OMP_AGENT_DIR` (OMP). The same resolution feeds
+live agents on 2026-10-17). Every launch therefore *pins* the launched
+runtime's own resolved root - Pi `~/.pi/agent`, OMP `~/.omp/agent` - and an
+inherited `PI_CODING_AGENT_DIR` is ignored, never forwarded. Pi gets it as
+`PI_CODING_AGENT_DIR`. OMP's own default root is not exported at all (an
+inherited value is removed with `env -u`): anything in OMP's environment is in
+every child it runs, and a `pi` or `rea setup --client pi` from core's shell
+used to take OMP's root for Pi's. Deliberate custom roots are explicit:
+`CEL_PI_AGENT_DIR` (Pi) and `CEL_OMP_AGENT_DIR` (OMP; OMP takes a custom root
+only from the variable, so its children inherit that one). The same resolution feeds
 the models writers, the child's environment and `cel doctor`. If the two roots
 overlap - equal, aliased by symlink, or one inside the other - the launch is
 refused (and `cel doctor` fails) with the roots named; nothing is moved.
@@ -2451,7 +2455,27 @@ the ones cel launches them with (`CEL_OMP_AGENT_DIR`, `CEL_PI_AGENT_DIR`). A nod
 outside the package's own `engines` range is refused before npm runs.
 REA's `reverse-engineer-anything` skill comes from `rea setup` and is not
 vendored. REA's tools can run commands, debuggers and browsers, and write files.
-No runtime's celestial guard inspects MCP tool calls.
+No runtime's celestial guard inspects MCP tool calls. `cel update` runs the
+same step, so a tool missing from the active node's global root (after mise's
+`lts` alias moved to a new node release) is installed there again.
+
+**npm-global agents follow the active node.** Pi is an npm global
+(`npm_package` in [`agents.yaml`](agents.yaml)), installed under the node that
+was active when it was installed. A new node release moving mise's `lts` alias
+leaves its mise shim on PATH with nothing behind it: `command -v pi` succeeds
+and `pi` prints `No version is set for shim: pi`. A dead shim is not a working
+agent, so `cel setup` and `cel update` reinstall it under the active node, at
+the newer of the pin and the release the previous node still holds, before
+`cel update` runs its updater. A working agent is retained whatever its
+release. `cel doctor` names every dead shim: an agent's or a plane npm tool's
+is a failure with `cel setup` as the fix; any other tool's (graphite's `gt`,
+for example) is a warning with the exact `npm install -g <package>@<version>`.
+`cel run` (and `--restart`) refuses a runtime whose bin is a dead shim before
+it stops the agent, claims its session or opens a terminal. Pinning node per
+tool (mise's `npm:` backend, or a fixed node path) was not chosen: it would
+write the mise config that `cel update` leaves alone, bypass the integrity
+check `npm_tools` installs through, and split Pi from `pi update --self`, which
+installs into the active node's global prefix.
 
 The current pi, omp and Claude Code pins are 1.2.0, 18.10.4 and 2.1.300.
 Updating Pi on an already-configured box is explicit because `cel setup` keeps

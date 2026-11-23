@@ -870,6 +870,72 @@ doctor_shared_session_lines() { # -> 1 when any session file has two resumers
   return "$bad"
 }
 
+# AN AGENT ON PATH THAT DOES NOT RUN IS NOT INSTALLED. A dead mise shim - its
+# npm package under a node that is no longer active (mise's `lts` alias moved)
+# - and a bin whose --version fails are named with the command that fixes
+# them, never shown as a version. 1 when the agent does not run.
+doctor_agent_bin_line() { # <agent>
+  local a="$1" bin out pkg old
+  bin="$(agent_get "$a" bin)"
+  if shim_dead "$bin"; then
+    pkg="$(agent_get "$a" npm_package)"
+    old=""; [ -z "$pkg" ] || old="$(npm_stranded "$pkg")"
+    if [ -n "$old" ]; then
+      c_err "$a: $bin is a dead mise shim ($SHIM_ERR) - $pkg ${old%%$'\t'*} is installed under node ${old##*$'\t'} only. Fix: cel setup --agents $a (reinstalls $pkg@$(_install_agent_version "$a") under the active node)"
+    else
+      c_err "$a: $bin is a dead mise shim ($SHIM_ERR). Fix: cel setup --agents $a"
+    fi
+    return 1
+  fi
+  local vcmd; vcmd="$(agent_get "$a" version_cmd)"; [ -n "$vcmd" ] || vcmd="$(printf '%q --version' "$bin")"
+  if ! out="$(bash -c "$vcmd" 2>&1 </dev/null)"; then
+    c_err "$a: $vcmd exits non-zero ($(printf '%s\n' "$out" | head -1 | cut -c1-80)). Fix: cel setup --agents $a"
+    return 1
+  fi
+  c_ok "$a ($(printf '%s\n' "$out" | head -1 | cut -c1-30))"
+}
+
+# EVERY OTHER DEAD MISE SHIM, by the npm package that put it there: an npm
+# tool the plane installs (externals.yaml npm_tools) is a failure fixed by
+# `cel setup`; any other (graphite's gt, say) a warning naming the exact
+# install that puts it back under the active node. Agent bins are the Agents
+# section's. Nothing is installed here.
+doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
+  local dir="${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims" s n plane="" tools="" a fail=0 owner pkg ver node key
+  [ -d "$dir" ] || return 0
+  for a in $(agent_names); do plane="$plane $(agent_get "$a" bin) "; done
+  tools=" $(_npm_tools_rows 2>/dev/null | cut -f5 | tr '\n' ' ') "
+  local -A bins=() err=() fix=()
+  local -a order=()
+  for s in "$dir"/*; do
+    n="${s##*/}"
+    [ -e "$s" ] || [ -L "$s" ] || continue
+    case "$plane" in *" $n "*) continue ;; esac
+    # the shim itself, wherever PATH puts it
+    PATH="$dir:$PATH" shim_dead "$n" || continue
+    owner="$(npm_bin_owner "$n")"
+    if [ -n "$owner" ]; then
+      IFS=$'\t' read -r pkg ver node <<< "$owner"
+      key="$pkg"
+      fix[$key]="$pkg $ver is installed under node $node only. Fix: npm install -g $pkg@$ver"
+    else
+      key="$n"
+      fix[$key]="no installed node holds it. Fix: reinstall the tool that provides it, or mise reshim to drop the shim"
+    fi
+    case "$tools" in *" $n "*) key="plane:$key"; fix[$key]="${fix[${key#plane:}]%%Fix:*}Fix: cel setup (installs it under the active node at its verified pin)" ;; esac
+    [ -n "${bins[$key]:-}" ] || order+=("$key")
+    bins[$key]="${bins[$key]:+${bins[$key]}, }$n"
+    [ -n "${err[$key]:-}" ] || err[$key]="$SHIM_ERR"
+  done
+  for key in ${order[@]+"${order[@]}"}; do
+    case "$key" in
+      plane:*) c_err "${bins[$key]}: dead mise shim (${err[$key]}) - ${fix[$key]}"; fail=1 ;;
+      *) c_warn "${bins[$key]}: dead mise shim (${err[$key]}) - ${fix[$key]}" ;;
+    esac
+  done
+  return "$fail"
+}
+
 cmd_doctor() {
   local fail=0
   c_hd "celestial"
@@ -908,7 +974,7 @@ cmd_doctor() {
   c_hd "Agents"
   for a in $(agent_names); do
     local bin; bin="$(agent_get "$a" bin)"
-    if have "$bin"; then c_ok "$a ($($bin --version 2>/dev/null | head -1 | cut -c1-30))"
+    if have "$bin"; then doctor_agent_bin_line "$a" || fail=1
     elif [ "$(agent_get "$a" required)" = "true" ]; then c_err "$a MISSING (required)"; fail=1
     else c_warn "$a not installed (optional)"; fi
     # Declared but unloaded extensions are a silent capability gap - pi
@@ -919,6 +985,7 @@ cmd_doctor() {
       c_warn "$a extensions not loaded: $(printf '%s' "$missing" | tr '\n' ' ')- run: cel setup --agents $a"
     fi
   done
+  doctor_shim_lines || fail=1
 
   c_hd "Authentication"
   if have gh; then

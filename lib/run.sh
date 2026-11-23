@@ -330,9 +330,18 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   # PI_CODING_AGENT_DIR, so whichever value the pane's shell happens to carry
   # would otherwise decide where a harness keeps its sessions, and omp renames
   # pi's. The resolved root of THIS runtime is the only value either gets.
+  # OMP'S OWN DEFAULT ROOT IS NOT EXPORTED. A value in omp's environment is in
+  # every child it starts - its bash tool, MCP servers, the inbox watcher - so a
+  # `pi` or `rea setup --client pi` run from core's shell took omp's root for
+  # pi's. omp needs none for ~/.omp/agent, its own default: an inherited value
+  # is removed after the PATH step (`env -u`), so neither omp nor its children
+  # carry one. Only a custom CEL_OMP_AGENT_DIR (omp has no flag for it) is
+  # still pinned by value, and its children inherit that root.
+  local omp_unset=""
   case "$runtime" in
     pi)  printf -v out '%s PI_CODING_AGENT_DIR=%q' "$out" "$(gateway_pi_dir)" ;;
-    omp) printf -v out '%s PI_CODING_AGENT_DIR=%q' "$out" "$(gateway_omp_dir)" ;;
+    omp) if [ "$(gateway_omp_dir)" = "$HOME/.omp/agent" ]; then omp_unset=" env -u PI_CODING_AGENT_DIR"
+         else printf -v out '%s PI_CODING_AGENT_DIR=%q' "$out" "$(gateway_omp_dir)"; fi ;;
   esac
   # Gateway credentials and the per-agent session key (_run_profile_gateway_setup
   # fills GATEWAY_ENV in the caller): the same launch-scoped K=V words, so they
@@ -360,7 +369,7 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
     out="$(opencode_launch_guard "$CEL_OPENCODE_CONFIG_FILE")$out $(opencode_launch_env)"
     [ "${session_backend:-herdr}" = rex ] || oc_cmd="$(opencode_launch_command)"
   fi
-  out="$out $(_run_launch_path)"
+  out="$out $(_run_launch_path)$omp_unset"
   case "$role" in
     reviewer)
       # shellcheck disable=SC2086  # $sets is a word list on purpose
@@ -1345,6 +1354,22 @@ _run_live_names() { # -> one live herdr agent name per line
   { cel_agent_list 2>/dev/null || rex_agent_list; } | jq -r '.result.agents[]?.name // empty' 2>/dev/null
   return 0
 }
+# A RUNTIME THAT CANNOT START REFUSES THE LAUNCH BEFORE ANYTHING MOVES. An
+# npm-global runtime (pi) whose package is under a node that is no longer
+# active leaves a mise shim that resolves on PATH and dies at exec with "No
+# version is set for shim". Found only after the fact, a --restart had
+# already closed the agent's terminal, and the relaunch's own terminal died
+# with it. So it is asked first (lib/common.sh shim_dead), from the launch's
+# cwd, and refused with the fix; an absent bin keeps its existing refusals.
+_run_runtime_runnable() { # <runtime> <cwd>
+  local bin dir="$2"
+  bin="$(agent_get "$1" bin)"
+  [ -n "$bin" ] || return 0
+  [ -d "$dir" ] || dir=.
+  shim_dead "$bin" "$dir" || return 0
+  die "cel run: $1 cannot start - $bin is a mise shim with no version behind it ($SHIM_ERR): its package is not installed under the active node. Nothing was stopped, claimed or launched. Fix: cel setup --agents $1 (or cel update), then run this again"
+}
+
 _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh> <force> <pane-opt>
   local profile="$1" model_opt="$2" thinking_opt="$3" dry="$4" restart="$5" fresh="$6" force="$7" pane_opt="$8"
   [ -z "$profile" ] || die "cel core: --profile is meaningless without a workspace (profiles are bound per workspace) - use --model/--thinking"
@@ -1357,6 +1382,7 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
   model="$(_run_core_default model)"; thinking="$(_run_core_default thinking)"; via="$(_run_core_default via)"
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
+  _run_runtime_runnable "$runtime" "$cwd"
 
   # ONE CORE PER BOX. Two would both drain root's mail and answer it twice.
   # The same refusal as an orchestrator's, on a dry run too.
@@ -1979,7 +2005,10 @@ _run_session_claim() { # <session> [pane] -> 0 claimed, 1 claimed by another lau
   f="$(_run_session_claim_file "$1")"
   _run_session_claim_lock "$f" || return 2
   now="$(date +%s)"
-  { read -r held hpane; } < "$f" 2>/dev/null || true
+  # No claim yet is the common case: stderr is redirected BEFORE the file is
+  # opened, or bash reports the absent claim file (which reads as a missing
+  # session-claims directory) on every first launch.
+  { read -r held hpane; } 2>/dev/null < "$f" || true
   case "${held:-}" in ''|*[!0-9]*) held="" ;; esac
   if [ -n "$held" ] && [ $((now - held)) -lt "${CEL_SESSION_CLAIM_SECS:-60}" ] \
      && ! { [ -n "$pane" ] && [ "${hpane:-}" = "$pane" ]; }; then
@@ -2002,7 +2031,7 @@ _run_session_release() { # <session> <token>
   local f htoken=""
   f="$(_run_session_claim_file "$1")"
   _run_session_claim_lock "$f" || return 0
-  { read -r _; read -r htoken; } < "$f" 2>/dev/null || true
+  { read -r _; read -r htoken; } 2>/dev/null < "$f" || true
   [ -z "${2:-}" ] || [ "$htoken" != "$2" ] || rm -f "$f" 2>/dev/null || true
   _run_session_claim_unlock
   return 0
@@ -3121,6 +3150,9 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
     _run_lane_remember_current_model "$cwd" "$(_run_agent_name "$alias_name")" "$runtime" "$model" "$remember_model_pid" "$dry_run"
     return $?
   fi
+  # Before any role file, session claim, stop or terminal: a runtime whose
+  # bin is a dead mise shim is refused here, not after its terminal closed.
+  _run_runtime_runnable "$runtime" "$cwd"
   # Reviewers never let pi infer a provider: aliases resolve from the current
   # gateway catalog, and explicit Claude IDs are routed through that gateway.
   # A Codex-family id (gpt-6.1-sol, ompgw-codex/gpt-6-astra) goes through the
