@@ -191,7 +191,7 @@ test_agy_hooks_link_merges_one_celestial_entry_and_keeps_the_rest() {
   T="$(mktemp -d)"; export HOME="$T/home"
   source "$CEL_ROOT/lib/agy.sh"
   # the entry names the INSTALLED plane (the cel on PATH), never this checkout
-  local I="$T/celestial-plane"; _agy_installed "$I"
+  local I="$T/installed"; _agy_installed "$I"
   local f="$HOME/.gemini/config/hooks.json"
   mkdir -p "${f%/*}" "$T/dotfiles"
   # a dotfile manager's symlink, mode 0644: written through, mode kept

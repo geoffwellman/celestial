@@ -239,7 +239,7 @@ test_link_puts_vendored_skills_in_every_runtime_skills_dir() {
       [ -f "$sd/$n/SKILL.md" ] || { echo "$a: $n has no SKILL.md through the link"; return 1; }
     done
   done
-  assert_eq "$linked" "claude omp pi codex opencode "
+  assert_eq "$linked" "claude omp pi codex opencode agy "
   rm -rf "$SANDBOX"
 }
 
