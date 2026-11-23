@@ -160,6 +160,50 @@ test_rc_keeps_a_checkout_a_pane_stands_in_or_a_reviewer_is_recorded_for() {
   rm -rf "$T"
 }
 
+# An own-uid smbd's cwd and open files are unreadable. It no longer blinds the
+# whole pass: it occupies what Samba exports (a checkout inside, equal to or
+# containing a share is kept live) and nothing else. Unknown exports: blind.
+_rc_smbd() { # <share path, or "" when testparm and smb.conf both fail>
+  pgrep() { printf '%s\n' 999001; }
+  _gc_comm_of() { printf '%s' 'smbd[192.0.2.7'; }
+  _gc_pid_exists() { return 0; }
+  _gc_alive() { return 0; }
+  find() {
+    if [ "${1:-}" = /proc/999001/cwd ]; then
+      printf "find: '/proc/999001/cwd': Permission denied\nfind: '/proc/999001/fd': Permission denied\n" >&2; return 1
+    fi
+    command find "$@"
+  }
+  _gc_smb_conf() { printf '%s' "$T/none.conf"; }
+  eval "_gc_testparm_param() { [ \"\$1\" = 'usershare path' ] && printf '%s' '$T/no-usershares'; }"
+  if [ -n "$1" ]; then eval "_gc_testparm() { printf '[s]\n\tpath = %s\n' '$1'; }"
+  else _gc_testparm() { return 1; }; fi
+  _gc_cwd_reset
+}
+test_rc_unreadable_smbd_keeps_only_checkouts_under_its_shares() {
+  _rc_fixture
+  local co; co="$(_rc_checkout widget-pr-71)"
+  _rc_smbd "$co"
+  _rc_run 0
+  [ -d "$co" ] || { echo "removed a checkout Samba exports"; cat "$T/out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/out")" "1 live" || { cat "$T/out"; rm -rf "$T"; return 1; }
+  _rc_smbd "$co/src"
+  _rc_run 0
+  [ -d "$co" ] || { echo "removed a checkout containing a share"; cat "$T/out"; rm -rf "$T"; return 1; }
+  _rc_smbd "$T"
+  _rc_run 0
+  [ -d "$co" ] || { echo "removed a checkout inside a share"; cat "$T/out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/out")" "1 live" || { cat "$T/out"; rm -rf "$T"; return 1; }
+  _rc_smbd ""
+  _rc_run 0
+  [ -d "$co" ] || { echo "removed with the share list unknown"; cat "$T/out"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/out")" "cannot read every process" || { cat "$T/out"; rm -rf "$T"; return 1; }
+  _rc_smbd "$T/elsewhere"
+  _rc_run 0
+  _rc_gone "$co" || { echo "a share elsewhere still blocked removal"; cat "$T/out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 test_rc_keeps_a_checkout_a_retained_rex_retirement_packet_cites() {
   _rc_fixture
   local co; co="$(_rc_checkout widget-pr-71)"
