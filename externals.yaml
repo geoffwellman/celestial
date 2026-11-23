@@ -12,3 +12,28 @@ herdr_plugins:
   workspace-manager: { source: razajamil/herdr-plugin-workspace-manager, ref: 8302970a088b8dff4aca9a3d9034907d66be80a7 } # 0.8.0
   triage: { source: natori-hrj/herdr-triage, ref: 20e8f562656479b7ca70a6b95fa3f0bf6642de64 } # 0.2.1
   pr-tracker: { source: Matovidlo/herdr-pr-tracker, ref: 6a287cec49de2327ee2b78c5b2cee750ad84b58d } # 0.1.0
+
+# Global npm tools that register themselves with the runtimes, installed by
+# cel setup from THIS file only (workspace overlays cannot add them). The
+# registry tarball must match `integrity` (npm dist.integrity, sha512) before
+# npm installs it; the package's own npm-shrinkwrap.json pins its
+# dependencies. A release at or above `version` is kept. `register` runs the
+# tool's own `doctor` (for omp's and pi's agent roots separately) and its
+# `setup` only when doctor is not healthy; doctor does not check the catalog
+# profile, so a box already registered with another profile keeps it.
+# The tool's skill is its own (rea setup writes reverse-engineer-anything into
+# ~/.agents/skills, ~/.claude/skills and ~/.gemini/config/skills); it is not
+# vendored into core/skills.
+# rea-agents 6.10.1 (MIT, morluto/rea): registry metadata read 2026-11-24;
+# needs node ^24.22.1 (agents.yaml base_tools node: lts).
+npm_tools:
+  rea:
+    package: rea-agents
+    version: 6.10.1
+    integrity: sha512-3AWrfFEXppvC98FWhZR2Tzulnqs5xJQrSKmAub6+QME/I58Pr3h8pHqqwM30z2DvlnIx/8Hsu8woMngfi4SNyg==
+    license: MIT
+    source: morluto/rea
+    bin: rea
+    register:
+      clients: [claude_code, codex, opencode, antigravity, omp, pi]
+      tool_catalog_profile: hot-cold

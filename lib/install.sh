@@ -7,6 +7,8 @@ _CEL_INSTALL=1
 . "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/externals.sh
 . "${BASH_SOURCE[0]%/*}/externals.sh"
+# shellcheck source=lib/version.sh
+. "${BASH_SOURCE[0]%/*}/version.sh"
 
 # Verify a complete download before anything can execute it. A failing curl must
 # not be hidden by a successful shell on the other side of a pipeline.
@@ -280,6 +282,108 @@ install_externals() {
   done <<< "$rows"
 }
 
+# GLOBAL NPM TOOLS (externals.yaml `npm_tools`, the base file only): a tool
+# installed into the global npm of the box's node that registers itself with
+# the runtimes. The registry tarball is downloaded and its sha512 checked
+# against the recorded `integrity` (npm's dist.integrity) before npm sees it;
+# npm installs that local file, and the package's own npm-shrinkwrap.json
+# pins its dependencies. A release at or above the pin is kept, never
+# downgraded. `register` is the tool's own `doctor`/`setup` CLI (REA's): its
+# doctor runs first and setup only when the box is not aligned. The skill
+# the tool installs is its own, never a copy in core/skills.
+_npm_tools_rows() { # -> name package version integrity bin profile clients (tab separated)
+  local f="$CEL_ROOT/externals.yaml"
+  [ -f "$f" ] || return 0
+  yq -r '(.npm_tools // {}) | to_entries[] | .key as $k | .value as $v |
+    if ($k | test("^[a-z0-9][a-z0-9-]*$")) and ($v | type == "object")
+      and ($v.package | type == "string") and ($v.package | test("^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"))
+      and ($v.version | type == "string") and ($v.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+      and ($v.integrity | type == "string") and ($v.integrity | test("^sha512-[A-Za-z0-9+/]{86}==$"))
+      and ($v.bin | type == "string") and ($v.bin | test("^[a-z0-9][a-z0-9-]*$"))
+      and ($v.source | type == "string") and ($v.source | test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+      and ($v.license == "MIT" or $v.license == "Apache-2.0")
+      and ($v.register | type == "object")
+      and ($v.register.tool_catalog_profile | type == "string") and ($v.register.tool_catalog_profile | test("^[a-z][a-z-]*$"))
+      and ($v.register.clients | type == "array") and ($v.register.clients | length > 0)
+      and all($v.register.clients[]; type == "string" and test("^[a-z][a-z_]*$"))
+    then [$k, $v.package, $v.version, $v.integrity, $v.bin, $v.register.tool_catalog_profile, ($v.register.clients | join(" "))] | @tsv
+    else error("invalid npm tool " + $k + ": require package, version x.y.z, sha512 integrity, bin, source owner/repo, license MIT or Apache-2.0 and register clients/tool_catalog_profile") end' "$f"
+}
+
+# The exact registry tarball, checked against its integrity, or nothing.
+_npm_tool_fetch() ( # package version integrity destination
+  set -euo pipefail
+  local package="$1" version="$2" integrity="$3" dest="$4" want got
+  curl -fSL "https://registry.npmjs.org/$package/-/${package##*/}-$version.tgz" -o "$dest"
+  want="$(printf '%s' "${integrity#sha512-}" | base64 -d | od -An -v -tx1 | tr -d ' \n')"
+  got="$(sha512sum < "$dest")"
+  [ "${got%% *}" = "$want" ] || { echo "integrity mismatch: $package@$version" >&2; exit 1; }
+)
+
+# REA reads PI_CODING_AGENT_DIR for omp's root AND pi's, and OPENCODE_CONFIG
+# for OpenCode's file - a caller inside a cel launch carries a workspace
+# overlay there. So each runs with exactly the root cel launches that agent
+# with (agents.yaml skills_dir's parent), and no inherited overlay or profile.
+_npm_tool_run() { # agent-root command...
+  local root="$1"; shift
+  env -u OPENCODE_CONFIG -u OMP_PROFILE -u PI_PROFILE -u PI_CONFIG_DIR PI_CODING_AGENT_DIR="$root" "$@" </dev/null
+}
+
+_npm_tool_align() { # name bin profile agent-root client...
+  local name="$1" bin="$2" profile="$3" root="$4" c out
+  shift 4
+  local -a flags=()
+  for c in "$@"; do flags+=(--client "$c"); done
+  if out="$(_npm_tool_run "$root" "$bin" doctor "${flags[@]}" --skill --format json 2>/dev/null)" \
+      && jq -e '.healthy == true' <<< "$out" >/dev/null 2>&1; then
+    c_ok "$name: $* already aligned"
+    return 0
+  fi
+  _npm_tool_run "$root" "$bin" setup --yes "${flags[@]}" --tool-catalog-profile "$profile" \
+    || { c_err "$name setup for $* failed"; return 1; }
+  c_ok "$name: registered $* ($profile)"
+}
+
+_npm_tool_root() { # agent default-root
+  local d; d="$(agent_skills_dir "$1")"
+  if [ -n "$d" ]; then printf '%s' "${d%/skills}"; else printf '%s' "$2"; fi
+}
+
+install_npm_tools() {
+  local rows name package version integrity bin profile clients prefix have_v tmp c pi
+  rows="$(_npm_tools_rows)" || { c_err "invalid npm_tools in externals.yaml - nothing installed"; return 1; }
+  [ -n "$rows" ] || return 0
+  c_hd "npm tools"
+  have npm || { c_err "npm tools need node's npm on PATH (agents.yaml base_tools node)"; return 1; }
+  while IFS=$'\t' read -r name package version integrity bin profile clients; do
+    prefix="$(npm prefix -g)" || return
+    have_v="$(jq -r '.version // empty' "$(npm root -g)/$package/package.json" 2>/dev/null || true)"
+    if [ -n "$have_v" ] && ! cel_version_lt "$have_v" "$version"; then
+      c_ok "$name: $package $have_v installed (pin $version; kept)"
+    else
+      tmp="$(mktemp -d)" || return
+      if ! _npm_tool_fetch "$package" "$version" "$integrity" "$tmp/$package.tgz"; then
+        rm -rf "$tmp"; c_err "$name: $package@$version not installed (download or integrity check failed)"; return 1
+      fi
+      # npm runs the package's install scripts (REA's frida binding needs one).
+      npm install -g --no-fund --no-audit "$tmp/${package##*/}.tgz" || { rm -rf "$tmp"; c_err "$name: npm install failed"; return 1; }
+      rm -rf "$tmp"
+      ! have mise || mise reshim >/dev/null 2>&1 || true
+      c_ok "$name: $package $version installed"
+    fi
+    [ -x "$prefix/bin/$bin" ] || { c_err "$name: $prefix/bin/$bin missing after install"; return 1; }
+    local -a main=()
+    pi=0
+    for c in $clients; do if [ "$c" = pi ]; then pi=1; else main+=("$c"); fi; done
+    if [ "${#main[@]}" -gt 0 ]; then
+      _npm_tool_align "$name" "$prefix/bin/$bin" "$profile" "$(_npm_tool_root omp "$HOME/.omp/agent")" "${main[@]}" || return
+    fi
+    if [ "$pi" = 1 ]; then
+      _npm_tool_align "$name" "$prefix/bin/$bin" "$profile" "$(_npm_tool_root pi "$HOME/.pi/agent")" pi || return
+    fi
+  done <<< "$rows"
+}
+
 cmd_setup() {
   local agents=""
   while [ $# -gt 0 ]; do
@@ -294,6 +398,8 @@ cmd_setup() {
   link_all || return
   herdr_integrations || return
   install_externals || return
+  # after link_all: REA writes beside the plane's links, never under them
+  install_npm_tools || return
   c_hd "Next"
   echo "    gh auth login && claude setup-token   # human-only steps"
   echo "    eval \"\$(cel shellenv)\"                 # add to your shell rc"
