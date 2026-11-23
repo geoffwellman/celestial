@@ -21,6 +21,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/rex.sh"
 # shellcheck source=lib/opencode.sh
 . "${BASH_SOURCE[0]%/*}/opencode.sh"
+# shellcheck source=lib/agy.sh
+. "${BASH_SOURCE[0]%/*}/agy.sh"
 # shellcheck source=lib/run-evidence.sh
 . "${BASH_SOURCE[0]%/*}/run-evidence.sh"
 # shellcheck source=lib/reviewer-retirement.sh
@@ -111,7 +113,8 @@ _run_keep_model_args() { # <runtime>
 # THE WORKSPACE'S SCOPED SKILLS reach this launch and no other workspace's
 # (agents.yaml workspace_skills; linked by cel ws sync, lib/workspace.sh
 # ws_link_vendored_skills). Ahead of every other arg, so claude's variadic
-# --add-dir ends at the next flag. Nothing when none are linked.
+# --add-dir ends at the next flag. Nothing when none are linked; a launch
+# that cannot scope the ones that are is REFUSED, never started without them.
 _run_workspace_skills() { # <runtime> <wsdir> -> AGENT_ARGS, LAUNCH_ENV_EXTRA
   local rt="$1" d s n names=() strategy path list="" p
   d="$(ws_skills_dir "$2")"
@@ -134,6 +137,11 @@ _run_workspace_skills() { # <runtime> <wsdir> -> AGENT_ARGS, LAUNCH_ENV_EXTRA
         list+="${list:+,}{path=\"$p\",enabled=true}"
       done
       AGENT_ARGS=(-c "skills.config=[$list]" "${AGENT_ARGS[@]}") ;;
+    # The role's agent file already lists them (_run_agent_args); proved here.
+    agent_file)
+      [ "${AGENT_FILE_SKILLS-}" = "${names[*]}" ] \
+        || die "cel run: $rt's agent file does not carry this workspace's skills (${names[*]}) - nothing was launched" ;;
+    *) die "cel run: runtime $rt cannot scope this workspace's skills (${names[*]}; agents.yaml workspace_skills) - nothing was launched" ;;
   esac
 }
 
@@ -152,8 +160,8 @@ _run_retry_overlay_args() { # <runtime> <role>
 #
 # AGENT_ROLE_FILE is set to the path the role travelled as, or emptied: the
 # launch environment below carries it, and `cel gc` proves ownership with it.
-_run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
-  local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" strategy
+_run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile] [agent-name]
+  local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" agent="${7:-}" strategy
   AGENT_ROLE_FILE=""
   strategy="$(agent_injection "$rt" strategy)"
   case "$strategy" in
@@ -186,6 +194,11 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
         local scoped="${rolefile:-$wsdir/.cel/opencode/role-$tag.md}"
         opencode_agent_args "$tag" "$body" "$dry" "$scoped" "${scoped%.md}.opencode.json" \
           || die 'cel run: scoped OpenCode role/config is not prepared'
+        return 0
+      fi
+      # agy: one agent file per agent name, carrying the scoped skills too.
+      if [ "$rt" = agy ]; then
+        agy_agent_args "${agent:-$tag}" "$body" "$dry" "$wsdir" || die 'cel run: could not write the agy agent file'
         return 0
       fi
       local dir file
@@ -1575,6 +1588,15 @@ _run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<
 }
 
 _run_resume_identity_check() { # runtime candidate cwd scoped-agent [wsdir]
+  # agy given an unknown --conversation warns and starts a new conversation,
+  # so the one a restart names must be a real conversation in its store.
+  if [ "$1" = agy ] && [ -n "$2" ]; then
+    rex_native_session_valid agy "$2" \
+      || die "cel run: saved context '$2' is not an agy conversation id; use --fresh only when intended"
+    [ -f "$(agy_conversation_file "$2")" ] \
+      || die "cel run: agy conversation $2 is not in $(dirname "$(agy_conversation_file "$2")") - agy would start a new one in its place; use --fresh only when intended"
+    return 0
+  fi
   [ "$1" = opencode ] && [ -n "$2" ] || return 0
   rex_native_session_valid "$1" "$2" \
     || die 'cel run: saved context is not an OpenCode native session; preserve it and use --fresh --handoff for the migration'
@@ -1589,15 +1611,17 @@ _run_resume_identity_check() { # runtime candidate cwd scoped-agent [wsdir]
 # OpenCode is not switched here: its migration is explicit (--fresh --handoff;
 # _run_resume_identity_check). The recorded runtime decides; a record without
 # one (older map entries, a roster row naming no agent) is judged by the shape
-# this runtime resumes.
+# this runtime resumes - except for agy, which postdates the runtime field:
+# an untagged record is never its own (a Claude UUID looks the same).
 _run_resume_foreign() { # <runtime> <session> <recorded-runtime|""> <agent-name> -> 0: start fresh
   local rt="$1" s="$2" was="$3"
   [ "$rt" != opencode ] || return 1
   if [ -z "$was" ]; then
     [ -n "$s" ] || return 1
-    case "$(agent_resume "$rt" value)" in
-      path) [[ "$s" != /* ]] || return 1 ;;
-      id) [[ "$s" = */* ]] || { [ "$rt" = claude ] && ! rex_native_session_valid claude "$s"; } || return 1 ;;
+    case "$rt:$(agent_resume "$rt" value)" in
+      agy:*) ;;
+      *:path) [[ "$s" != /* ]] || return 1 ;;
+      *:id) [[ "$s" = */* ]] || { [ "$rt" = claude ] && ! rex_native_session_valid claude "$s"; } || return 1 ;;
       *) return 1 ;;
     esac
     was="another runtime"
@@ -1616,6 +1640,15 @@ _run_resume_parent_session() { # <session> -> the session to resume
   else
     printf '%s' "$1"
   fi
+}
+
+# THE ID A RUNTIME RESUMES, from what was recorded. Herdr's antigravity-cli
+# hook can report agy's transcript path beside its conversation id; the id
+# is the directory it stands in (<app data>/brain/<id>/...).
+_run_resume_native_id() { # <runtime> <session> -> session
+  local s="$2" re='/brain/([[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12})/'
+  if [ "$1" = agy ] && [[ "$s" =~ $re ]]; then s="${BASH_REMATCH[1]}"; fi
+  printf '%s' "$s"
 }
 
 # RESUME. Root, core and the product agents carry their conversation across a
@@ -1650,7 +1683,7 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
     IFS=$'\t' read -r lname lpane lstatus lsession lruntime <<< "$live"
     [ "$lsession" != "-" ] || lsession=""
     [ "$lruntime" != "-" ] || lruntime=""
-    [ -z "$lsession" ] || lsession="$(_run_resume_parent_session "$lsession")"
+    [ -z "$lsession" ] || lsession="$(_run_resume_native_id "$runtime" "$(_run_resume_parent_session "$lsession")")"
     if [ "$fresh" = 0 ] && _run_resume_foreign "$runtime" "$lsession" "$lruntime" "$agent_name"; then fresh=1; fi
     [ "$fresh" = 1 ] || _run_resume_identity_check "$runtime" "$lsession" "$cwd" "cel-$role" "$resume_wsdir"
     [ "$dry_run" = 1 ] || _run_sessions_record "$cwd" "$lsession" "$lruntime"
@@ -1676,7 +1709,7 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   # Over a dead or absent agent, come back into the last recorded session.
   if [ "$fresh" -eq 0 ] && [ -z "$RESUME_SESSION" ] && [ -z "$live" ]; then
     RESUME_SESSION="$(_run_sessions_last "$cwd")"
-    [ -z "$RESUME_SESSION" ] || RESUME_SESSION="$(_run_resume_parent_session "$RESUME_SESSION")"
+    [ -z "$RESUME_SESSION" ] || RESUME_SESSION="$(_run_resume_native_id "$runtime" "$(_run_resume_parent_session "$RESUME_SESSION")")"
     if _run_resume_foreign "$runtime" "$RESUME_SESSION" "$(_run_sessions_last_runtime "$cwd")" "$agent_name"; then
       RESUME_SESSION=""; fresh=1
     fi
@@ -1830,15 +1863,15 @@ _run_is_agent_argv() { # <cmdline-file>
   mapfile -d '' -t v < "$1" 2>/dev/null || return 1
   for a in "${v[0]:-}" "${v[1]:-}"; do
     n="${a##*/}"; n="${n%% *}"
-    case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*|cli.js|cli.mjs) return 0 ;; esac
+    case "$n" in omp|pi|claude|codex|opencode|agy|omp.*|pi.*|cli.js|cli.mjs) return 0 ;; esac
   done
   return 1
 }
 
 # WHO IS RESUMING WHICH SESSION FILE. herdr's roster cannot see a nameless
 # pane's session, but /proc can: every live agent whose argv says `--resume
-# <file>` (or `--resume=`, `--session`), with the pane it stands in
-# (HERDR_PANE_ID from its environ; `-` when it has none).
+# <file>` (or `--resume=`, `--session`, agy's `--conversation`), with the
+# pane it stands in (HERDR_PANE_ID from its environ; `-` when it has none).
 run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live holder
   local d pid prev a sess pane item f anc hops held
   local -A managed=() managed_pane=() cand=() cand_pane=()
@@ -1863,7 +1896,8 @@ run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live hold
       case "$a" in
         --resume=*) sess="${a#--resume=}" ;;
         --session=*) sess="${a#--session=}" ;;
-        *) { [ "$prev" = --resume ] || [ "$prev" = --session ]; } && sess="$a" ;;
+        --conversation=*) sess="${a#--conversation=}" ;;
+        *) { [ "$prev" = --resume ] || [ "$prev" = --session ] || [ "$prev" = --conversation ]; } && sess="$a" ;;
       esac
       [ -n "$sess" ] && break
       prev="$a"
@@ -3195,7 +3229,12 @@ $(_run_reviewer_focus_brief "$repo" "$pr" "$review_focus")"
     [ "$runtime" = opencode ] && [ "$fresh" = 1 ] && [[ "$handoff" = /* ]] && [ -s "$handoff" ] \
       || die 'cel run: --handoff requires a fresh OpenCode session and an existing absolute handoff file'
   fi
-  _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" "$bodyfile"
+  # agy reaches a gateway through its own AGY_LLM_GATEWAY_* environment, which
+  # cel does not write yet: a `via: gateway` profile would start on agy's own
+  # sign-in instead, so it is refused rather than silently rerouted.
+  [ "$runtime" != agy ] || [ "${PROFILE_VIA:-}" != gateway ] \
+    || die "cel run: agy has no gateway route in cel yet - give its profile no via: gateway (it then uses agy's own sign-in)"
+  _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" "$bodyfile" "$agent_name"
 
   # Model and thinking flags ride ahead of the role injection, spelled the way
   # THIS runtime spells them (agents.yaml model_flag / thinking).
@@ -3254,6 +3293,8 @@ $(_run_reviewer_focus_brief "$repo" "$pr" "$review_focus")"
       # The one branch a builder may push (lib/guard.sh _guard_builder_push).
       [ "$MEMBER_ROLE" != builder ] || LAUNCH_ENV_EXTRA+=("CEL_TEAM_BRANCH=$MEMBER_BRANCH") ;;
   esac
+  # agy updates itself at start unless told not to, off the pinned release.
+  [ "$runtime" != agy ] || LAUNCH_ENV_EXTRA+=(AGY_CLI_DISABLE_AUTO_UPDATE=true)
   _run_workspace_skills "$runtime" "$wsdir"
   # A scrubbed helper (_run_launch_scrub) still needs the provider key its
   # profile authenticates with when it reaches a provider directly.
@@ -3302,6 +3343,27 @@ $(_run_reviewer_focus_brief "$repo" "$pr" "$review_focus")"
     else
       _run_claude_trust_dir "$cwd" \
         || die "cel run member: could not record Claude Code's folder trust for $cwd in $(_run_claude_config_file) - nothing was launched"
+    fi
+  fi
+  # agy: the global hooks that are its guard, session identity and inbox
+  # delivery are in place before it starts, or nothing starts; its folder is
+  # trusted for this launch only (no first-run trust prompt); and it always
+  # takes a first turn, on which it arms the inbox waiter that is its only
+  # wake while idle (lib/agy.sh, tools/hooks/agy-hook.sh).
+  if [ "$runtime" = agy ]; then
+    if [ "$dry_run" -eq 1 ]; then
+      printf 'merge the celestial hooks entry into %s\n' "$(agy_hooks_file)"
+    else
+      agy_hooks_link >/dev/null \
+        || die "cel run: agy's guard and inbox hooks are not in $(agy_hooks_file) - nothing was launched"
+    fi
+    AGENT_ARGS+=(--settings "$(agy_launch_settings "$cwd")")
+    if [ "$role" = member ]; then
+      AGENT_ARGS+=(-i "You have just started as $agent_name, $MEMBER_ROLE on team $team. Your role is your scope packet and task. Run cel team ack $team now, then start on the task; mail already waiting in your inbox is attached to this message. $(agy_wait_instruction)")
+    elif [ -n "$lane" ] && [ -z "$resume_session" ]; then
+      AGENT_ARGS+=(-i "$(_run_lane_kickoff "$product" "$lane" "$agent_name") $(agy_wait_instruction)")
+    else
+      AGENT_ARGS+=(-i "$(agy_kickoff "$agent_name")")
     fi
   fi
 

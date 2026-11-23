@@ -2484,7 +2484,7 @@ cel plugins install egm --runtime pi
 cel plugins install egm --runtime opencode
 ```
 
-All five runtimes are supported: `cel plugins install egm --runtime
+All five of those runtimes are supported (agy has no egm plugin install): `cel plugins install egm --runtime
 omp|claude|codex|pi|opencode [--dry-run]`. Choose only the runtime you want.
 This never runs as part of default setup, workspace sync or update, and never
 restarts an existing agent; new sessions load the plugin. Select its
@@ -2514,7 +2514,7 @@ Skills-only copying is deliberately unsupported.
 ### Vendored skills
 
 Third-party skills sit in `core/skills/` beside the plane's own and are
-linked into every runtime (claude, omp, pi, codex, opencode) the same way:
+linked into every runtime (claude, omp, pi, codex, opencode, agy) the same way:
 `web-design-guidelines`, `vercel-react-best-practices`,
 `vercel-composition-patterns` and `vercel-react-native-skills`
 (vercel-labs/agent-skills), `frontend-design`, `mcp-builder`,

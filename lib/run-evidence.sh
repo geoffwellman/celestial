@@ -119,7 +119,7 @@ run_runtime_evidence() { # runtime name pane cwd pid -> evidence states and NUL-
   RUN_EVIDENCE_INBOX=unknown
   RUN_EVIDENCE_DETAIL="native runtime evidence unavailable"
   RUN_EVIDENCE_ARGV_VALUES=()
-  case "$runtime" in pi|omp|opencode|claude|codex) ;; *) return 0 ;; esac
+  case "$runtime" in pi|omp|opencode|claude|codex|agy) ;; *) return 0 ;; esac
   [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 0
   root="$(_run_proc_root)"
   [ "$root/$pid/cwd" -ef "$cwd" ] || { RUN_EVIDENCE_DETAIL="native cwd identity unavailable or mismatched"; return 0; }

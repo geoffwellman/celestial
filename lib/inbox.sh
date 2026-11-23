@@ -17,6 +17,8 @@ _CEL_INBOX=1
 . "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/rex.sh
 . "${BASH_SOURCE[0]%/*}/rex.sh"
+# shellcheck source=lib/manifest.sh
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 
 _inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/inbox}"; }
 
@@ -424,6 +426,7 @@ cmd_inbox() {
     read)  _inbox_read "$@";;
     count) _inbox_count "$@";;
     watch) _inbox_watch "$@";;
+    wait)  _inbox_wait "$@";;
     open)  _inbox_open "$@";;
     resolve) _inbox_resolve "$@";;
     prune) _inbox_prune "$@";;
@@ -473,6 +476,15 @@ cel inbox - messages between agents that never type into a pane
       tail new items, one line each for a runtime task that monitors stdout.
       The command itself does not wake an agent. Decisions/blockers also raise
       a desktop notification via herdr; set CEL_INBOX_NOTIFY=0 to silence it.
+  cel inbox wait [--for <who>] [--workspace w] [--parent <pid>] [--check]
+      block until the reader has unread mail, print one notice and exit 0.
+      It reads nothing (the cursor stays the reader's). For a runtime whose
+      wake for an idle conversation is one of its own background tasks
+      finishing (agy): the agent starts it as one. One per reader: a second
+      says it is already armed and exits; --check exits 0 while one runs.
+      It goes with --parent, by default the agent runtime it was started by,
+      and ends after CEL_INBOX_WAIT_MAX seconds (default 86400) regardless.
+      Stopping without mail says so and exits 3, never 0.
   cel inbox open [--for <who>] [--workspace w|--all-workspaces] [--json] [--ranked]
       UNRESOLVED decisions and blockers for that recipient - regardless of the
       read cursor. Reading a decision does not resolve it; only `resolve` does.
@@ -965,6 +977,107 @@ _inbox_notify() { # <kind> <from> <ws> <message> [route people, comma-separated]
     [ -z "$me" ] || [[ ",$5," == *",$me,"* ]] || return 0
   fi
   herdr notification show "$1 from $2 ($3)" --body "$(printf '%.120s' "$4")" >/dev/null 2>&1 || true
+}
+
+# THE WAITER. An idle agy conversation is woken by agy itself when one of its
+# own background tasks finishes, and by nothing else that does not type into
+# its pane. So an agy agent keeps this running as one (its Stop hook sends it
+# back to start it - tools/hooks/agy-hook.sh): it blocks until the reader has
+# unread mail, prints a notice and exits, and the exit is the wake. It READS
+# nothing: delivery stays `cel inbox read`'s (the hook attaches the mail to
+# the woken turn), so the cursor moves once, where the turn can act on it.
+#
+# ONE PER READER, by a lock: a second says so and returns at once - inside
+# agy's synchronous wait, so it wakes nobody - and --check answers whether
+# one holds it. It goes with --parent, by default the agent runtime that
+# started it: a waiter that outlived its agent would hold the lock, and every
+# later launch would believe itself armed. A line appended to the mailbox
+# re-counts; a slow re-count is the backstop for one that landed between the
+# first count and the tail starting.
+_inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
+  local who="" ws="" parent="" check=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --for) who="$(_inbox_sanitise "$2")"; shift 2 ;;
+      --workspace) ws="$2"; shift 2 ;;
+      --parent) parent="$2"; shift 2 ;;
+      --check) check=1; shift ;;
+      *) die "cel inbox wait: unknown argument '$1'" ;;
+    esac
+  done
+  [ -n "$who" ] || who="$(_inbox_me)"
+  ws="$(_inbox_ws "$ws")"
+  have flock || die 'cel inbox wait: flock is not on PATH'
+  local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-wait" lkfd
+  mkdir -p "$lkd" 2>/dev/null || true
+  local lock; lock="$lkd/$(_inbox_sanitise "$ws").$who.lock"
+  if [ "$check" -eq 1 ]; then
+    [ -e "$lock" ] || return 1
+    { exec {lkfd}>>"$lock"; } 2>/dev/null || return 1
+    if flock -n "$lkfd"; then exec {lkfd}>&-; return 1; fi
+    exec {lkfd}>&-; return 0
+  fi
+  { exec {lkfd}>>"$lock"; } 2>/dev/null || die "cel inbox wait: cannot open $lock"
+  if ! flock -n "$lkfd"; then
+    printf 'cel inbox wait: already armed for %s in %s - nothing started\n' "$who" "$ws"
+    exec {lkfd}>&-; return 0
+  fi
+  [ -n "$parent" ] || parent="$(_inbox_runtime_ancestor)" || parent=""
+  local f n tfd tpid line rc why="" waited=0 me="${BASHPID:-$$}" tick="${CEL_WATCH_PARENT_POLL:-5}" poll="${CEL_INBOX_WAIT_POLL:-30}" follow=()
+  # A WAITER IS BOUNDED. One with no agent runtime above it would never be
+  # ended, and while it holds the lock every --check says armed; so every
+  # waiter ends after CEL_INBOX_WAIT_MAX seconds (its agent's Stop hook
+  # starts another; an orphan's lock is freed).
+  local deadline=$(( $(date +%s) + ${CEL_INBOX_WAIT_MAX:-86400} ))
+  f="$(_inbox_file "$ws")"; mkdir -p "$(dirname "$f")"; touch "$f"
+  # The tail follows THIS waiter (killed, it takes its tail with it); the
+  # parent is checked between reads. It never inherits the lock.
+  if tail --pid="$me" -n 0 /dev/null >/dev/null 2>&1; then follow=(-s "$tick" --pid="$me"); fi
+  exec {tfd}< <(exec {lkfd}>&-; exec tail -n 0 -F "${follow[@]}" "$f" 2>/dev/null)
+  tpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $tpid 2>/dev/null; trap - EXIT; exit 130" INT TERM
+  # shellcheck disable=SC2064
+  trap "kill $tpid 2>/dev/null" EXIT
+  while :; do
+    # a mailbox that does not parse is something to read, not nothing
+    n="$(_inbox_count_one "$ws" "$who" 2>/dev/null)" || { [ "${n:-0}" -gt 0 ] 2>/dev/null || n=1; }
+    [ "${n:-0}" -gt 0 ] && break
+    while :; do
+      rc=0; read -r -t "$tick" line <&"$tfd" || rc=$?
+      [ "$rc" -eq 0 ] && break
+      if [ "$rc" -le 128 ]; then why="its mailbox tail ended"
+      elif [ -n "$parent" ] && ! kill -0 "$parent" 2>/dev/null; then why="the agent that started it ($parent) is gone"
+      elif [ "$(date +%s)" -ge "$deadline" ]; then why="it reached its ${CEL_INBOX_WAIT_MAX:-86400}s limit"
+      fi
+      if [ -n "$why" ]; then
+        kill "$tpid" 2>/dev/null; exec {tfd}<&- {lkfd}>&-; trap - INT TERM EXIT
+        # NOT A WAKE WITH MAIL: no mail is claimed, and the exit status says so
+        printf 'cel inbox wait: stopped without mail for %s in %s - %s. Start cel inbox wait again if you are still running.\n' "$who" "$ws" "$why"
+        return 3
+      fi
+      waited=$((waited + tick))
+      [ "$waited" -lt "$poll" ] || { waited=0; break; }
+    done
+  done
+  kill "$tpid" 2>/dev/null; exec {tfd}<&-; trap - INT TERM EXIT
+  printf 'cel inbox: %s unread for %s in %s\n' "$n" "$who" "$ws"
+  inbox_unread_json "$ws" "$who" 2>/dev/null \
+    | jq -r '"INBOX \(.kind // "status") from \(.from // "?"): \(.message // "" | tostring | gsub("\n"; " ") | .[0:300])"' 2>/dev/null | tail -n 3
+  printf 'Read it (cel inbox read --for %s --workspace %s; an agy turn has it attached), act on it, and start cel inbox wait again before the turn ends.\n' "$who" "$ws"
+}
+
+# The agent that started this process: the nearest ancestor whose name is a
+# manifest runtime's executable.
+_inbox_runtime_ancestor() { # -> pid
+  local p="$PPID" depth=0 comm bins=" " a
+  for a in $(agent_names 2>/dev/null); do bins+="$(agent_get "$a" bin) "; done
+  while [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -gt 1 ] && [ "$depth" -lt 64 ]; do
+    comm="$(cat "/proc/$p/comm" 2>/dev/null)" || return 1
+    case "$bins" in *" $comm "*) printf '%s' "$p"; return 0 ;; esac
+    p="$(awk '/^PPid:/ { print $2 }' "/proc/$p/status" 2>/dev/null)"; depth=$((depth + 1))
+  done
+  return 1
 }
 
 # DECISIONS ARE A LEDGER, NOT A QUEUE. `read` moves a cursor; that is right for

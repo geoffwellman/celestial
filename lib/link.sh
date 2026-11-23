@@ -8,6 +8,8 @@
 _CEL_LINK=1
 # shellcheck source=lib/manifest.sh
 . "${BASH_SOURCE[0]%/*}/manifest.sh"
+# shellcheck source=lib/agy.sh
+. "${BASH_SOURCE[0]%/*}/agy.sh"
 
 # A link into core/skills/ whose skill was retired (fanout, pr-loop) is
 # removed: a dangling skill link is listed by some runtimes and read as an
@@ -244,4 +246,7 @@ link_all() {
   link_core_agents
   link_herdr_layouts
   link_claude_prefs
+  # agy's guard, session and inbox hooks (lib/agy.sh); `cel run` installs
+  # them too and refuses an agy launch without them.
+  if have agy; then agy_hooks_link || c_warn "agy: celestial hooks not installed - agy launches are refused until they are"; fi
 }

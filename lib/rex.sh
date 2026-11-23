@@ -97,7 +97,7 @@ _rex_preflight() { # name runtime; checked before anything is created
 
 rex_native_session_valid() { # runtime native id
   case "$1" in
-    claude) [[ "$2" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ;;
+    claude|agy) [[ "$2" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ;;
     opencode) [[ "$2" =~ ^ses_[A-Za-z0-9]+$ ]] ;;
     *) return 1 ;;
   esac
@@ -147,7 +147,7 @@ _rex_launch_native() { # runtime cwd args...
   local rt="$1" cwd="$2"; shift 2
   local a previous="" native_flag="" native_requested=0
   _REX_NATIVE=""
-  case "$rt" in claude) native_flag=--resume ;; opencode) native_flag=--session ;; esac
+  case "$rt" in claude) native_flag=--resume ;; opencode) native_flag=--session ;; agy) native_flag=--conversation ;; esac
   if [ -n "$native_flag" ]; then
     for a in "$@"; do
       if [ "$previous" = "$native_flag" ]; then _REX_NATIVE="$a"; fi

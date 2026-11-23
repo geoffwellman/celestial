@@ -444,7 +444,7 @@ _serve_agent_argv() { # <command> -> 0 when it is an agent runtime (omp, pi, cla
   # argv[1] names the program only when argv[0] is a script host; for
   # anything else it is an argument (`http-server ~/claude` is a preview).
   case "$n" in node|nodejs|bun|deno|python|python3*) n="${a1##*/}" ;; esac
-  case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*) return 0 ;; esac
+  case "$n" in omp|pi|claude|codex|opencode|agy|omp.*|pi.*) return 0 ;; esac
   return 1
 }
 # AN AGENT'S VERIFICATION BROWSER. A harness (omp's
