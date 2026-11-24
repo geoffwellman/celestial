@@ -874,21 +874,32 @@ doctor_shared_session_lines() { # -> 1 when any session file has two resumers
 # npm package under a node that is no longer active (mise's `lts` alias moved)
 # - and a bin whose --version fails are named with the command that fixes
 # them, never shown as a version. 1 when the agent does not run.
+# Asked in the global mise context (shim_global_dir: $HOME), the node agents
+# get unless a workspace's own mise config selects another - so the answer
+# is the same whichever directory doctor runs from; cel run checks the
+# launch's own directory. A check that timed out is a warning, not a verdict.
 doctor_agent_bin_line() { # <agent>
-  local a="$1" bin out pkg old
+  local a="$1" bin out pkg old g sd=0
   bin="$(agent_get "$a" bin)"
-  if shim_dead "$bin"; then
+  g="$(shim_global_dir)"
+  shim_dead "$bin" "$g" || sd=$?
+  if [ "$sd" = 2 ]; then
+    c_warn "$a: could not tell whether $bin runs ($SHIM_ERR) - not checked further"
+    return 0
+  fi
+  if [ "$sd" = 0 ]; then
     pkg="$(agent_get "$a" npm_package)"
     old=""; [ -z "$pkg" ] || old="$(npm_stranded "$pkg")"
     if [ -n "$old" ]; then
-      c_err "$a: $bin is a dead mise shim ($SHIM_ERR) - $pkg ${old%%$'\t'*} is installed under node ${old##*$'\t'} only. Fix: cel setup --agents $a (reinstalls $pkg@$(_install_agent_version "$a") under the active node)"
+      c_err "$a: $bin is a dead mise shim ($SHIM_ERR, checked in the global mise context from $g) - $pkg ${old%%$'\t'*} is installed under node ${old##*$'\t'} only. Fix: cel setup --agents $a (reinstalls $pkg@$(_install_agent_version "$a") under the active node)"
     else
-      c_err "$a: $bin is a dead mise shim ($SHIM_ERR). Fix: cel setup --agents $a"
+      c_err "$a: $bin is a dead mise shim ($SHIM_ERR, checked in the global mise context from $g). Fix: cel setup --agents $a"
     fi
     return 1
   fi
   local vcmd; vcmd="$(agent_get "$a" version_cmd)"; [ -n "$vcmd" ] || vcmd="$(printf '%q --version' "$bin")"
-  if ! out="$(bash -c "$vcmd" 2>&1 </dev/null)"; then
+  # the same context the shim check used
+  if ! out="$(cd "$g" 2>/dev/null; bash -c "$vcmd" 2>&1 </dev/null)"; then
     c_err "$a: $vcmd exits non-zero ($(printf '%s\n' "$out" | head -1 | cut -c1-80)). Fix: cel setup --agents $a"
     return 1
   fi
@@ -901,8 +912,10 @@ doctor_agent_bin_line() { # <agent>
 # install that puts it back under the active node. Agent bins are the Agents
 # section's. Nothing is installed here.
 doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
-  local dir="${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims" s n plane="" tools="" a fail=0 owner pkg ver node key
+  local dir="${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims" s n plane="" tools="" a fail=0 owner pkg ver node key g sd
+  local checked=0 unchecked="" why=""
   [ -d "$dir" ] || return 0
+  g="$(shim_global_dir)"
   for a in $(agent_names); do plane="$plane $(agent_get "$a" bin) "; done
   tools=" $(_npm_tools_rows 2>/dev/null | cut -f5 | tr '\n' ' ') "
   local -A bins=() err=() fix=()
@@ -911,8 +924,16 @@ doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
     n="${s##*/}"
     [ -e "$s" ] || [ -L "$s" ] || continue
     case "$plane" in *" $n "*) continue ;; esac
-    # the shim itself, wherever PATH puts it
-    PATH="$dir:$PATH" shim_dead "$n" || continue
+    checked=$((checked + 1))
+    # the shim itself, wherever PATH puts it, in the global mise context. A
+    # timed-out check is this shim unchecked; once mise itself hung here the
+    # rest answer at once (shim_dead), and each is counted.
+    sd=0; PATH="$dir:$PATH" shim_dead "$n" "$g" || sd=$?
+    if [ "$sd" = 2 ]; then
+      unchecked="$unchecked $n"; [ -n "$why" ] || why="$SHIM_ERR"
+      continue
+    fi
+    [ "$sd" = 0 ] || continue
     owner="$(npm_bin_owner "$n")"
     if [ -n "$owner" ]; then
       IFS=$'\t' read -r pkg ver node <<< "$owner"
@@ -933,6 +954,10 @@ doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
       *) c_warn "${bins[$key]}: dead mise shim (${err[$key]}) - ${fix[$key]}" ;;
     esac
   done
+  if [ -n "$unchecked" ]; then
+    set -- $unchecked
+    c_warn "$# of $checked mise shims not checked ($why):$unchecked"
+  fi
   return "$fail"
 }
 

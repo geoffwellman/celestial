@@ -247,10 +247,17 @@ _update_agents() { # returns 1 when any component failed or is still behind
     fi
     # A dead mise shim (its npm package under a node that is no longer
     # active) is put back under the active node first: its updater would only
-    # run through the dead shim. Nothing else is installed here.
-    if ! install_agent_revive "$a"; then
-      rc=1; shown=1; continue
-    fi
+    # run through the dead shim. Nothing else is installed here. One whose
+    # check timed out (a hung mise) is skipped - its version read and updater
+    # would only hang in the same mise - and the update ends non-zero: an
+    # agent not updated is never reported as a finished update.
+    local vrc=0
+    install_agent_revive "$a" || vrc=$?
+    case "$vrc" in
+      0) ;;
+      2) rc=1; shown=1; c_err "$a NOT updated: mise did not settle whether $bin runs - rerun cel update once mise answers"; continue ;;
+      *) rc=1; shown=1; continue ;;
+    esac
     shown=1
     old="$(_update_agent_version "$a")" || old="?"
     if _update_held "$a"; then

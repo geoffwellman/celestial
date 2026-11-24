@@ -1360,14 +1360,42 @@ _run_live_names() { # -> one live herdr agent name per line
 # version is set for shim". Found only after the fact, a --restart had
 # already closed the agent's terminal, and the relaunch's own terminal died
 # with it. So it is asked first (lib/common.sh shim_dead), from the launch's
-# cwd, and refused with the fix; an absent bin keeps its existing refusals.
+# own cwd - where the runtime really starts, a workspace mise config
+# included - and refused with the fix; an absent bin keeps its existing
+# refusals. A check that timed out (a hung mise) is a warning and the launch
+# goes on: only a shim proven dead refuses.
+# WHICH NODE IS BROKEN decides the fix. `cel setup`/`cel update` repair the
+# global mise context only ($HOME); when that one runs the agent and only
+# the launch directory's own mise config selects a node without it, the
+# refusal names that directory and its node and gives the install that works
+# there, saying setup would change nothing.
 _run_runtime_runnable() { # <runtime> <cwd>
-  local bin dir="$2"
+  local bin dir="$2" sd=0 why gd=0 node pkg ver cmd fix
   bin="$(agent_get "$1" bin)"
   [ -n "$bin" ] || return 0
   [ -d "$dir" ] || dir=.
-  shim_dead "$bin" "$dir" || return 0
-  die "cel run: $1 cannot start - $bin is a mise shim with no version behind it ($SHIM_ERR): its package is not installed under the active node. Nothing was stopped, claimed or launched. Fix: cel setup --agents $1 (or cel update), then run this again"
+  shim_dead "$bin" "$dir" || sd=$?
+  case "$sd" in
+    1) return 0 ;;
+    2) c_warn "cel run: could not tell whether $bin runs ($SHIM_ERR) - launching anyway" >&2; return 0 ;;
+  esac
+  why="$SHIM_ERR"
+  dir="$(cd "$dir" && pwd -P)"
+  shim_dead "$bin" "$(shim_global_dir)" || gd=$?
+  if [ "$gd" = 1 ] && [ "$dir" != "$(cd "$(shim_global_dir)" && pwd -P)" ]; then
+    node="$(shim_mise_node "$dir")"
+    pkg="$(agent_get "$1" npm_package)"; cmd="$(agent_get "$1" install)"
+    if [ -n "$pkg" ] && [ -n "$cmd" ]; then
+      # shellcheck source=lib/install.sh
+      . "${BASH_SOURCE[0]%/*}/install.sh"
+      ver="$(_install_agent_version "$1")"
+      fix="cd $(printf '%q' "$dir") && ${cmd//\$CEL_INSTALL_VERSION/$ver}"
+    else
+      fix="install $bin for that node, from $dir"
+    fi
+    die "cel run: $1 cannot start in $dir - $bin is a mise shim with no version behind it there ($why): that directory's mise config selects node ${node:-<unknown>}, which lacks it. The global node runs it, and cel setup / cel update repair only the global node, so they would change nothing here. Nothing was stopped, claimed or launched. Fix: $fix (or point that mise config at a node that has it), then run this again"
+  fi
+  die "cel run: $1 cannot start - $bin is a mise shim with no version behind it ($why): its package is not installed under the active node. Nothing was stopped, claimed or launched. Fix: cel setup --agents $1 (or cel update), then run this again"
 }
 
 _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh> <force> <pane-opt>
