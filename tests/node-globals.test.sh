@@ -16,6 +16,8 @@ _ng_setup() {
   export HOME="$T/home" NG_T="$T"
   # the box's own mise data dir is never read
   unset MISE_DATA_DIR
+  # the shim-check record (lib/common.sh) lands in a runtime dir of the test's
+  export XDG_RUNTIME_DIR="$T/run"; mkdir -m 700 "$XDG_RUNTIME_DIR"
   MISE="$HOME/.local/share/mise"
   local old="$MISE/installs/node/24.20.0" pkg
   export NG_ACTIVE="$MISE/installs/node/24.22.3"
@@ -297,6 +299,8 @@ test_a_hung_mise_is_cannot_tell_within_the_bound() {
   _ng_setup
   : > "$T/hang"
   export CEL_SHIM_CHECK_SECS=1
+  # as doctor, setup and update do before their first $(...)
+  shim_record_open || { echo "no record opened"; return 1; }
   local rc out started took
   # the first timeout happens inside $(...), as doctor's callers make it
   started="$SECONDS"
@@ -396,6 +400,7 @@ test_a_hung_mise_is_a_doctor_warning_not_a_failure() {
   source "$NG_REPO/lib/doctor.sh"
   : > "$T/hang"
   export CEL_SHIM_CHECK_SECS=1
+  shim_record_open || { echo "no record opened"; return 1; }
   local out rc=0
   out="$(doctor_agent_bin_line pi 2>&1)" || rc=$?
   assert_eq "$rc" 0 || { echo "$out"; return 1; }
@@ -459,5 +464,125 @@ test_cel_run_refusal_names_cel_setup_when_the_global_node_is_dead_too() {
   out="$( (_run_runtime_runnable pi "$T") 2>&1)" || rc=$?
   [ "$rc" != 0 ] || return 1
   assert_contains "$out" "Fix: cel setup --agents pi (or cel update)" || { echo "$out"; return 1; }
+  rm -rf "$T"
+}
+
+# THE HANG RECORD IS PRIVATE: a mktemp -d directory (0700) under the user's
+# own XDG_RUNTIME_DIR, else under TMPDIR, opened by the command's top-level
+# shell and shared by its $(...) subshells.
+test_the_hang_record_is_a_private_directory_of_this_command() {
+  _ng_setup
+  shim_record_open || { echo "no record opened"; return 1; }
+  case "$_SHIM_HUNG_DIR" in "$XDG_RUNTIME_DIR"/cel-shim.$$.*) ;; *) echo "record at $_SHIM_HUNG_DIR"; return 1 ;; esac
+  assert_eq "$(stat -c '%a %U' "$_SHIM_HUNG_DIR")" "700 $(id -un)" || return 1
+  # a subshell opens none of its own: it uses the command's
+  assert_eq "$(_SHIM_HUNG_DIR=''; shim_record_open; printf '%s|%s' "$?" "$_SHIM_HUNG_DIR")" "1|" || return 1
+  rm -rf "$T"
+}
+
+test_the_hang_record_falls_back_to_tmpdir_without_an_own_runtime_dir() {
+  _ng_setup
+  local d
+  for d in / "$T/runlink"; do
+    [ "$d" = / ] || ln -s "$T/run" "$d"
+    [ "$d" != / ] || [ ! -O / ] || continue   # root owns / - not a foreign dir then
+    shim_record_close; export XDG_RUNTIME_DIR="$d"
+    shim_record_open || { echo "no record opened with XDG_RUNTIME_DIR=$d"; return 1; }
+    case "$_SHIM_HUNG_DIR" in "${TMPDIR:-/tmp}"/cel-shim.*) ;; *) echo "XDG_RUNTIME_DIR=$d: record at $_SHIM_HUNG_DIR"; return 1 ;; esac
+    assert_eq "$(stat -c '%a' "$_SHIM_HUNG_DIR")" 700 || return 1
+  done
+  shim_record_close
+  rm -rf "$T"
+}
+
+# A fixed-name file in TMPDIR - the old record's name, here a symlink to a
+# forged "hung" line - is neither trusted nor written through.
+test_a_planted_fixed_name_record_is_never_trusted_or_written_through() {
+  _ng_setup
+  export CEL_SHIM_CHECK_SECS=1
+  local key forged
+  key="$(pwd -P)"
+  printf '%s\tforged hang\n' "$key" > "$T/forged"
+  forged="$(cat "$T/forged")"
+  ln -s "$T/forged" "${TMPDIR:-/tmp}/cel-shim-hung.$$.$(_shim_pid_start $$)"
+  local rc=0
+  shim_dead pi || rc=$?
+  assert_eq "$rc" 0 || { echo "a planted record decided the check ($rc: $SHIM_ERR)"; return 1; }
+  : > "$T/hang"
+  rc=0; shim_dead pi || rc=$?
+  assert_eq "$rc" 2 || return 1
+  assert_eq "$(cat "$T/forged")" "$forged" || { echo "the planted symlink was written through"; return 1; }
+  [ -L "${TMPDIR:-/tmp}/cel-shim-hung.$$.$(_shim_pid_start $$)" ] || { echo "a symlink was removed through"; return 1; }
+  rm -f "${TMPDIR:-/tmp}/cel-shim-hung.$$.$(_shim_pid_start $$)"
+  rm -rf "$T"
+}
+
+# A record directory that is no longer this user's private directory - here
+# swapped for a symlink to a forged record - is cannot-tell: mise is not
+# asked, nothing is read from it and nothing is written through it.
+test_a_swapped_record_directory_is_cannot_tell_and_never_written() {
+  _ng_setup
+  export CEL_SHIM_CHECK_SECS=1
+  shim_record_open || return 1
+  mkdir "$T/evil"; printf '%s\tforged hang\n' "$(pwd -P)" > "$T/evil/hung"
+  rm -rf -- "$_SHIM_HUNG_DIR"; ln -s "$T/evil" "$_SHIM_HUNG_DIR"
+  : > "$LOG"
+  local rc=0
+  shim_dead pi || rc=$?
+  assert_eq "$rc" 2 || return 1
+  assert_contains "$SHIM_ERR" "is not a private directory of this user" || return 1
+  if grep -q '^mise which' "$LOG"; then echo "mise was asked through an untrusted record"; return 1; fi
+  : > "$T/hang"; rc=0; shim_dead gt || rc=$?
+  assert_eq "$rc" 2 || return 1
+  assert_eq "$(wc -l < "$T/evil/hung")" 1 || { echo "the swapped record was written through"; return 1; }
+  rm -f "$_SHIM_HUNG_DIR"; _SHIM_HUNG_DIR=""
+  rm -rf "$T"
+}
+
+test_a_symlinked_record_file_is_cannot_tell_and_never_written() {
+  _ng_setup
+  export CEL_SHIM_CHECK_SECS=1
+  shim_record_open || return 1
+  printf 'elsewhere\tforged\n' > "$T/target"
+  ln -s "$T/target" "$_SHIM_HUNG_DIR/hung"
+  local rc=0
+  : > "$T/hang"; shim_dead pi || rc=$?
+  assert_eq "$rc" 2 || return 1
+  assert_contains "$SHIM_ERR" "is not a private directory of this user" || return 1
+  assert_eq "$(cat "$T/target")" "elsewhere	forged" || { echo "the symlinked record was written through"; return 1; }
+  rm -rf "$T"
+}
+
+test_a_foreign_record_directory_is_cannot_tell() {
+  _ng_setup
+  [ ! -O / ] || { rm -rf "$T"; return 0; }   # as root nothing here is foreign
+  local rc=0
+  _SHIM_HUNG_DIR=/
+  shim_dead pi || rc=$?
+  _SHIM_HUNG_DIR=""
+  assert_eq "$rc" 2 || return 1
+  assert_contains "$SHIM_ERR" "/ is not a private directory of this user" || return 1
+  rm -rf "$T"
+}
+
+# Removed when the shell that opened it exits, and that shell's own EXIT
+# trap still runs; what a shell that died left behind goes at the next open,
+# while a live command's record stays.
+test_the_hang_record_is_removed_at_exit_and_stale_ones_at_the_next_open() {
+  _ng_setup
+  local out d live dead
+  out="$(bash -c 'source "$1/lib/common.sh"; trap "echo old-trap" EXIT; shim_record_open || exit 9; echo "$_SHIM_HUNG_DIR"' _ "$NG_REPO")" || { echo "$out"; return 1; }
+  d="$(sed -n 1p <<< "$out")"
+  assert_eq "$(sed -n 2p <<< "$out")" old-trap || { echo "the shell's own EXIT trap was lost: $out"; return 1; }
+  case "$d" in "$XDG_RUNTIME_DIR"/cel-shim.*) ;; *) echo "record at $d"; return 1 ;; esac
+  [ ! -e "$d" ] || { echo "the record outlived its shell"; return 1; }
+  dead="$XDG_RUNTIME_DIR/cel-shim.4194305.1.abcdef"; mkdir -m 700 "$dead"
+  : > "${TMPDIR:-/tmp}/cel-shim-hung.4194305.1"
+  live="$XDG_RUNTIME_DIR/cel-shim.$PPID.$(_shim_pid_start "$PPID").abcdef"; mkdir -m 700 "$live"
+  shim_record_open || return 1
+  [ ! -e "$dead" ] || { echo "a dead command's record was kept"; return 1; }
+  [ ! -e "${TMPDIR:-/tmp}/cel-shim-hung.4194305.1" ] || { echo "an old fixed-name record was kept"; return 1; }
+  [ -d "$live" ] || { echo "a live command's record was removed"; return 1; }
+  shim_record_close
   rm -rf "$T"
 }

@@ -963,6 +963,8 @@ doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
 
 cmd_doctor() {
   local fail=0
+  # one private shim-check record for the whole run (lib/common.sh)
+  shim_record_open || true
   c_hd "celestial"
   # shellcheck source=lib/version.sh
   . "$CEL_ROOT/lib/version.sh"
