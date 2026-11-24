@@ -32,16 +32,22 @@ _ng_setup() {
   done
   ln -s ../lib/node_modules/@withgraphite/graphite-cli/graphite.js "$old/bin/graphite"
   # mise: as a shim (argv0 is the tool) it runs the tool only when the active
-  # node holds it; as itself it answers `which` and `reshim`. While
-  # $NG_T/hang exists every call hangs (a wedged mise); from $NG_T/proj (a
-  # project whose own mise config selects a node without the tool) nothing
-  # resolves.
+  # node holds it; as itself it answers `which`, `current node` and `reshim`.
+  # While $NG_T/hang exists every call hangs (a wedged mise); in the
+  # directory named by $NG_T/hang-in only `which` hangs; while
+  # $NG_T/hang-version-<tool> exists that one shim hangs when run. A
+  # directory whose .mise.toml pins another node resolves nothing.
   cat > "$T/mise/mise" <<'SH'
 #!/usr/bin/env bash
 name="${0##*/}"
 [ ! -e "$NG_T/hang" ] || exec sleep 60
-active=1; [ "$PWD" != "$NG_T/proj" ] || active=0
+node=24.22.3; active=1
+if [ -f "$PWD/.mise.toml" ]; then
+  node="$(sed -n 's/^node = "\(.*\)"$/\1/p' "$PWD/.mise.toml")"
+  [ "$node" = 24.22.3 ] || active=0
+fi
 if [ "$name" != mise ]; then
+  [ ! -e "$NG_T/hang-version-$name" ] || exec sleep 60
   [ "$active" = 1 ] && [ -x "$NG_ACTIVE/bin/$name" ] && exec "$NG_ACTIVE/bin/$name" "$@"
   echo "mise ERROR No version is set for shim: $name" >&2
   echo "Set a global default version with one of the following:" >&2
@@ -49,8 +55,10 @@ if [ "$name" != mise ]; then
 fi
 printf 'mise %s\n' "$*" >> "$NG_T/log"
 case "$1" in
-  which) [ "$active" = 1 ] && [ -x "$NG_ACTIVE/bin/$2" ] && { printf '%s\n' "$NG_ACTIVE/bin/$2"; exit 0; }
+  which) [ "$(cat "$NG_T/hang-in" 2>/dev/null)" != "$PWD" ] || exec sleep 60
+         [ "$active" = 1 ] && [ -x "$NG_ACTIVE/bin/$2" ] && { printf '%s\n' "$NG_ACTIVE/bin/$2"; exit 0; }
          echo "mise ERROR $2 is a mise bin however it is not currently active." >&2; exit 1 ;;
+  current) printf '%s\n' "$node"; exit 0 ;;
   reshim) exit 0 ;;
 esac
 exit 2
@@ -281,23 +289,65 @@ test_doctor_runs_the_agent_and_shim_checks() {
 }
 
 # A HUNG MISE IS "CANNOT TELL", NEVER "DEAD". Each shim check is bounded
-# (CEL_SHIM_CHECK_SECS, 5 by default, 1 here) and a timeout answers 2; after
-# one, later checks in the same shell answer at once.
+# (CEL_SHIM_CHECK_SECS, 5 by default, 1 here) and a timeout answers 2; once
+# `mise which` has timed out in a directory, later checks from there in the
+# same command answer at once - also across the $(...) subshells callers
+# use - while another directory is still asked.
 test_a_hung_mise_is_cannot_tell_within_the_bound() {
   _ng_setup
   : > "$T/hang"
   export CEL_SHIM_CHECK_SECS=1
-  local rc=0 started took
+  local rc out started took
+  # the first timeout happens inside $(...), as doctor's callers make it
   started="$SECONDS"
-  shim_dead pi || rc=$?
+  out="$(shim_dead pi; printf '%s|%s' "$?" "$SHIM_ERR")"
   took=$((SECONDS - started))
-  assert_eq "$rc" 2 || return 1
+  assert_eq "$out" "2|mise did not answer within 1s" || return 1
   [ "$took" -le 4 ] || { echo "the check took ${took}s"; return 1; }
-  assert_eq "$SHIM_ERR" "mise did not answer within 1s" || return 1
-  started="$SECONDS"; rc=0
+  started="$SECONDS"
+  rc="$(shim_dead gt; printf '%s' "$?")"
+  assert_eq "$rc" 2 || return 1
+  rc=0; shim_dead graphite || rc=$?
+  assert_eq "$rc" 2 || return 1
+  [ $((SECONDS - started)) -le 1 ] || { echo "a later check waited again after a timeout recorded in a subshell"; return 1; }
+  rm -rf "$T"
+}
+
+test_a_mise_hang_in_one_directory_does_not_stop_checks_in_another() {
+  _ng_setup
+  export CEL_SHIM_CHECK_SECS=1
+  mkdir -p "$T/stuck"
+  (cd "$T/stuck" && pwd -P) > "$T/hang-in"
+  local rc=0
+  shim_dead pi "$T/stuck" || rc=$?
+  assert_eq "$rc" 2 || return 1
+  rc=0; shim_dead pi "$HOME" || rc=$?
+  assert_eq "$rc" 0 || { echo "a hang in another directory decided this one ($rc: $SHIM_ERR)"; return 1; }
+  assert_eq "$SHIM_ERR" "No version is set for shim: pi" || return 1
+  rm -rf "$T"
+}
+
+# A shim that hangs when run is that one shim's "cannot tell": mise answered,
+# so the next shim is still checked.
+test_a_hung_shim_version_is_that_shims_cannot_tell_only() {
+  _ng_setup
+  export CEL_SHIM_CHECK_SECS=1
+  : > "$T/hang-version-gt"
+  local rc=0 started="$SECONDS"
   shim_dead gt || rc=$?
   assert_eq "$rc" 2 || return 1
-  [ $((SECONDS - started)) -le 1 ] || { echo "a second check waited again"; return 1; }
+  assert_eq "$SHIM_ERR" "the gt shim did not answer within 1s" || return 1
+  rc=0; shim_dead pi || rc=$?
+  assert_eq "$rc" 0 || { echo "a hung gt stopped the pi check ($rc: $SHIM_ERR)"; return 1; }
+  rm -rf "$T"
+}
+
+# 137 is also a plain SIGKILL (out of memory), so it is never called "timed
+# out" alone.
+test_a_killed_check_is_reported_as_killed() {
+  _ng_setup
+  assert_eq "$(_shim_bound_reason mise 137 5)" "mise was killed (timed out after 5s, or out of memory)" || return 1
+  assert_eq "$(_shim_bound_reason mise 124 5)" "mise did not answer within 5s" || return 1
   rm -rf "$T"
 }
 
@@ -314,8 +364,8 @@ test_a_hung_mise_never_triggers_a_reinstall() {
 }
 
 # cel update neither reinstalls nor runs the updater (which would only go
-# through the hung mise): a warning, and the agent is left as it is.
-test_a_hung_mise_skips_the_agent_in_update_with_a_warning() {
+# through the hung mise), and the agent not updated fails the update.
+test_a_hung_mise_skips_the_agent_and_fails_the_update() {
   _ng_setup
   export CEL_CONFIG_FILE="$T/config.yaml" CEL_UPDATE_DIR="$T/update" CEL_SHIM_CHECK_SECS=1
   source "$NG_REPO/lib/update.sh"
@@ -323,8 +373,8 @@ test_a_hung_mise_skips_the_agent_in_update_with_a_warning() {
   local out rc=0 started="$SECONDS"
   out="$(_update_agents 2>&1)" || rc=$?
   [ $((SECONDS - started)) -le 6 ] || { echo "update waited $((SECONDS - started))s on a hung mise"; return 1; }
-  assert_eq "$rc" 0 || { echo "$out"; return 1; }
-  assert_contains "$out" "could not tell whether pi runs (mise did not answer within 1s)" || { echo "$out"; return 1; }
+  [ "$rc" != 0 ] || { echo "an agent not updated left the update green: $out"; return 1; }
+  assert_contains "$out" "pi NOT updated: mise did not settle whether pi runs" || { echo "$out"; return 1; }
   if grep -q '^npm install\|^pi update' "$LOG"; then echo "update acted on a hung mise"; cat "$LOG"; return 1; fi
   rm -rf "$T"
 }
@@ -352,22 +402,40 @@ test_a_hung_mise_is_a_doctor_warning_not_a_failure() {
   assert_contains "$out" "pi: could not tell whether pi runs (mise did not answer within 1s)" || return 1
   rc=0; out="$(doctor_shim_lines 2>&1)" || rc=$?
   assert_eq "$rc" 0 || { echo "$out"; return 1; }
-  assert_contains "$out" "mise shims not checked (mise did not answer within 1s)" || return 1
+  assert_contains "$out" "2 of 2 mise shims not checked (mise did not answer within 1s): graphite gt" || return 1
+  rm -rf "$T"
+}
+
+# One shim hanging leaves doctor checking the rest, and it says how many
+# went unchecked.
+test_doctor_keeps_checking_after_one_shim_hangs() {
+  _ng_setup
+  source "$NG_REPO/lib/doctor.sh"
+  export CEL_SHIM_CHECK_SECS=1
+  : > "$T/hang-version-gt"
+  local out rc=0
+  out="$(doctor_shim_lines 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; return 1; }
+  assert_contains "$out" "graphite: dead mise shim (No version is set for shim: graphite)" || { echo "$out"; return 1; }
+  assert_contains "$out" "1 of 2 mise shims not checked (the gt shim did not answer within 1s): gt" || { echo "$out"; return 1; }
   rm -rf "$T"
 }
 
 # WHICH DIRECTORY IS ASKED. Setup, update and doctor ask in the global mise
-# context ($HOME) whatever directory they run from - here a project whose own
-# mise config selects a node without pi - so a working pi is neither reported
-# dead nor reinstalled. cel run asks from the launch's own directory, where
-# the runtime really starts, and refuses there.
+# context ($HOME) whatever directory they run from - here a project whose
+# .mise.toml pins another node - so a working pi is neither reported dead
+# nor reinstalled. cel run asks from the launch's own directory and refuses
+# there, naming that directory and its node, the install that works there,
+# and that cel setup repairs only the global node.
 test_setup_and_doctor_ask_the_global_context_and_cel_run_the_launch_dir() {
   _ng_setup
   source "$NG_REPO/lib/doctor.sh"
   source "$NG_REPO/lib/run.sh"
   _ng_working_pi 1.5.0
   mkdir -p "$T/proj"
-  local out rc=0
+  printf '[tools]\nnode = "20.19.4"\n' > "$T/proj/.mise.toml"
+  local out rc=0 proj
+  proj="$(cd "$T/proj" && pwd -P)"
   out="$(cd "$T/proj" && doctor_agent_bin_line pi 2>&1)" || rc=$?
   assert_eq "$rc" 0 || { echo "doctor judged pi by the caller's project: $out"; return 1; }
   out="$(cd "$T/proj" && install_agents 2>&1)" || { echo "$out"; return 1; }
@@ -375,6 +443,21 @@ test_setup_and_doctor_ask_the_global_context_and_cel_run_the_launch_dir() {
   if grep -q '^npm install' "$LOG"; then echo "setup reinstalled pi because of the caller's project"; return 1; fi
   rc=0; out="$(cd "$T" && (_run_runtime_runnable pi "$T/proj") 2>&1)" || rc=$?
   [ "$rc" != 0 ] || { echo "a launch into the project was not refused"; return 1; }
-  assert_contains "$out" "No version is set for shim: pi" || return 1
+  assert_contains "$out" "pi cannot start in $proj" || { echo "$out"; return 1; }
+  assert_contains "$out" "selects node 20.19.4, which lacks it" || return 1
+  assert_contains "$out" "cel setup / cel update repair only the global node, so they would change nothing here" || return 1
+  assert_contains "$out" "Fix: cd $proj && npm install -g --ignore-scripts \"@earendil-works/pi-coding-agent@1.5.0\"" || return 1
+  case "$out" in *"Fix: cel setup"*) echo "the refusal offered cel setup for a project node: $out"; return 1 ;; esac
+  rm -rf "$T"
+}
+
+# Dead in the global context too: cel setup is the fix, as before.
+test_cel_run_refusal_names_cel_setup_when_the_global_node_is_dead_too() {
+  _ng_setup
+  source "$NG_REPO/lib/run.sh"
+  local out rc=0
+  out="$( (_run_runtime_runnable pi "$T") 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || return 1
+  assert_contains "$out" "Fix: cel setup --agents pi (or cel update)" || { echo "$out"; return 1; }
   rm -rf "$T"
 }

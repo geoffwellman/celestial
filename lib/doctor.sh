@@ -913,6 +913,7 @@ doctor_agent_bin_line() { # <agent>
 # section's. Nothing is installed here.
 doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
   local dir="${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims" s n plane="" tools="" a fail=0 owner pkg ver node key g sd
+  local checked=0 unchecked="" why=""
   [ -d "$dir" ] || return 0
   g="$(shim_global_dir)"
   for a in $(agent_names); do plane="$plane $(agent_get "$a" bin) "; done
@@ -923,11 +924,14 @@ doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
     n="${s##*/}"
     [ -e "$s" ] || [ -L "$s" ] || continue
     case "$plane" in *" $n "*) continue ;; esac
-    # the shim itself, wherever PATH puts it, in the global mise context
+    checked=$((checked + 1))
+    # the shim itself, wherever PATH puts it, in the global mise context. A
+    # timed-out check is this shim unchecked; once mise itself hung here the
+    # rest answer at once (shim_dead), and each is counted.
     sd=0; PATH="$dir:$PATH" shim_dead "$n" "$g" || sd=$?
     if [ "$sd" = 2 ]; then
-      c_warn "mise shims not checked ($SHIM_ERR)"
-      break
+      unchecked="$unchecked $n"; [ -n "$why" ] || why="$SHIM_ERR"
+      continue
     fi
     [ "$sd" = 0 ] || continue
     owner="$(npm_bin_owner "$n")"
@@ -950,6 +954,10 @@ doctor_shim_lines() { # -> 1 when a plane npm tool's shim is dead
       *) c_warn "${bins[$key]}: dead mise shim (${err[$key]}) - ${fix[$key]}" ;;
     esac
   done
+  if [ -n "$unchecked" ]; then
+    set -- $unchecked
+    c_warn "$# of $checked mise shims not checked ($why):$unchecked"
+  fi
   return "$fail"
 }
 
