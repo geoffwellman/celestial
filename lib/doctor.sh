@@ -1102,6 +1102,9 @@ cmd_doctor() {
   # sweep of its own - doctor must not take the registry lock to run.
   local gcline; gcline="$(gc_doctor_line)"
   [ -z "$gcline" ] || c_warn "$gcline"
+  # Per registered repo, wherever its clone lives: its worktrees, what the
+  # last sweep removed and why it kept the rest.
+  while IFS= read -r gcline; do [ -z "$gcline" ] || c_ok "$gcline"; done < <(gc_doctor_repo_lines)
 
   # Exec load is always one line, a failure over its bound. The suite lock is
   # one line only when the box-wide lock is held by something that is not

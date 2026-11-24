@@ -1514,6 +1514,14 @@ losing messages.
   owns any more: inbox watchers whose agent exited, test fixtures whose
   worktree is gone, bare shells on ptys no pane owns, gate runners whose suite
   was killed. The steward does it once a tick and says so in one line.
+  The worktree pass covers every repo a registered workspace declares, by the
+  real path of its clone (`repos/<name>` may be a symlink to a clone
+  elsewhere), and every worktree git records for it, wherever it lives; it
+  prunes records whose directory is gone. It never removes anything under
+  `~/orca/workspaces` (`owner`), a follow-main `local-*` tree (`follow-main
+  owned`), or a worktree something else claims (locked, a registered
+  checkout, a pane or agent in it). `cel gc` prints, and `cel doctor` repeats
+  from the last sweep, one line per repo: worktrees, removed, kept by reason.
 - **`cel box space`** / **`cel gc --box`** — the box is a resource the factory
   spends. `cel box space` measures what is large, what of it is reclaimable,
   and which of three classes it is in: **ours** (worktrees, `~/.cache/cel`),
