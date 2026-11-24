@@ -20,29 +20,56 @@ die()    { c_err "$*"; exit 1; }
 # node that installed it (mise: installs/node/<release>/lib/node_modules); a
 # new release moving the `lts` alias leaves the tool's shim on PATH with
 # nothing behind it, so `command -v` succeeds and running it prints "No
-# version is set for shim: <bin>". True when <bin> resolves to such a shim
+# version is set for shim: <bin>". 0 when <bin> resolves to such a shim
 # (asked of mise as it would resolve from <dir>, default the caller's cwd);
-# SHIM_ERR is then the shim's own first error line. An absent tool, a plain
-# executable and a shim that resolves are not dead. `mise which` answers
-# without starting the tool; only a shim it refuses is run, to read the
-# error the owner would see (a dead shim exits inside mise).
+# SHIM_ERR is then the shim's own first error line. 1 for an absent tool, a
+# plain executable and a shim that resolves. `mise which` answers without
+# starting the tool; only a shim it refuses is run, to read the error the
+# owner would see (a dead shim exits inside mise).
+# BOUNDED: each of the two calls gets CEL_SHIM_CHECK_SECS (5) under
+# `timeout -k 1`, which signals its whole process group. A call that runs
+# out of time is "cannot tell": 2, with SHIM_ERR saying so. A caller warns
+# and carries on as if the tool runs - a hung mise never refuses a launch,
+# never triggers a reinstall and never hangs doctor, setup, update or cel run.
+# Once mise has timed out in this shell every later shim check answers 2 at
+# once, so a doctor over many shims waits for one bound, not one per shim.
+_SHIM_MISE_HUNG=""
 SHIM_ERR=""
-shim_dead() { # <bin> [dir]
-  local path real mise
+shim_dead() { # <bin> [dir] -> 0 dead, 1 not dead, 2 cannot tell (timed out)
+  local path real mise dir="${2:-.}" secs="${CEL_SHIM_CHECK_SECS:-5}" rc=0 out
   SHIM_ERR=""
+  case "$secs" in ''|*[!0-9]*|0) secs=5 ;; esac
   path="$(command -v "$1" 2>/dev/null)" || return 1
   case "$path" in /*) ;; *) return 1 ;; esac
   real="$(readlink -f "$path" 2>/dev/null)" || return 1
   if [ "${real##*/}" = mise ]; then mise="$real"
   elif [[ "$path" = */mise/shims/* ]] && have mise; then mise=mise
   else return 1; fi
-  ( cd "${2:-.}" 2>/dev/null; "$mise" which "${path##*/}" ) >/dev/null 2>&1 && return 1
-  SHIM_ERR="$( (cd "${2:-.}" 2>/dev/null; "$path" --version 2>&1 >/dev/null </dev/null) && echo __ran__)"
-  case "$SHIM_ERR" in *__ran__) SHIM_ERR=""; return 1 ;; esac
-  SHIM_ERR="$(printf '%s\n' "$SHIM_ERR" | sed -n '1{s/^mise ERROR //;p}')"
+  local -a bound=()
+  if [ -n "$_SHIM_MISE_HUNG" ]; then SHIM_ERR="$_SHIM_MISE_HUNG"; return 2; fi
+  ! have timeout || bound=(timeout -k 1 "$secs")
+  ( cd "$dir" 2>/dev/null; exec ${bound[@]+"${bound[@]}"} "$mise" which "${path##*/}" ) >/dev/null 2>&1 </dev/null || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    124|137) SHIM_ERR="mise did not answer within ${secs}s"; _SHIM_MISE_HUNG="$SHIM_ERR"; return 2 ;;
+  esac
+  rc=0
+  out="$(cd "$dir" 2>/dev/null; exec ${bound[@]+"${bound[@]}"} "$path" --version 2>&1 >/dev/null </dev/null)" || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    124|137) SHIM_ERR="the ${path##*/} shim did not finish within ${secs}s"; _SHIM_MISE_HUNG="$SHIM_ERR"; return 2 ;;
+  esac
+  SHIM_ERR="$(printf '%s\n' "$out" | sed -n '1{s/^mise ERROR //;p}')"
   [ -n "$SHIM_ERR" ] || SHIM_ERR="mise resolves no version for ${path##*/}"
   return 0
 }
+
+# The global mise context: the node agents get unless a workspace's own mise
+# config selects another, and the one `npm install -g` reinstalls into from
+# there. setup, update and doctor ask from here, so the answer does not
+# depend on which directory they were run from; cel run asks from the
+# launch's own cwd (where the runtime really starts).
+shim_global_dir() { printf '%s' "${HOME:-/}"; }
 
 # A REQUEST CARRYING A LOOPBACK-ONLY SECRET NEVER GOES THROUGH A PROXY. curl
 # honours http_proxy / HTTPS_PROXY / ALL_PROXY even for 127.0.0.1 and

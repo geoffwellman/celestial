@@ -1360,13 +1360,20 @@ _run_live_names() { # -> one live herdr agent name per line
 # version is set for shim". Found only after the fact, a --restart had
 # already closed the agent's terminal, and the relaunch's own terminal died
 # with it. So it is asked first (lib/common.sh shim_dead), from the launch's
-# cwd, and refused with the fix; an absent bin keeps its existing refusals.
+# own cwd - where the runtime really starts, a workspace mise config
+# included - and refused with the fix; an absent bin keeps its existing
+# refusals. A check that timed out (a hung mise) is a warning and the launch
+# goes on: only a shim proven dead refuses.
 _run_runtime_runnable() { # <runtime> <cwd>
-  local bin dir="$2"
+  local bin dir="$2" sd=0
   bin="$(agent_get "$1" bin)"
   [ -n "$bin" ] || return 0
   [ -d "$dir" ] || dir=.
-  shim_dead "$bin" "$dir" || return 0
+  shim_dead "$bin" "$dir" || sd=$?
+  case "$sd" in
+    1) return 0 ;;
+    2) c_warn "cel run: could not tell whether $bin runs ($SHIM_ERR) - launching anyway" >&2; return 0 ;;
+  esac
   die "cel run: $1 cannot start - $bin is a mise shim with no version behind it ($SHIM_ERR): its package is not installed under the active node. Nothing was stopped, claimed or launched. Fix: cel setup --agents $1 (or cel update), then run this again"
 }
 

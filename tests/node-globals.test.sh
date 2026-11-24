@@ -32,19 +32,24 @@ _ng_setup() {
   done
   ln -s ../lib/node_modules/@withgraphite/graphite-cli/graphite.js "$old/bin/graphite"
   # mise: as a shim (argv0 is the tool) it runs the tool only when the active
-  # node holds it; as itself it answers `which` and `reshim`.
+  # node holds it; as itself it answers `which` and `reshim`. While
+  # $NG_T/hang exists every call hangs (a wedged mise); from $NG_T/proj (a
+  # project whose own mise config selects a node without the tool) nothing
+  # resolves.
   cat > "$T/mise/mise" <<'SH'
 #!/usr/bin/env bash
 name="${0##*/}"
+[ ! -e "$NG_T/hang" ] || exec sleep 60
+active=1; [ "$PWD" != "$NG_T/proj" ] || active=0
 if [ "$name" != mise ]; then
-  [ -x "$NG_ACTIVE/bin/$name" ] && exec "$NG_ACTIVE/bin/$name" "$@"
+  [ "$active" = 1 ] && [ -x "$NG_ACTIVE/bin/$name" ] && exec "$NG_ACTIVE/bin/$name" "$@"
   echo "mise ERROR No version is set for shim: $name" >&2
   echo "Set a global default version with one of the following:" >&2
   exit 1
 fi
 printf 'mise %s\n' "$*" >> "$NG_T/log"
 case "$1" in
-  which) [ -x "$NG_ACTIVE/bin/$2" ] && { printf '%s\n' "$NG_ACTIVE/bin/$2"; exit 0; }
+  which) [ "$active" = 1 ] && [ -x "$NG_ACTIVE/bin/$2" ] && { printf '%s\n' "$NG_ACTIVE/bin/$2"; exit 0; }
          echo "mise ERROR $2 is a mise bin however it is not currently active." >&2; exit 1 ;;
   reshim) exit 0 ;;
 esac
@@ -211,7 +216,7 @@ test_doctor_names_a_dead_agent_shim_and_its_fix() {
   local out rc=0
   out="$(doctor_agent_bin_line pi 2>&1)" || rc=$?
   [ "$rc" != 0 ] || { echo "a dead agent shim left doctor green: $out"; return 1; }
-  assert_contains "$out" "pi: pi is a dead mise shim (No version is set for shim: pi)" || return 1
+  assert_contains "$out" "pi: pi is a dead mise shim (No version is set for shim: pi, checked in the global mise context from $HOME)" || return 1
   assert_contains "$out" "@earendil-works/pi-coding-agent 1.5.0 is installed under node 24.20.0 only" || return 1
   assert_contains "$out" "Fix: cel setup --agents pi (reinstalls @earendil-works/pi-coding-agent@1.5.0 under the active node)" || return 1
   _ng_working_pi 1.5.0
@@ -273,4 +278,103 @@ test_doctor_runs_the_agent_and_shim_checks() {
   source "$CEL_ROOT/lib/doctor.sh"
   assert_contains "$(declare -f cmd_doctor)" doctor_agent_bin_line || return 1
   assert_contains "$(declare -f cmd_doctor)" doctor_shim_lines
+}
+
+# A HUNG MISE IS "CANNOT TELL", NEVER "DEAD". Each shim check is bounded
+# (CEL_SHIM_CHECK_SECS, 5 by default, 1 here) and a timeout answers 2; after
+# one, later checks in the same shell answer at once.
+test_a_hung_mise_is_cannot_tell_within_the_bound() {
+  _ng_setup
+  : > "$T/hang"
+  export CEL_SHIM_CHECK_SECS=1
+  local rc=0 started took
+  started="$SECONDS"
+  shim_dead pi || rc=$?
+  took=$((SECONDS - started))
+  assert_eq "$rc" 2 || return 1
+  [ "$took" -le 4 ] || { echo "the check took ${took}s"; return 1; }
+  assert_eq "$SHIM_ERR" "mise did not answer within 1s" || return 1
+  started="$SECONDS"; rc=0
+  shim_dead gt || rc=$?
+  assert_eq "$rc" 2 || return 1
+  [ $((SECONDS - started)) -le 1 ] || { echo "a second check waited again"; return 1; }
+  rm -rf "$T"
+}
+
+test_a_hung_mise_never_triggers_a_reinstall() {
+  _ng_setup
+  : > "$T/hang"
+  export CEL_SHIM_CHECK_SECS=1
+  local out rc=0
+  out="$(install_agents 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; return 1; }
+  assert_contains "$out" "pi: could not tell whether pi runs (mise did not answer within 1s) - retained" || return 1
+  if grep -q '^npm install' "$LOG"; then echo "a hung mise triggered a reinstall"; return 1; fi
+  rm -rf "$T"
+}
+
+# cel update neither reinstalls nor runs the updater (which would only go
+# through the hung mise): a warning, and the agent is left as it is.
+test_a_hung_mise_skips_the_agent_in_update_with_a_warning() {
+  _ng_setup
+  export CEL_CONFIG_FILE="$T/config.yaml" CEL_UPDATE_DIR="$T/update" CEL_SHIM_CHECK_SECS=1
+  source "$NG_REPO/lib/update.sh"
+  : > "$T/hang"
+  local out rc=0 started="$SECONDS"
+  out="$(_update_agents 2>&1)" || rc=$?
+  [ $((SECONDS - started)) -le 6 ] || { echo "update waited $((SECONDS - started))s on a hung mise"; return 1; }
+  assert_eq "$rc" 0 || { echo "$out"; return 1; }
+  assert_contains "$out" "could not tell whether pi runs (mise did not answer within 1s)" || { echo "$out"; return 1; }
+  if grep -q '^npm install\|^pi update' "$LOG"; then echo "update acted on a hung mise"; cat "$LOG"; return 1; fi
+  rm -rf "$T"
+}
+
+test_a_hung_mise_never_refuses_a_launch() {
+  _ng_setup
+  source "$NG_REPO/lib/run.sh"
+  : > "$T/hang"
+  export CEL_SHIM_CHECK_SECS=1
+  local err rc=0
+  err="$( (_run_runtime_runnable pi "$T") 2>&1 >/dev/null)" || rc=$?
+  assert_eq "$rc" 0 || { echo "a hung mise refused the launch: $err"; return 1; }
+  assert_contains "$err" "could not tell whether pi runs (mise did not answer within 1s) - launching anyway" || return 1
+  rm -rf "$T"
+}
+
+test_a_hung_mise_is_a_doctor_warning_not_a_failure() {
+  _ng_setup
+  source "$NG_REPO/lib/doctor.sh"
+  : > "$T/hang"
+  export CEL_SHIM_CHECK_SECS=1
+  local out rc=0
+  out="$(doctor_agent_bin_line pi 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; return 1; }
+  assert_contains "$out" "pi: could not tell whether pi runs (mise did not answer within 1s)" || return 1
+  rc=0; out="$(doctor_shim_lines 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; return 1; }
+  assert_contains "$out" "mise shims not checked (mise did not answer within 1s)" || return 1
+  rm -rf "$T"
+}
+
+# WHICH DIRECTORY IS ASKED. Setup, update and doctor ask in the global mise
+# context ($HOME) whatever directory they run from - here a project whose own
+# mise config selects a node without pi - so a working pi is neither reported
+# dead nor reinstalled. cel run asks from the launch's own directory, where
+# the runtime really starts, and refuses there.
+test_setup_and_doctor_ask_the_global_context_and_cel_run_the_launch_dir() {
+  _ng_setup
+  source "$NG_REPO/lib/doctor.sh"
+  source "$NG_REPO/lib/run.sh"
+  _ng_working_pi 1.5.0
+  mkdir -p "$T/proj"
+  local out rc=0
+  out="$(cd "$T/proj" && doctor_agent_bin_line pi 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "doctor judged pi by the caller's project: $out"; return 1; }
+  out="$(cd "$T/proj" && install_agents 2>&1)" || { echo "$out"; return 1; }
+  assert_contains "$out" "retained" || return 1
+  if grep -q '^npm install' "$LOG"; then echo "setup reinstalled pi because of the caller's project"; return 1; fi
+  rc=0; out="$(cd "$T" && (_run_runtime_runnable pi "$T/proj") 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a launch into the project was not refused"; return 1; }
+  assert_contains "$out" "No version is set for shim: pi" || return 1
+  rm -rf "$T"
 }

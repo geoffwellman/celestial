@@ -2471,7 +2471,11 @@ release. `cel doctor` names every dead shim: an agent's or a plane npm tool's
 is a failure with `cel setup` as the fix; any other tool's (graphite's `gt`,
 for example) is a warning with the exact `npm install -g <package>@<version>`.
 `cel run` (and `--restart`) refuses a runtime whose bin is a dead shim before
-it stops the agent, claims its session or opens a terminal. Pinning node per
+it stops the agent, claims its session or opens a terminal. `cel setup`,
+`cel update` and `cel doctor` check in the global mise context (`$HOME`);
+`cel run` checks from the launch's own directory, where a workspace's mise
+config applies. Each check is bounded (5s, `CEL_SHIM_CHECK_SECS`): a mise
+that does not answer is a warning, never a refused launch or a reinstall. Pinning node per
 tool (mise's `npm:` backend, or a fixed node path) was not chosen: it would
 write the mise config that `cel update` leaves alone, bypass the integrity
 check `npm_tools` installs through, and split Pi from `pi update --self`, which

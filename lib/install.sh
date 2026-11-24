@@ -176,25 +176,38 @@ _install_agent_version() { # <agent>
 }
 
 # An agent whose bin is a dead mise shim is reinstalled with its own
-# installer under the active node; a working bin is never touched. 0 when the
-# bin is not a dead shim (or no longer is); 1 with the reason and the fix.
+# installer under the active node; a working bin is never touched. Asked, and
+# reinstalled, in the global mise context (shim_global_dir), so the answer
+# and the node `npm install -g` writes into do not depend on the directory
+# setup or update was run from. A check that timed out (shim_dead 2) is
+# warned about and left alone: a hung mise never triggers a reinstall. 0 when
+# the bin is not a dead shim (or no longer is); 1 with the reason and the
+# fix; 2 when it cannot be told (warned; the caller leaves the agent alone).
 install_agent_revive() { # <agent>
-  local a="$1" bin cmd version why
+  local a="$1" bin cmd version why g sd=0
+  g="$(shim_global_dir)"
   bin="$(agent_get "$a" bin)" || return
-  shim_dead "$bin" || return 0
+  shim_dead "$bin" "$g" || sd=$?
+  case "$sd" in
+    1) return 0 ;;
+    2) c_warn "$a: could not tell whether $bin runs ($SHIM_ERR) - left as it is"; return 2 ;;
+  esac
   why="$SHIM_ERR"
   cmd="$(agent_get "$a" install)" || return
   [ -n "$cmd" ] || { c_err "$a: $bin is a dead mise shim ($why) and $a declares no installer"; return 1; }
   version="$(_install_agent_version "$a")" || return
   c_warn "$a: $bin is a dead mise shim ($why) - reinstalling $version under the active node"
-  install_command "$a" "$cmd" "$version" \
+  ( cd "$g" && install_command "$a" "$cmd" "$version" ) \
     || { c_err "$a: reinstalling $version failed - fix the cause above, then run: cel setup --agents $a"; return 1; }
-  ! have mise || mise reshim >/dev/null 2>&1 || true
-  if ! have "$bin" || shim_dead "$bin"; then
-    c_err "$a: $bin still does not run after reinstalling ${SHIM_ERR:+($SHIM_ERR) }- run: cel setup --agents $a"
-    return 1
-  fi
-  c_ok "$a reinstalled ($version) under the active node"
+  ! have mise || ( cd "$g" && mise reshim ) >/dev/null 2>&1 || true
+  sd=0
+  have "$bin" && { shim_dead "$bin" "$g" || sd=$?; }
+  case "$sd" in
+    1) c_ok "$a reinstalled ($version) under the active node" ;;
+    2) c_warn "$a reinstalled ($version); could not tell whether $bin runs now ($SHIM_ERR)" ;;
+    *) c_err "$a: $bin still does not run after reinstalling ${SHIM_ERR:+($SHIM_ERR) }- run: cel setup --agents $a"
+       return 1 ;;
+  esac
 }
 
 install_agents() {
@@ -209,10 +222,14 @@ install_agents() {
     bin="$(agent_get "$a" bin)" || return
     cmd="$(agent_get "$a" install)" || return
     version="$(agent_get "$a" version)" || return
-    if have "$bin" && ! shim_dead "$bin"; then
-      c_ok "$a already installed (retained; setup does not enforce its version)"
-    elif have "$bin"; then
-      install_agent_revive "$a" || return
+    if have "$bin"; then
+      local sd=0
+      shim_dead "$bin" "$(shim_global_dir)" || sd=$?
+      case "$sd" in
+        1) c_ok "$a already installed (retained; setup does not enforce its version)" ;;
+        2) c_warn "$a: could not tell whether $bin runs ($SHIM_ERR) - retained" ;;
+        *) install_agent_revive "$a" || [ "$?" = 2 ] || return 1 ;;
+      esac
     else
       install_command "$a" "$cmd" "$version" || return
       have "$bin" || { c_err "$a still missing after installation"; return 1; }
