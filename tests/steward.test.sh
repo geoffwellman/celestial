@@ -3157,10 +3157,14 @@ test_regression_steward_tick_never_reads_the_retired_delegation_ledger() {
   rm -rf "$T"
 }
 
-# ---- a PR waiting on the owner is not a worker finding -----------------------
-# A red PR linked to an open `cel decide` question is blocked on the owner, not
-# on a worker, so it gets no nudge until the decision closes.
-_decision_pr_fixture() { # <decision-json-or-empty>
+# ---- a PR waiting on the owner is not nudged -----------------------------------
+# A PR linked to an open `cel decide` question (`--pr <repo>#<n>`) is blocked
+# on the owner, so NO steward nudge about it - approved, changes, red, no
+# ticket - goes out until the decision closes. An unlinked PR in the same repo
+# is nudged as ever.
+#   7 red, 9 approved, 11 changes requested, 12 no ticket: linked
+#   8 red, 10 approved: unlinked
+_decision_pr_fixture() {
   _orch_fixture
   mkdir -p "$T/bin"
   : > "$T/prompts"
@@ -3168,6 +3172,9 @@ _decision_pr_fixture() { # <decision-json-or-empty>
 #!/usr/bin/env bash
 printf '%s' '[{"number":7,"headRefName":"WG-1-x","headRefOid":"h7","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z","reviews":[]},
              {"number":9,"headRefName":"WG-3-z","headRefOid":"h9","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h9"}}]},
+             {"number":11,"headRefName":"WG-4-c","headRefOid":"h11","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h11"}}]},
+             {"number":12,"headRefName":"noticket","headRefOid":"h12","reviewDecision":"","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[]},
+             {"number":10,"headRefName":"WG-5-a","headRefOid":"h10","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h10"}}]},
              {"number":8,"headRefName":"WG-2-y","headRefOid":"h8","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z","reviews":[]}]'
 SH
   cat > "$T/bin/herdr" <<SH
@@ -3180,41 +3187,93 @@ exit 0
 SH
   chmod +x "$T/bin/gh" "$T/bin/herdr"
   source "$CEL_ROOT/lib/inbox.sh"
-  printf '%s\n' '{"id":"d1","ts":"2020-01-01T00:00:00+00:00","to":"owner","from":"bundle-orch","asker":"bundle-orch","kind":"decision","title":"top up the review bot account","options":[],"context":"x","blocks":"","prs":[{"ref":"widget#7"},{"ref":"widget#9"}]}' \
-    > "$(_inbox_file alpha)"
+  _decision_card alpha d1 '[{"ref":"widget#7"},{"ref":"widget#9"},{"ref":"widget#11"},{"ref":"widget#12"}]' > "$(_inbox_file alpha)"
+}
+_decision_card() { # <ws> <id> <prs-json>: an open owner decision, as `cel decide ask` records it
+  jq -nc --arg id "$2" --argjson prs "$3" '{id: $id, ts: "2020-01-01T00:00:00+00:00", to: "owner", from: "bundle-orch",
+    asker: "bundle-orch", kind: "decision", title: ("top up the review bot account " + $id), options: [], context: "x", blocks: "", prs: $prs}'
+}
+_decision_sweep_mail() {
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null 2>&1
+  cmd_inbox read --for bundle-orch --workspace alpha --all 2>/dev/null
 }
 
-test_red_pr_with_open_linked_decision_gets_no_nudge() {
+test_no_steward_nudge_of_any_kind_for_a_pr_linked_to_an_open_decision() {
   _decision_pr_fixture
-  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
-  local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all 2>/dev/null)"
-  assert_eq "$(printf '%s\n' "$mail" | grep -c 'PR #7 ' || true)" "0"
-  # an unlinked red PR is still a finding
+  local mail; mail="$(_decision_sweep_mail)"
+  local n; for n in 7 9 11 12; do
+    assert_eq "$(printf '%s\n' "$mail" | grep -c "PR #$n " || true)" "0" || { echo "PR #$n was nudged under an open decision"; rm -rf "$T"; return 1; }
+  done
+  # unlinked PRs in the same repo are still findings
   assert_contains "$mail" "PR #8 on widget has FAILING checks"
-  # an approval still needs actioning - the decision does not hide it
-  assert_contains "$mail" "PR #9 on widget is APPROVED"
+  assert_contains "$mail" "PR #10 on widget is APPROVED"
+  # and the held ones spent no dedup window: nothing recorded against them
+  # (the gh stub lists the same PRs for gadget, which no decision links)
+  assert_eq "$(grep -cE '^someone/widget#(7|9|11|12)-' "$T/state" || true)" "0"
+  assert_eq "$(grep -cE '^someone/gadget#(7|9|11|12)-' "$T/state")" "7"
   rm -rf "$T"
 }
 
-test_red_pr_is_nudged_again_once_its_decision_is_withdrawn() {
-  _decision_pr_fixture
-  printf '%s\n' '{"id":"r1","ts":"2020-01-02T00:00:00+00:00","kind":"resolution","ref":"d1","by":"bundle-orch","to":"owner","message":"withdrawn"}' \
-    >> "$(_inbox_file alpha)"
-  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
-  assert_contains "$(cmd_inbox read --for bundle-orch --workspace alpha --all 2>/dev/null)" "PR #7 on widget has FAILING checks"
-  rm -rf "$T"
+test_pr_nudges_resume_once_the_linked_decision_is_withdrawn_or_answered() {
+  local how
+  for how in withdrawn answered; do
+    _decision_pr_fixture
+    printf '%s\n' "{\"id\":\"r1\",\"ts\":\"2020-01-02T00:00:00+00:00\",\"kind\":\"resolution\",\"ref\":\"d1\",\"by\":\"bundle-orch\",\"to\":\"owner\",\"message\":\"$how\"}" \
+      >> "$(_inbox_file alpha)"
+    local mail; mail="$(_decision_sweep_mail)"
+    assert_contains "$mail" "PR #7 on widget has FAILING checks" || { rm -rf "$T"; return 1; }
+    assert_contains "$mail" "PR #9 on widget is APPROVED" || { rm -rf "$T"; return 1; }
+    assert_contains "$mail" "PR #11 on widget has changes requested" || { rm -rf "$T"; return 1; }
+    assert_contains "$mail" "PR #12 on widget (noticket) has no" || { rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
 }
 
-# Only the explicit --pr link counts, and only in the PR's own workspace: free
-# text naming a PR, or a link from another workspace, never silences it.
-test_red_pr_is_nudged_when_only_prose_or_another_workspace_names_it() {
+# Only the explicit --pr link counts: free text naming a PR never holds it.
+# The link may come from ANY workspace's open decision, in every form --pr
+# accepts, matched on the repo's identity (owner/name, case-insensitive): a
+# declared name resolves through ITS workspace's url, so another workspace's
+# bare `widget#7` - a repo it does not declare - names nothing here.
+test_a_decision_holds_a_pr_by_repo_identity_from_any_workspace() {
   _decision_pr_fixture
   printf '%s\n' '{"id":"d1","ts":"2020-01-01T00:00:00+00:00","to":"owner","from":"bundle-orch","asker":"bundle-orch","kind":"decision","title":"widget: see gadget#7","options":[],"context":"widget #7 of the other board","blocks":"widget#7"}' \
     > "$(_inbox_file alpha)"
-  printf '%s\n' '{"id":"d2","ts":"2020-01-01T00:00:00+00:00","to":"owner","from":"x","asker":"x","kind":"decision","title":"t","options":[],"context":"x","prs":[{"ref":"widget#7"}]}' \
-    > "$(_inbox_file beta)"
-  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
-  assert_contains "$(cmd_inbox read --for bundle-orch --workspace alpha --all 2>/dev/null)" "PR #7 on widget has FAILING checks"
+  mkdir -p "$T/beta"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
+  printf 'name: beta\nrepos:\n  - {name: wdg, url: "https://github.com/Someone/Widget.git"}\n' > "$T/beta/workspace.yaml"
+  _decision_card beta d2 '[{"ref":"widget#8"},{"ref":"someone/widget#7"},{"ref":"wdg#9"}]' > "$(_inbox_file beta)"
+  # a workspace the registry does not list yet still holds a mailbox of record
+  _decision_card gamma d3 '[{"ref":"git@github.com:SOMEONE/widget.git#11"},{"ref":"https://github.com/someone/widget#12"},{"ref":"someone/gadget#10"}]' \
+    > "$(_inbox_file gamma)"
+  local mail; mail="$(_decision_sweep_mail)"
+  local n; for n in 7 9 11 12; do
+    assert_eq "$(printf '%s\n' "$mail" | grep -c "PR #$n " || true)" "0" || { echo "PR #$n was not held"; rm -rf "$T"; return 1; }
+  done
+  # beta's bare widget#8 is not this widget; gadget#10 is another repo
+  assert_contains "$mail" "PR #8 on widget has FAILING checks"
+  assert_contains "$mail" "PR #10 on widget is APPROVED"
+  rm -rf "$T"
+}
+
+test_steward_pr_held_matches_the_repo_name_forms() {
+  _decision_pr_fixture
+  _decision_card alpha d1 '[{"ref":"widget#7"}]' > "$(_inbox_file alpha)"
+  _steward_held_prs_load
+  local wsdir="$T/alpha"
+  _steward_pr_held alpha "$wsdir" widget 7 || { echo "declared name"; rm -rf "$T"; return 1; }
+  _steward_pr_held alpha "$wsdir" widget 70 && { echo "70 is not 7"; rm -rf "$T"; return 1; }
+  _steward_pr_held alpha "$wsdir" gadget 7 && { echo "gadget is not widget"; rm -rf "$T"; return 1; }
+  # identities of one repo, each as a decision would write it
+  local id; for id in widget someone/widget Someone/Widget someone/widget.git git@github.com:someone/widget.git \
+      https://github.com/someone/widget https://github.com/someone/widget.git ssh://git@github.com/someone/widget.git; do
+    assert_eq "$(_steward_repo_id alpha "$wsdir" "$id")" "someone/widget" || { rm -rf "$T"; return 1; }
+  done
+  # Forgejo, plain http too (a host: http:// forge)
+  assert_eq "$(_steward_repo_id x "" git@forge.example:someone/Gizmo.git)" "someone/gizmo"
+  assert_eq "$(_steward_repo_id x "" http://forge.example/someone/gizmo)" "someone/gizmo"
+  assert_eq "$(_steward_repo_id x "" ssh://git@forge.example:2222/someone/gizmo.git)" "someone/gizmo"
+  # a bare name nobody declares is that workspace's own and nobody else's
+  assert_eq "$(_steward_repo_id beta "" widget)" "beta:widget"
   rm -rf "$T"
 }
 
