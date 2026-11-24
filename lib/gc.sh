@@ -23,16 +23,39 @@ _CEL_GC=1
 
 # WHOSE ACCOUNT ASKS ABOUT A CHECKOUT. ws_of_checkout names the
 # workspace a worktree belongs to, and a workspace with `github.user` must be asked about
-# as that account. A declared account that is not logged in makes the call
+# as that account; a clone outside every workspace (repos/<r> a symlink to it)
+# is the registering workspace's (_gc_clone_wsdir), and a clone two
+# workspaces with different accounts register is nobody's: the call fails. A declared account that is not logged in makes the call
 # fail, which every caller here already reads as UNKNOWN: kept, never closed.
 # Without a workspace it is plain gh - the box's (cel_gh_bin), never one the
 # caller's PATH offers.
 _gc_gh() { # <dir> <gh args...> - run in <dir>, as its workspace's account
-  local d="$1" w bin; shift
-  w="$(ws_of_checkout "$d")" || w=""
+  local d="$1" w bin rc=0; shift
+  if ! w="$(ws_of_checkout "$d")"; then
+    w="$(_gc_clone_wsdir "$d")" || rc=$?
+    [ "$rc" -ne 2 ] || return 1
+    [ "$rc" -eq 0 ] || w=""
+  fi
   if [ -n "$w" ]; then (cd "$d" && ws_gh "$w" "$@"); return; fi
   bin="$(cel_gh_bin)" || return 1
   (cd "$d" && cel_gh_run "$bin" "$@")
+}
+
+# The workspace that registers the clone <dir> is a checkout of, by the real
+# path of its repos/<r>. _GC_CLONES is the sweep's one reading of them. 2:
+# registered by workspaces declaring different GitHub accounts.
+_gc_clone_wsdir() { # <dir> -> wsdir, or fail (1 none, 2 ambiguous)
+  local c real cl ws r hit="" user="" u
+  c="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    && real="$(readlink -f -- "$(dirname "$c")" 2>/dev/null)" || return 1
+  while IFS=$'\t' read -r cl ws r; do
+    [ -n "$cl" ] && [ "$cl" = "$real" ] || continue
+    u="$(ws_github_user "$ws" 2>/dev/null)" || return 2
+    if [ -z "$hit" ]; then hit="$ws" user="$u"
+    elif [ "$u" != "$user" ]; then return 2; fi
+  done <<< "${_GC_CLONES-$(_gc_rc_clones)}"
+  [ -n "$hit" ] || return 1
+  printf '%s' "$hit"
 }
 
 _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
@@ -512,11 +535,11 @@ _gc_process_identity() { # <pid> <agents-json> <registry-names>
 # kept worktree meant a GC that could identify NOTHING printed the same line
 # as one with nothing to do - which is how the pi blindness above went
 # unnoticed for weeks.
-_GC_KEPT_REASONS=(busy symlink live unlanded open-pr no-pr unidentified refused stubborn)
+_GC_KEPT_REASONS=(owner "follow-main owned" claimed busy symlink live unlanded detached open-pr no-pr unidentified refused stale parent-missing stubborn)
 
 _gc_keep_reset() {
-  unset GC_KEPT GC_UNIDENTIFIED
-  declare -gA GC_KEPT=()
+  unset GC_KEPT GC_UNIDENTIFIED GC_OUTCOME
+  declare -gA GC_KEPT=() GC_OUTCOME=()
   declare -ga GC_UNIDENTIFIED=()
 }
 
@@ -525,6 +548,8 @@ _gc_keep() { # <reason> [dir]
   [ -n "${GC_KEPT[*]+set}" ] || _gc_keep_reset
   GC_KEPT["$r"]=$(( ${GC_KEPT["$r"]:-0} + 1 ))
   if [ "$r" = unidentified ] && [ -n "$d" ]; then GC_UNIDENTIFIED+=("$d"); fi
+  # What became of each worktree, for the per-repo lines (_gc_repo_report).
+  [ -z "${gc_row:-}" ] || GC_OUTCOME["$gc_row"]="$r"
   kept=$(( ${kept:-0} + 1 ))
   # A dry run says why, row by row: a bare total says nothing about which
   # worker is holding what.
@@ -564,6 +589,8 @@ _gc_kept_save() {
   for r in "${_GC_KEPT_REASONS[@]}"; do
     json="$(printf '%s' "$json" | jq --arg k "$r" --argjson n "${GC_KEPT[$r]:-0}" '.[$k] = $n')" || return 0
   done
+  json="$(printf '%s' "$json" | jq --argjson repos "${GC_REPOS_JSON:-[]}" --argjson at "$(date +%s)" \
+    --argjson dry "${dry:-0}" '.repos = $repos | .at = $at | .dry = ($dry == 1)')" || return 0
   mkdir -p "$(dirname "$f")" && tmp="$(mktemp "$f.tmp.XXXXXX")" || return 0
   printf '%s\n' "$json" > "$tmp" && mv -f -- "$tmp" "$f" || rm -f -- "$tmp"
   return 0
@@ -579,6 +606,23 @@ gc_doctor_line() { # the one line cel doctor prints, from the same renderer
     [[ "$n" =~ ^[0-9]+$ ]] && GC_KEPT["$r"]="$n"
   done
   _gc_kept_line doctor
+}
+
+# The last sweep's line per repo, as gc printed it, for cel doctor: how many
+# worktrees each registered clone has, what went and why the rest stayed.
+gc_doctor_repo_lines() {
+  local f at now obj when
+  f="$(_gc_kept_state)"
+  [ -r "$f" ] || return 0
+  at="$(jq -r '.at // empty | numbers | floor | tostring' "$f" 2>/dev/null)" || return 0
+  [[ "$at" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  when="last gc sweep $(( (now - at) / 60 ))m ago"
+  jq -e '.dry == true' "$f" >/dev/null 2>&1 && when="$when, a dry run"
+  while IFS= read -r obj; do
+    [ -n "$obj" ] && printf '%s: %s\n' "$when" "$(_gc_repo_render "$obj")"
+  done < <(jq -c '.repos // [] | .[]? | objects' "$f" 2>/dev/null)
+  return 0
 }
 
 # A zombie still has a /proc directory until its launcher waits for it, so
@@ -1869,6 +1913,306 @@ _gc_review_checkouts() { # <dry>; sets rc_removed rc_kib rc_fragment
   return 0
 }
 
+# EVERY REGISTERED REPO, WHEREVER ITS CLONE AND ITS WORKTREES LIVE. A
+# workspace's repos/<r> may be a symlink to a clone elsewhere (~/code/<r>), and
+# that clone's worktrees may sit beside it, in /tmp, anywhere - the herdr and
+# solo passes never look there. So every repo every registered workspace
+# declares is taken by the REAL path of its clone (one clone once, however
+# many workspaces name it), and every linked worktree `git worktree list`
+# records for it that no other pass owns is a candidate under the solo rules:
+# a MERGED or CLOSED PR for its exact head, clean and landed, no live process
+# and no agent. Before those rules, whatever a tree holds, these keep it - in
+# every pass, herdr and solo trees too, unless marked (repo):
+#   owner              it is under ~/orca/workspaces, the owner's own tool's;
+#                      gc never removes anything there (any pass, any record)
+#   follow-main owned  a local-* tree: a product's follow-main loop makes one
+#                      per main commit and retires them itself
+#   claimed            something else has it: it CONTAINS the owner root,
+#                      another worktree, a clone, a workspace or its
+#                      registered repos/<r>, or the review checkouts (ignored
+#                      files are not "dirty", so a remove would take them);
+#                      it IS a registered checkout; git has it locked; or
+#                      (repo) a pane or agent sits in it - all paths compared
+#                      as given and resolved, and an unreadable pane list
+#                      claims every repo tree
+#   detached           no branch: no PR can speak for its head
+# A record whose directory is gone is stale: `git worktree prune --expire`
+# clears it once its git admin files are _GC_PRUNE_GRACE old, and a dry run
+# names it. A stale record whose parent directory is missing too is kept (an
+# unmounted disk or share, a dangling symlink: the tree may come back), as is
+# an owner's. Prune clears every due record of a clone at once, so a due
+# record of either kind keeps all of that clone's.
+_GC_PRUNE_GRACE=7.days.ago
+_gc_owner_roots() { printf '%s\n' "$HOME/orca/workspaces"; }
+_gc_is_owner() { # <dir>
+  local root rr real
+  real="$(readlink -f -- "$1" 2>/dev/null)" || real="$1"
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    rr="$(readlink -f -- "$root" 2>/dev/null)" || rr="$root"
+    case "$1" in "$root"|"$root"/*|"$rr"|"$rr"/*) return 0;; esac
+    case "$real" in "$root"|"$root"/*|"$rr"|"$rr"/*) return 0;; esac
+  done < <(_gc_owner_roots)
+  return 1
+}
+_gc_is_follow_main() { case "${1##*/}" in local-?*) return 0;; esac; return 1; }
+
+_gc_paths_both() { # paths on stdin -> each as given and resolved, one per line
+  local p r
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    printf '%s\n' "$p"
+    r="$(realpath -m -- "$p" 2>/dev/null)" && [ "$r" != "$p" ] && printf '%s\n' "$r"
+  done
+  return 0
+}
+
+# 0 when <dir> (as given or resolved) is something else's: equal to or above a
+# registered checkout, strictly above any other path gc knows of. Reads
+# gc_checkouts/gc_inner from cmd_gc (_gc_repo_discover). Every row.
+_gc_contains_other() { # <dir>
+  local d="$1" r p x
+  r="$(realpath -m -- "$d" 2>/dev/null)" || r="$d"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    for x in "$d" "$r"; do case "$p" in "$x"|"$x"/*) return 0;; esac; done
+  done <<< "${gc_checkouts:-}"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    for x in "$d" "$r"; do case "$p" in "$x"/*) return 0;; esac; done
+  done <<< "${gc_inner:-}"
+  return 1
+}
+
+# 0 when a pane or agent sits in <dir>, or nobody can say. Reads
+# gc_claims/gc_claims_known from cmd_gc. Repo rows.
+_gc_occupied() { # <dir>
+  local d="$1" r p x
+  [ "${gc_claims_known:-0}" = 1 ] || return 0
+  r="$(realpath -m -- "$d" 2>/dev/null)" || r="$d"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    for x in "$d" "$r"; do case "$p" in "$x"|"$x"/*) return 0;; esac; done
+  done <<< "${gc_claims:-}"
+  return 1
+}
+
+# Every LINKED worktree git records for a clone (the first record is the main
+# working tree, the clone itself) as "<path><US><locked 0|1><US><stale 0|1>",
+# each NUL-terminated, then "ok". No "ok": git could not say - which is not a
+# clone with no worktrees.
+_gc_repo_list() { # <common-git-dir>
+  local -a f=()
+  local x path="" locked=0 stale=0 n=0
+  mapfile -d '' -t f < <(git --git-dir="$1" worktree list --porcelain -z 2>/dev/null && printf 'ok\0')
+  [ "${#f[@]}" -gt 0 ] && [ "${f[-1]}" = ok ] || return 1
+  unset 'f[-1]'
+  for x in "${f[@]}" ""; do
+    case "$x" in
+      "worktree "*) path="${x#worktree }" locked=0 stale=0 ;;
+      locked|"locked "*) locked=1 ;;
+      prunable|"prunable "*) stale=1 ;;
+      "") [ -n "$path" ] || continue
+          n=$((n + 1))
+          [ "$n" -eq 1 ] || printf '%s\x1f%s\x1f%s\0' "$path" "$locked" "$stale"
+          path="" ;;
+    esac
+  done
+  printf 'ok\0'
+}
+
+_gc_repo_clones() { # reads _GC_CLONES -> "<common git dir><TAB><ws>/<repo><TAB><clone>" per clone, once
+  local cl wsdir r c label seen=$'\n'
+  while IFS=$'\t' read -r cl wsdir r; do
+    [ -n "$cl" ] || continue
+    c="$(git -C "$cl" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+      && c="$(readlink -f -- "$c" 2>/dev/null)" || c=""
+    label="$(ws_name "$wsdir" 2>/dev/null)" || label=""
+    label="${label:-${wsdir##*/}}/$r"
+    if [ -n "$c" ]; then
+      case "$seen" in *$'\n'"$c"$'\n'*) continue;; esac
+      seen="$seen$c"$'\n'
+    fi
+    printf '%s\t%s\t%s\n' "$c" "$label" "$cl"
+  done <<< "${_GC_CLONES:-}"
+}
+
+# Appends every repo worktree no other pass owns to cmd_gc's candidates, and
+# records each repo's worktrees as "<kind><US><path><US><outcome key>" lines:
+# row (this pass), seen (the herdr or solo pass's, under its dir), review (the
+# review-checkout pass's) or stale. Fills the claim lists _gc_contains_other
+# and _gc_occupied read.
+_gc_repo_discover() { # reads/writes cmd_gc's candidates, managed, repo_*, gc_*
+  local -A seen=()
+  local -a recs=()
+  local d r rd common label clone rec p lk st i kind key cw all="" cl wsdir rp ws
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    seen["$d"]="$d"
+    r="$(readlink -f -- "$d" 2>/dev/null)" && seen["$r"]="$d"
+  done < <(printf '%s' "$candidates" | jq -r '.[].dir'; printf '%s' "$managed")
+  rd="$(readlink -f -- "$(_run_review_dir)" 2>/dev/null)" || rd=""
+  # Registered checkouts: each clone, by its real path and as repos/<r>.
+  gc_checkouts="$(while IFS=$'\t' read -r cl wsdir rp; do
+      [ -n "$cl" ] && printf '%s\n%s\n' "$cl" "$wsdir/repos/$rp"
+    done <<< "${_GC_CLONES:-}" | _gc_paths_both)"
+  gc_claims="" gc_claims_known=0
+  if [ "${all_panes_ok:-0}" = 1 ] \
+    && cw="$(printf '%s' "$all_panes" | jq -r '.result.panes[]?.cwd | strings')" \
+    && gc_claims="$cw" \
+    && cw="$(printf '%s' "$agents" | jq -r '.result.agents[]?.cwd | strings')"; then
+    gc_claims="$(printf '%s\n%s\n' "$gc_claims" "$cw" | _gc_paths_both)" gc_claims_known=1
+  fi
+  while IFS=$'\t' read -r common label clone; do
+    [ -n "$label" ] || continue
+    recs=()
+    [ -z "$common" ] || mapfile -d '' -t recs < <(_gc_repo_list "$common")
+    if [ "${#recs[@]}" -eq 0 ] || [ "${recs[-1]}" != ok ]; then
+      c_warn "$label: cannot list the worktrees of $clone - none of them looked at"
+      continue
+    fi
+    unset 'recs[-1]'
+    i="${#repo_label[@]}"
+    repo_label+=("$label") repo_clone+=("$clone") repo_common+=("$common") repo_wts+=("")
+    for rec in "${recs[@]}"; do
+      IFS=$'\x1f' read -r p lk st <<< "$rec"
+      all="$all$p"$'\n'
+      r="$(readlink -f -- "$p" 2>/dev/null)" || r="$p"
+      key="$p"
+      if [ "$st" = 1 ]; then kind=stale
+      elif [ -n "${seen[$p]+x}" ]; then kind=seen key="${seen[$p]}"
+      elif [ -n "${seen[$r]+x}" ]; then kind=seen key="${seen[$r]}"
+      elif [ -n "$rd" ] && [[ "$r" == "$rd"/* ]]; then kind=review
+      else
+        kind=row; seen["$p"]="$p"; seen["$r"]="$p"
+        candidates="$(printf '%s' "$candidates" | jq --arg d "$p" '. + [{workspace:"", dir:$d, solo:true, repo:true}]')"
+      fi
+      repo_wts[i]+="$kind"$'\x1f'"$p"$'\x1f'"$key"$'\n'
+    done
+  done < <(_gc_repo_clones)
+  # What no tree may contain: every other worktree and candidate, the owner
+  # roots, the review checkouts and every registered workspace.
+  gc_inner="$( { printf '%s' "$all"; printf '%s' "$candidates" | jq -r '.[].dir'; printf '%s' "$managed"
+      _gc_owner_roots; _run_review_dir; printf '\n'
+      while IFS= read -r ws; do [ -z "$ws" ] || registry_path "$ws" 2>/dev/null; printf '\n'; done < <(registry_names 2>/dev/null)
+    } | _gc_paths_both)"
+  return 0
+}
+
+# What `git worktree prune --expire` would clear in a clone, by recorded path,
+# one per line; a record whose path git does not say is "?<id>".
+_gc_prune_due() { # <common-git-dir>
+  local out line id g
+  out="$(git --git-dir="$1" worktree prune -n -v --expire "$_GC_PRUNE_GRACE" 2>&1)" || return 1
+  while IFS= read -r line; do
+    case "$line" in "Removing worktrees/"*) ;; *) continue;; esac
+    id="${line#Removing worktrees/}"; id="${id%%: *}"
+    if g="$(cat -- "$1/worktrees/$id/gitdir" 2>/dev/null)" && [ -n "$g" ]; then printf '%s\n' "${g%/.git}"
+    else printf '?%s\n' "$id"; fi
+  done <<< "$out"
+  return 0
+}
+_gc_prune_held() { # <due list> -> 0 when a due record is an owner's, lost its parent, or is unnamed
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in "?"*) return 0;; esac
+    _gc_is_owner "$p" && return 0
+    [ -d "$(dirname -- "$p")" ] || return 0
+  done <<< "$1"
+  return 1
+}
+
+# Stale records go with `git worktree prune --expire`, which re-checks each
+# itself, and clears every due record of a clone at once - so what is due is
+# asked of git right before, and a due record that must stay keeps them all.
+# A record counts as pruned only once git no longer lists it.
+_gc_repo_prune() { # reads cmd_gc's dry and repo_*; sets pruned
+  local i kind p key lk st cwd gc_row rec due
+  local -a stale=() recs=()
+  local -A listed=() isdue=()
+  pruned=0
+  for i in "${!repo_common[@]}"; do
+    stale=()
+    while IFS=$'\x1f' read -r kind p key; do
+      [ "$kind" = stale ] || continue
+      cwd="$p" gc_row="$p"
+      if _gc_is_owner "$p"; then _gc_keep owner
+      elif [ ! -d "$(dirname -- "$p")" ]; then _gc_keep parent-missing
+      else stale+=("$p"); fi
+    done <<< "${repo_wts[$i]}"
+    [ "${#stale[@]}" -gt 0 ] || continue
+    if ! due="$(_gc_prune_due "${repo_common[$i]}")" || _gc_prune_held "$due"; then
+      c_warn "${repo_label[$i]}: ${#stale[@]} stale worktree record(s) kept - prune would also clear an owner's record or one whose parent directory is missing (or git cannot say)"
+      for p in "${stale[@]}"; do cwd="$p" gc_row="$p"; _gc_keep stale; done
+      continue
+    fi
+    isdue=()
+    while IFS= read -r p; do [ -z "$p" ] || isdue["$p"]=1; done <<< "$due"
+    if [ "$dry" -eq 1 ]; then
+      for p in "${stale[@]}"; do
+        if [ -n "${isdue[$p]+x}" ]; then printf '  would prune stale entry %s\n' "$p"; GC_OUTCOME["$p"]=pruned; pruned=$((pruned + 1))
+        else cwd="$p" gc_row="$p"; _gc_keep stale; fi   # younger than the grace
+      done
+      continue
+    fi
+    [ "${#isdue[@]}" -eq 0 ] || git --git-dir="${repo_common[$i]}" worktree prune --expire "$_GC_PRUNE_GRACE" 2>/dev/null \
+      || c_warn "${repo_label[$i]}: git worktree prune failed"
+    recs=() listed=()
+    mapfile -d '' -t recs < <(_gc_repo_list "${repo_common[$i]}")
+    if [ "${#recs[@]}" -gt 0 ] && [ "${recs[-1]}" = ok ]; then
+      unset 'recs[-1]'
+      for rec in "${recs[@]}"; do IFS=$'\x1f' read -r p lk st <<< "$rec"; listed["$p"]=1; done
+    else
+      for p in "${stale[@]}"; do listed["$p"]=1; done   # cannot tell: none counted
+    fi
+    for p in "${stale[@]}"; do
+      if [ -n "${listed[$p]+x}" ]; then cwd="$p" gc_row="$p"; _gc_keep stale
+      else GC_OUTCOME["$p"]=pruned; pruned=$((pruned + 1)); c_ok "pruned stale worktree record $p"; fi
+    done
+  done
+}
+
+_gc_repo_render() { # <repo json> -> its one line
+  printf '%s' "$1" | jq -r '
+    (if .dry then "would be " else "" end) as $w
+    | "\(.label) (\(.clone)): \(.total) worktree\(if .total == 1 then "" else "s" end), \(.removed) \($w)removed"
+      + (if .pruned > 0 then ", \(.pruned) stale entr\(if .pruned == 1 then "y" else "ies" end) \($w)pruned" else "" end)
+      + (if .review > 0 then ", \(.review) left to the review-checkout pass" else "" end)
+      + (if (.kept | length) > 0 then "; kept " + ([.kept[] | "\(.n) \(.r)"] | join(", ")) else "" end)'
+}
+
+# One line per repo with any worktree besides its clone: how many, what went,
+# and why each of the rest stayed - and the same, as JSON, for cel doctor.
+_gc_repo_report() { # reads cmd_gc's dry and repo_*; sets GC_REPOS_JSON
+  local i kind p key o obj r total kept none=0
+  local -A n=()
+  GC_REPOS_JSON='[]'
+  for i in "${!repo_common[@]}"; do
+    n=() total=0
+    while IFS=$'\x1f' read -r kind p key; do
+      [ -n "$kind" ] || continue
+      total=$((total + 1))
+      if [ "$kind" = review ]; then o=review; else o="${GC_OUTCOME[$key]:-unknown}"; fi
+      n["$o"]=$(( ${n["$o"]:-0} + 1 ))
+    done <<< "${repo_wts[$i]}"
+    [ "$total" -gt 0 ] || { none=$((none + 1)); continue; }
+    kept='[]'
+    for r in "${_GC_KEPT_REASONS[@]}" unknown; do
+      [ "${n["$r"]:-0}" -gt 0 ] || continue
+      kept="$(printf '%s' "$kept" | jq -c --arg r "$r" --argjson n "${n["$r"]}" '. + [{r:$r, n:$n}]')"
+    done
+    obj="$(jq -cn --arg l "${repo_label[$i]}" --arg c "${repo_clone[$i]}" --argjson t "$total" \
+      --argjson rm "${n[removed]:-0}" --argjson pr "${n[pruned]:-0}" --argjson rv "${n[review]:-0}" \
+      --argjson k "$kept" --argjson dry "$dry" \
+      '{label:$l, clone:$c, total:$t, removed:$rm, pruned:$pr, review:$rv, kept:$k, dry:($dry == 1)}')"
+    GC_REPOS_JSON="$(printf '%s' "$GC_REPOS_JSON" | jq -c --argjson o "$obj" '. + [$o]')"
+    printf 'gc: %s\n' "$(_gc_repo_render "$obj")"
+  done
+  [ "$none" -eq 0 ] || printf 'gc: %d more registered repo(s) with no worktree besides the clone\n' "$none"
+  return 0
+}
+
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
   local reap_hours="" dry=0 orphans=0 box=0
   while [ $# -gt 0 ]; do
@@ -1915,7 +2259,10 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
   local removed=0 reaped=0 kept=0 reviewers_closed=0 managed=$'\n' candidates='[]'
+  local gc_row="" gc_claims="" gc_claims_known=0 gc_checkouts="" gc_inner="" all_panes_ok=0 pruned=0
+  local -a repo_label=() repo_clone=() repo_common=() repo_wts=()
   _gc_keep_reset; _gc_cwd_reset
+  _GC_CLONES="$(_gc_rc_clones)"
   # NEVER SILENT: announce the sweep up front, so a slow run is
   # distinguishable from a hung one.
   printf 'gc: sweeping %d workspace(s)%s\n' "$(printf '%s\n' "$names" | grep -c . || true)" \
@@ -1925,6 +2272,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   local all_panes idle_closed=0
   if all_panes="$(lock_spawn "${lock_fd:-}" herdr pane list 2>/dev/null)" \
     && printf '%s' "$all_panes" | jq -e '.result.panes | type == "array"' >/dev/null; then
+    all_panes_ok=1
     _gc_idle_panes "$dry" "$all_panes"
   else
     c_warn "pane list unavailable - empty panes kept"
@@ -1938,7 +2286,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     cwd="$(printf '%s' "$panes" | jq -r '.result.panes[0].cwd')"
     case "$cwd" in "$HOME"/.herdr/worktrees/*) ;; *) continue;; esac
     managed="$managed$cwd"$'\n'
-    _gc_panes_settled "$panes" || { _gc_keep busy; continue; }
+    _gc_panes_settled "$panes" || { gc_row="$cwd"; _gc_keep busy; gc_row=""; continue; }
     candidates="$(printf '%s' "$candidates" | jq --arg w "$ws_id" --arg d "$cwd" '. + [{workspace:$w, dir:$d}]')"
   done <<< "$ids"
   local d
@@ -1960,11 +2308,21 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
       done < <(ws_solo_worktrees "$wsdir" "$sp")
     done
   done <<< "$names"
+  # EVERY OTHER WORKTREE OF EVERY REGISTERED REPO, wherever it lives (above
+  # _gc_owner_roots).
+  _gc_repo_discover
 
+  local solo_wt repo_wt
   while IFS= read -r row; do
-    cwd="$(printf '%s' "$row" | jq -r .dir)"
-    ws_id="$(printf '%s' "$row" | jq -r .workspace)"
-    local solo_wt; solo_wt="$(printf '%s' "$row" | jq -r '.solo // false')"
+    IFS=$'\x1f' read -r cwd ws_id solo_wt repo_wt < <(printf '%s' "$row" | jq -r \
+      '[.dir, .workspace, (.solo // false), (.repo // false)] | map(tostring) | join("\u001f")')
+    gc_row="$cwd"
+    # Before any other rule, whatever the tree holds and whichever pass found
+    # it: the owner's, follow-main's, and what something else claims.
+    if _gc_is_owner "$cwd"; then _gc_keep owner; continue; fi
+    if _gc_is_follow_main "$cwd"; then _gc_keep "follow-main owned"; continue; fi
+    if _gc_contains_other "$cwd"; then _gc_keep claimed; continue; fi
+    if [ "$repo_wt" = true ] && _gc_occupied "$cwd"; then _gc_keep claimed; continue; fi
     [ "$(readlink -f "$cwd" 2>/dev/null)" = "$cwd" ] || { _gc_keep symlink; continue; }
     if [ -z "$ws_id" ] && _gc_has_process "$cwd"; then _gc_keep live; continue; fi
     # No force removal: Git/herdr must still refuse newly dirty work. Only
@@ -1973,6 +2331,9 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     gitdir="$(git -C "$cwd" rev-parse --absolute-git-dir 2>/dev/null)" \
       && common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
       && [ "$gitdir" != "$common" ] || { _gc_keep unlanded; continue; }
+    # A lock is someone's claim, whatever would do the removing.
+    if [ -e "$gitdir/locked" ]; then _gc_keep claimed; continue; fi
+    if ! git -C "$cwd" symbolic-ref --quiet HEAD >/dev/null 2>&1; then _gc_keep detached; continue; fi
     if [ "$solo_wt" = true ]; then state="$(_gc_solo_pr_state "$cwd")"; else state="$(_gc_pr_state "$cwd")"; fi
     case "$state" in MERGED|CLOSED|NONE) ;; *) _gc_keep open-pr; continue;; esac
     [ "$solo_wt" != true ] || [ "$state" != NONE ] || { _gc_keep no-pr; continue; }
@@ -2000,8 +2361,11 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
         || { c_warn "$cwd: worktree remove refused"; _gc_keep refused; continue; }
       c_ok "removed orphan $cwd"
     fi
-    removed=$((removed+1))
+    removed=$((removed+1)) GC_OUTCOME["$cwd"]=removed
   done < <(printf '%s' "$candidates" | jq -c '.[]')
+  gc_row=""
+  _gc_repo_prune
+  _gc_repo_report
   [ -z "$reap_hours" ] || _gc_reap "$reap_hours" "$dry" "$agents" "$names"
   # THE REVIEWERS, which no pass here ever looked at: a reviewer runs in the
   # orchestrator's own checkout, so the worktree filter above skips it, and
@@ -2017,8 +2381,10 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   # behind for another fortnight. `cel gc` is unchanged without --box.
   local box_line="" box_rc=0
   if [ "$box" -eq 1 ]; then box_sweep "$dry" || box_rc=$?; box_line="$(box_summary_fragment)"; fi
-  printf 'gc: %d worktrees removed, %d reviewers closed, %d agents reaped, %d kept%s%s%s%s\n' \
-    "$removed" "$reviewers_closed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$rc_fragment" "$box_line" \
+  local stale_fragment=""
+  [ "$pruned" -eq 0 ] || stale_fragment=", $pruned stale worktree records $([ "$dry" -eq 0 ] || printf 'would be ')pruned"
+  printf 'gc: %d worktrees removed, %d reviewers closed, %d agents reaped, %d kept%s%s%s%s%s\n' \
+    "$removed" "$reviewers_closed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$stale_fragment" "$rc_fragment" "$box_line" \
     "$([ "$dry" -eq 1 ] && printf ' (dry run)')"
   # A BLIND GC MUST NOT LOOK LIKE AN IDLE ONE. Naming the directories is the
   # difference between "nothing to do" and "I cannot see anything".
