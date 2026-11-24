@@ -36,33 +36,76 @@ die()    { c_err "$*"; exit 1; }
 # every later check from that directory in the same command answers 2 at
 # once, so a doctor over many shims waits for one bound, not one per shim.
 # Another directory is still asked, and a hung `<shim> --version` is that
-# one shim's "cannot tell" only. The record is a file per command (see
-# _shim_hung_file), so it holds across the $(...) subshells callers use.
+# one shim's "cannot tell" only.
+# THE RECORD IS PRIVATE. It lives in a directory of this command's own,
+# made by `mktemp -d` (mode 0700, an unguessable name) under XDG_RUNTIME_DIR
+# when that is a directory this user owns, else under TMPDIR - never a fixed
+# name in a shared /tmp, which another user could create first to fake a
+# hang or turn the append into a write elsewhere. Before every read and
+# append the directory must still be this user's and not a symlink, and the
+# record file not a symlink; when that fails nothing is read or written and
+# the check answers 2 (cannot tell). Only a command's own top-level shell
+# opens one (shim_record_open: doctor, setup, update open it up front, and
+# the first check in that shell does too), so the $(...) subshells it runs
+# share it. A subshell never opens one: it could not remove it at exit
+# without clobbering an EXIT trap it inherits, so its checks run unrecorded.
+# The directory goes when the shell that opened it exits (an EXIT trap
+# chained ahead of the one it had) or at shim_record_close; one left by a
+# shell that died, or whose EXIT trap was later replaced, is removed by the
+# next open.
 SHIM_ERR=""
-_shim_hung_file() { # -> this command's record: named by its PID and that PID's start
-  local s; s="$(cat "/proc/$$/stat" 2>/dev/null)" || s=""
+_SHIM_HUNG_DIR="" _SHIM_HUNG_OWNER=""
+_shim_pid_start() { # <pid> -> its start time (/proc stat field 22)
+  local s; s="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
   s="${s##*) }"; set -- $s
-  printf '%s/cel-shim-hung.%s.%s' "${TMPDIR:-/tmp}" "$$" "${20:-0}"
+  printf '%s' "${20:-}"
 }
-_shim_hung_get() { # <dir> -> 0, SHIM_ERR set, when mise hung there in this command
-  local f d m; f="$(_shim_hung_file)"
-  [ -f "$f" ] || return 1
+_shim_private_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ]; }
+_shim_record_ok() { # the open record directory is still this user's, its file no symlink
+  [ -n "$_SHIM_HUNG_DIR" ] && _shim_private_dir "$_SHIM_HUNG_DIR" && [ ! -L "$_SHIM_HUNG_DIR/hung" ]
+}
+shim_record_open() { # 0 with a private record open; 1 when none could be made (checks run unrecorded)
+  [ -z "$_SHIM_HUNG_DIR" ] || return 0
+  [ "$BASHPID" = "$$" ] || return 1
+  local base d g rest pid start
+  base="${TMPDIR:-/tmp}"
+  ! _shim_private_dir "${XDG_RUNTIME_DIR:-/nonexistent}" || base="$XDG_RUNTIME_DIR"
+  # what shells that died left behind, and the old fixed-name records: ours only
+  for g in "$base"/cel-shim.*.*.* "${TMPDIR:-/tmp}"/cel-shim-hung.*; do
+    [ -O "$g" ] && [ ! -L "$g" ] || continue
+    case "${g##*/}" in
+      cel-shim-hung.*) [ -f "$g" ] && rm -f -- "$g" ;;
+      *) rest="${g##*/cel-shim.}"; pid="${rest%%.*}"; rest="${rest#*.}"; start="${rest%%.*}"
+         [ "$(_shim_pid_start "$pid")" = "$start" ] || { [ -d "$g" ] && rm -rf -- "$g"; } ;;
+    esac
+  done 2>/dev/null
+  # $$, never $BASHPID inside $(...): that would name the substitution's subshell
+  start="$(_shim_pid_start "$$")" || start=0
+  d="$(umask 077; mktemp -d "$base/cel-shim.$$.$start.XXXXXX" 2>/dev/null)" || return 1
+  chmod 700 -- "$d" 2>/dev/null || true
+  _shim_private_dir "$d" || return 1
+  _SHIM_HUNG_DIR="$d" _SHIM_HUNG_OWNER="$BASHPID"
+  # removed when this shell exits, ahead of any EXIT trap it already had
+  local -a prev=()
+  eval "prev=($(trap -p EXIT))"
+  trap "shim_record_close; ${prev[2]:-}" EXIT
+}
+shim_record_close() { # only the shell that opened it removes it
+  [ -n "$_SHIM_HUNG_DIR" ] && [ "$BASHPID" = "$_SHIM_HUNG_OWNER" ] || return 0
+  ! _shim_private_dir "$_SHIM_HUNG_DIR" || rm -rf -- "$_SHIM_HUNG_DIR"
+  _SHIM_HUNG_DIR="" _SHIM_HUNG_OWNER=""
+}
+_shim_hung_get() { # <dir> -> 0 hung there (SHIM_ERR set), 1 not recorded
+  local d m
+  [ -f "$_SHIM_HUNG_DIR/hung" ] || return 1
   while IFS=$'\t' read -r d m; do
     [ "$d" = "$1" ] && { SHIM_ERR="$m"; return 0; }
-  done < "$f"
+  done < "$_SHIM_HUNG_DIR/hung"
   return 1
 }
-_shim_hung_set() { # <dir> <reason>; records of commands that have ended go
-  local key="$1" reason="$2" f g rest pid start s
-  f="$(_shim_hung_file)"
-  for g in "${TMPDIR:-/tmp}"/cel-shim-hung.*.*; do
-    [ -O "$g" ] && [ "$g" != "$f" ] || continue
-    rest="${g##*/cel-shim-hung.}"; pid="${rest%%.*}"; start="${rest#*.}"
-    s="$(cat "/proc/$pid/stat" 2>/dev/null)" || s=""
-    s="${s##*) }"; set -- $s
-    [ "${20:-}" = "$start" ] || rm -f -- "$g"
-  done
-  printf '%s\t%s\n' "$key" "$reason" >> "$f"
+_shim_hung_set() { # <dir> <reason>; nothing is written unless the record is private
+  _shim_record_ok || return 0
+  printf '%s\t%s\n' "$1" "$2" >> "$_SHIM_HUNG_DIR/hung"
 }
 _shim_bound_reason() { # <what> <rc> <secs>
   case "$2" in
@@ -81,7 +124,11 @@ shim_dead() { # <bin> [dir] -> 0 dead, 1 not dead, 2 cannot tell (timed out or k
   elif [[ "$path" = */mise/shims/* ]] && have mise; then mise=mise
   else return 1; fi
   key="$(cd "$dir" 2>/dev/null && pwd -P)" || key="$dir"
-  _shim_hung_get "$key" && return 2
+  shim_record_open || true
+  if [ -n "$_SHIM_HUNG_DIR" ]; then
+    _shim_record_ok || { SHIM_ERR="the shim-check record $_SHIM_HUNG_DIR is not a private directory of this user - nothing read or written"; return 2; }
+    _shim_hung_get "$key" && return 2
+  fi
   local -a bound=()
   ! have timeout || bound=(timeout -k 1 "$secs")
   ( cd "$dir" 2>/dev/null; exec ${bound[@]+"${bound[@]}"} "$mise" which "${path##*/}" ) >/dev/null 2>&1 </dev/null || rc=$?

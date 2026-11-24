@@ -522,6 +522,8 @@ cmd_setup() {
   done
   install_base || return
   export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+  # one private shim-check record for the whole run (lib/common.sh)
+  shim_record_open || true
   install_agents "$agents" || return
   link_all || return
   herdr_integrations || return

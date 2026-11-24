@@ -498,6 +498,8 @@ _update_agents_rollback() {
 # by "already current".
 _update_components() {
   local rc=0
+  # one private shim-check record for the whole run (lib/common.sh)
+  shim_record_open || true
   _update_agents || rc=1
   _update_pi_extensions || rc=1
   _update_pi_mcp || rc=1
