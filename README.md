@@ -1517,11 +1517,13 @@ losing messages.
   The worktree pass covers every repo a registered workspace declares, by the
   real path of its clone (`repos/<name>` may be a symlink to a clone
   elsewhere), and every worktree git records for it, wherever it lives; it
-  prunes records whose directory is gone. It never removes anything under
-  `~/orca/workspaces` (`owner`), a follow-main `local-*` tree (`follow-main
-  owned`), or a worktree something else claims (locked, a registered
-  checkout, a pane or agent in it). `cel gc` prints, and `cel doctor` repeats
-  from the last sweep, one line per repo: worktrees, removed, kept by reason.
+  prunes records whose directory has been gone a week, never one whose parent
+  directory is missing too (an unmounted disk). It never removes anything
+  under `~/orca/workspaces` (`owner`), a follow-main `local-*` tree
+  (`follow-main owned`), or a worktree something else claims (locked, a
+  registered checkout, holding another tree or checkout, a pane or agent in
+  it). `cel gc` prints, and `cel doctor` repeats from the last sweep, one line
+  per repo: worktrees, removed, kept by reason.
 - **`cel box space`** / **`cel gc --box`** — the box is a resource the factory
   spends. `cel box space` measures what is large, what of it is reclaimable,
   and which of three classes it is in: **ours** (worktrees, `~/.cache/cel`),
