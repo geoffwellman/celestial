@@ -145,3 +145,27 @@ test_steward_nudges_a_solo_agent_once_per_ready_head() {
   assert_eq "$(grep -c . "$T/mail")" 2
   rm -rf "$T"
 }
+
+# A ready PR linked to an open owner decision (`cel decide ask --pr`) waits on
+# the owner: no "land it" while the question is open, and the nudge for that
+# same head goes out once it is withdrawn. An unlinked ready PR is told as ever.
+test_steward_holds_land_it_for_a_pr_linked_to_an_open_decision() {
+  source "$CEL_ROOT/lib/steward.sh"
+  _sv_ws
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"; registry_add demo "$T" ""
+  mkdir -p "$CEL_INBOX_DIR"
+  CEL_STEWARD_STATE="$T/state" _STEWARD_STATE="$T/state"
+  solo_ready_prs() { [ "$2" = bundle ] && printf 'widget\t7\t%s\nwidget\t8\t%s\n' "$H" "$H"; }
+  cmd_inbox() { printf '%s\n' "$*" >> "$T/mail"; }
+  printf '%s\n' '{"id":"d1","ts":"2026-11-08T00:00:00+00:00","to":"owner","from":"bundle-orch","asker":"bundle-orch","kind":"decision","title":"which plan","options":[],"context":"x","blocks":"","prs":[{"ref":"someone/widget#7"}]}' \
+    > "$CEL_INBOX_DIR/demo.jsonl"
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c 'widget#7' "$T/mail" || true)" 0 || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/mail")" "cel solo land widget#8" || { rm -rf "$T"; return 1; }
+  printf '%s\n' '{"id":"r1","ts":"2026-11-08T01:00:00+00:00","kind":"resolution","ref":"d1","by":"bundle-orch","to":"owner","message":"withdrawn"}' \
+    >> "$CEL_INBOX_DIR/demo.jsonl"
+  _steward_solo_sweep >/dev/null
+  assert_contains "$(cat "$T/mail")" "cel solo land widget#7"
+  assert_eq "$(grep -c 'widget#8' "$T/mail")" 1   # said once, not again
+  rm -rf "$T"
+}

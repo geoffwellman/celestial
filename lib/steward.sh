@@ -410,7 +410,8 @@ _steward_mail() { # <mailbox> <workspace> <key> <message> - sent now, no window;
 # A PR'S NUDGE GOES TO WHOEVER OWNS THE REPO'S PRS (ws_repo_pr_owner,
 # lib/workspace.sh): the product's agent, or the lane a repo declares
 # (repos[].lane). Every per-PR nudge of the review and solo sweeps comes
-# through here.
+# through here - and none goes out, or is recorded, while an open owner
+# decision links the PR (_steward_pr_held).
 #
 # A LANE THAT IS NOT RUNNING HANDS IT BACK. Mail to a lane nobody runs would
 # sit unread, so the nudge goes to the product's agent instead - and the
@@ -425,6 +426,7 @@ _steward_pr_nudge() { # <wsdir> <ws> <repo> <pr> <head> <agents-json> <key> <mes
   local owner lane product note="" rc=0
   owner="$(ws_repo_pr_owner "$wsdir" "$repo")"
   lane="$(ws_repo_lane "$wsdir" "$repo")"
+  _steward_pr_held "$ws" "$wsdir" "$repo" "$pr" && return 0
   _steward_due "$key" || return 0
   if [ -n "$lane" ]; then
     product="$(ws_product_of_repo "$wsdir" "$repo")"
@@ -734,16 +736,63 @@ _steward_inbox_hooks() {
   return 0
 }
 
-# WAITING ON THE OWNER IS NOT A WORKER FINDING: no worker can, say, pay an
-# external review bot's bill. An open decision filed with
-# `cel decide ask --pr <repo>#<n>` silences every nudge about exactly that PR
-# until it is closed - the review sweep's and the solo changes-verdict one
-# alike. Only the explicit link counts: free text naming "#7" is too loose to
-# identify a PR. One `<repo>#<n>` per line.
-_steward_owner_prs() { # <ws>
+# WAITING ON THE OWNER HOLDS EVERY NUDGE. A PR linked to an open owner
+# decision with `cel decide ask --pr <repo>#<n>` is blocked on the owner, not
+# on its agent: no steward nudge about it - approved/land it, changes, red,
+# no ticket, any per-PR one - goes out while the question is open, and none
+# is recorded, so the first tick after it is answered or withdrawn nudges as
+# usual. Every per-PR nudge comes through _steward_pr_nudge, which asks
+# _steward_pr_held; a sweep may ask it earlier to save a forge call.
+# Only the explicit link counts: free text naming "#7" is too loose to
+# identify a PR. A link from ANY workspace's open decision counts, matched on
+# the repo's identity (_steward_repo_id), never on a nickname.
+#
+# ONE READ PER TICK: the tick loads every open decision once
+# (_steward_held_prs_load, in its own shell so the sweeps' subshells inherit
+# it) and sets _STEWARD_HELD_REUSE=1; without the flag every ask reads afresh.
+declare -gA _STEWARD_HELD=()
+_STEWARD_HELD_READ=0
+
+# A repo's identity, `owner/name` lower-cased, from any form `--pr` accepts:
+# a declared name (through <ws>'s url for it), owner/name[.git], or a remote
+# url - scp, ssh or http(s), GitHub or Forgejo. The forge host is not part of
+# it: `--pr owner/name#n` names none. A bare name <ws> declares no url for is
+# that workspace's own, `<ws>:<name>`, and matches nothing elsewhere.
+_steward_repo_id() { # <ws> <wsdir-or-empty> <repo as written> -> identity
+  local ws="$1" wsdir="$2" r="$3" url=""
+  if [[ "$r" != */* && "$r" != *:* ]]; then
+    [ -z "$wsdir" ] || url="$(ws_repo_get "$wsdir" "$r" url 2>/dev/null || true)"
+    [ -n "$url" ] || { printf '%s:%s' "$ws" "${r,,}"; return 0; }
+    r="$url"
+  fi
+  if [[ "$r" =~ ^[A-Za-z][A-Za-z0-9+.-]*://([^/@]*@)?[^/]+/(.*)$ ]]; then
+    r="${BASH_REMATCH[2]}"
+  elif [[ "$r" =~ ^[^/@:]+@[^/:]+:(.*)$ ]]; then
+    r="${BASH_REMATCH[1]}"
+  fi
+  r="${r%/}"; r="${r%.git}"
+  printf '%s' "${r,,}"
+}
+
+# Every PR an open owner decision links, in any workspace with a mailbox, as
+# `<identity>#<n>` keys of _STEWARD_HELD.
+_steward_held_prs_load() {
   # shellcheck source=lib/decide.sh
   . "${BASH_SOURCE[0]%/*}/decide.sh"
-  decide_open_json "$1" 2>/dev/null | jq -r '.prs[]?.ref // empty' 2>/dev/null || true
+  local ws ref repo num wsdir
+  _STEWARD_HELD=()
+  while IFS=$'\t' read -r ws ref; do
+    [[ "$ref" =~ ^(.+)#([0-9]+)$ ]] || continue
+    repo="${BASH_REMATCH[1]}" num="$((10#${BASH_REMATCH[2]}))"
+    wsdir="$(registry_path "$ws" 2>/dev/null)" && [ -f "$wsdir/workspace.yaml" ] || wsdir=""
+    _STEWARD_HELD["$(_steward_repo_id "$ws" "$wsdir" "$repo")#$num"]="$ws"
+  done < <(decide_all_json 2>/dev/null | jq -r '.workspace as $w | .prs[]?.ref | strings | [$w, .] | @tsv' 2>/dev/null || true)
+  _STEWARD_HELD_READ=1
+}
+
+_steward_pr_held() { # <ws> <wsdir> <repo> <pr>
+  [ "${_STEWARD_HELD_REUSE:-0}" = 1 ] && [ "$_STEWARD_HELD_READ" = 1 ] || _steward_held_prs_load
+  [ -n "${_STEWARD_HELD["$(_steward_repo_id "$1" "$2" "$3")#$4"]+set}" ]
 }
 # "LEAVE IT" IS SAYABLE. A `superseded` or `hold` label tells the steward to
 # stop nudging about a PR (e.g. one whose code reached main through others).
@@ -751,20 +800,16 @@ _steward_owner_prs() { # <ws>
 _STEWARD_JQ_LEFT_ALONE='def left_alone: any(.[]?; strings | ascii_downcase | . == "superseded" or . == "hold");'
 
 _steward_review_sweep() { # <agents-json>
-  local agents_json="$1" ws wsdir repo slug prsj ref
+  local agents_json="$1" ws wsdir repo slug prsj
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   # shellcheck source=lib/solo.sh
   . "${BASH_SOURCE[0]%/*}/solo.sh"   # solo_owned_prs_load: our open PRs, once per tick
-  # Owner cards (_steward_owner_prs) silence the red, changes-requested and
-  # no-worker nudges for their PRs. Read once per workspace.
-  local -A owner_prs
+  # open owner decisions hold their PRs' nudges (_steward_pr_held): read once
+  # here unless the tick already did
+  if [ "${_STEWARD_HELD_REUSE:-0}" != 1 ]; then _steward_held_prs_load; local _STEWARD_HELD_REUSE=1; fi
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
-    owner_prs=()
-    while IFS= read -r ref; do
-      [ -n "$ref" ] && owner_prs["$ref"]=1
-    done < <(_steward_owner_prs "$ws")
     for repo in $(ws_repo_names "$wsdir"); do
       slug="$(ws_repo_get "$wsdir" "$repo" url \
               | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
@@ -827,7 +872,7 @@ _steward_review_sweep() { # <agents-json>
       while IFS=$'\t' read -r num branch review failing head; do
         [ -n "$num" ] || continue
         failing="${failing:-0}"
-        if [ "$review" != "APPROVED" ] && [ -n "${owner_prs["$repo#$num"]:-}" ]; then continue; fi
+        # an open owner decision on the PR holds all of these (_steward_pr_nudge)
         if [ "$review" = "APPROVED" ]; then
           _steward_pr_nudge "$wsdir" "$(ws_name "$wsdir")" "$repo" "$num" "$head" "$agents_json" "$slug#$num-approved" \
             "steward: PR #$num on $repo is APPROVED - action it now (merge per policy, or surface for the human)."
@@ -879,20 +924,22 @@ _steward_review_sweep() { # <agents-json>
 # record is `changes` at the PR's CURRENT head: a push since means the verdict
 # no longer covers the head (nothing to say until the reviewer records the new
 # one), and a `changes` verdict at the new head is a new key, a new nudge.
-# It is silenced exactly as the review sweep is: an open owner card on the PR,
-# or a `hold`/`superseded` label.
+# Neither goes out while an open owner decision links the PR
+# (_steward_pr_held), and a `changes` verdict is silenced by a
+# `hold`/`superseded` label too.
 #
 # Both go to whoever owns the repo's PRs - the product's agent, or the lane
 # the repo declares, handed back while it is not running (_steward_pr_nudge);
 # with no readable roster the lane's mailbox keeps them.
 _steward_solo_sweep() { # [agents-json]
-  local agents_json="${1:-}" ws wsdir product repo pr head by note owner
+  local agents_json="${1:-}" ws wsdir product repo pr head by note
   # shellcheck source=lib/solo.sh
   . "${BASH_SOURCE[0]%/*}/solo.sh"
+  # read in this shell, so the lists' subshells below inherit it
+  if [ "${_STEWARD_HELD_REUSE:-0}" != 1 ]; then _steward_held_prs_load; local _STEWARD_HELD_REUSE=1; fi
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
-    owner=""
     for product in $(ws_product_names "$wsdir"); do
       [ "$(ws_build_mode "$wsdir" "$product")" = solo ] || continue
       # read here, in this shell, so the lists below (each in its own
@@ -909,15 +956,12 @@ _steward_solo_sweep() { # [agents-json]
         _STEWARD_WINDOW=999999999 _steward_pr_nudge "$wsdir" "$ws" "$repo" "$pr" "$head" "$agents_json" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
           "steward: $repo#$pr is approved at its current head and every check is green - land it: cel solo land $repo#$pr"
       done < <(solo_ready_prs "$wsdir" "$product")
-      # the owner cards are read once per workspace, and only when there is
-      # a solo verdict file to weigh them against
       [ -s "$(_solo_reviews "$wsdir")" ] || continue
-      [ -n "$owner" ] || owner="$(_steward_owner_prs "$ws")"$'\n'
       while IFS=$'\t' read -r repo pr head by note; do
         [ -n "$pr" ] || continue
         _STEWARD_WINDOW=999999999 _steward_pr_nudge "$wsdir" "$ws" "$repo" "$pr" "$head" "$agents_json" "$(_steward_solo_changes_key "$ws" "$repo" "$pr" "$head")" \
           "steward: $repo#$pr has a recorded \`changes\` verdict from $by at its current head ${head:0:12}${note:+ (\"$note\")} and nothing was pushed since - address it on the PR's branch, push, and ask $by to re-review the new head."
-      done < <(_steward_solo_changes "$ws" "$wsdir" "$product" "$owner")
+      done < <(_steward_solo_changes "$ws" "$wsdir" "$product")
     done
   done
 }
@@ -939,7 +983,7 @@ _steward_state_within() { # <key> <window>
 #
 # THE FORGE IS ASKED ONLY ABOUT WHAT COULD STILL BE NEWS. A nudge needs the
 # PR's head to equal the verdict's, so the nudge key is known from the verdict
-# file alone: a verdict already nudged at its head, under an open owner card,
+# file alone: a verdict already nudged at its head, held by an open owner decision,
 # or set aside in the last day costs no forge call. Only for the rest is the
 # repo's open-PR list read (forge_pr_list, either forge - heads never come
 # from a branch), once per repo. A verdict whose PR is not open, is a draft,
@@ -948,8 +992,8 @@ _steward_state_within() { # <key> <window>
 # a day (`solo-changes-idle-*`): long-merged PRs whose old verdicts linger in
 # the file cost one list a day, not one a tick.
 # A verdict file that does not parse is said, never read as "no verdicts".
-_steward_solo_changes() { # <ws> <wsdir> <product> <owner-pr-refs, one per line>
-  local ws="$1" wsdir="$2" product="$3" owner=$'\n'"$4" f verdicts repo prs num vhead pr by note idle
+_steward_solo_changes() { # <ws> <wsdir> <product>
+  local ws="$1" wsdir="$2" product="$3" f verdicts repo prs num vhead pr by note idle
   local -a pending
   f="$(_solo_reviews "$wsdir")"
   [ -s "$f" ] || return 0
@@ -960,7 +1004,7 @@ _steward_solo_changes() { # <ws> <wsdir> <product> <owner-pr-refs, one per line>
     pending=()
     while IFS=$'\t' read -r num vhead; do
       [ -n "$num" ] || continue
-      case "$owner" in *$'\n'"$repo#$num"$'\n'*) continue ;; esac
+      _steward_pr_held "$ws" "$wsdir" "$repo" "$num" && continue
       _steward_state_has "$(_steward_solo_changes_key "$ws" "$repo" "$num" "$vhead")" && continue
       _steward_state_within "solo-changes-idle-$ws-$repo-$num-${vhead:0:12}" 86400 && continue
       pending+=("$num $vhead")
@@ -2591,8 +2635,10 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   # shellcheck source=lib/solo.sh
   . "${BASH_SOURCE[0]%/*}/solo.sh"
   solo_owned_prs_reset
-  _SOLO_OWNED_REUSE=1 _steward_review_sweep "$agents_json"
-  _SOLO_OWNED_REUSE=1 _steward_solo_sweep "$agents_json"
+  # and one read of the open owner decisions, whose linked PRs no sweep nudges
+  _steward_held_prs_load
+  _SOLO_OWNED_REUSE=1 _STEWARD_HELD_REUSE=1 _steward_review_sweep "$agents_json"
+  _SOLO_OWNED_REUSE=1 _STEWARD_HELD_REUSE=1 _steward_solo_sweep "$agents_json"
   # feature teams: reservations nobody confirmed, verdicts a newer candidate
   # outdated - the lead is told; nothing is retired
   _steward_team_sweep

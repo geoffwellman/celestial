@@ -1,0 +1,2 @@
+### Fixed
+- steward: a PR linked to an open owner decision (`cel decide ask --pr`) gets no nudge of any kind while the question is open - "APPROVED - action it now" and "land it" included, not only red/changes - and the held nudge is not recorded, so it goes out on the first tick after the decision is answered or withdrawn. The link counts from any workspace's open decision, matched on the repo's identity: a declared name (through its workspace's url), `owner/name`, or a GitHub/Forgejo remote url. The decisions are read once per tick.

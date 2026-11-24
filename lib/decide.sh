@@ -205,8 +205,9 @@ cel decide - the owner's one queue of decisions, across every workspace
       of plain prose (URLs do not count) saying what happened and why it needs
       the owner now, what each option does in practice, what you recommend
       and why, and what happens if nobody answers. --pr links a PR the
-      question blocks (repeatable): while it is open the steward does not
-      nudge that PR as a worker finding. --topic (default owner) routes it,
+      question blocks (repeatable; <repo> is a declared name or owner/name):
+      while it is open the steward sends no nudge of any kind about that PR
+      (approved, red, changes, ...); once it is closed they resume. --topic (default owner) routes it,
       when the workspace declares people:, to whoever holds that role for
       your product (product-lead, qa, design, release, approver, owner), else
       to its owners; only they, or an owner, may answer it.
