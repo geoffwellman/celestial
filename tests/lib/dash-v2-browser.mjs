@@ -181,6 +181,20 @@ const main = async () => {
       const cols = `(function(){return Array.prototype.map.call(document.querySelectorAll('#grid #needsyou .nycol'),function(c){
         return {col:c.dataset.col,ids:Array.prototype.map.call(c.querySelectorAll('.nycard'),function(x){return x.dataset.id})}})})()`;
       out.byUrgency = await evaluate(cols);
+      // the urgent badge stays one line on a desktop column and on a phone,
+      // beside a title long enough to wrap (a short one never squeezes it)
+      const badge = `(function(){var b=document.querySelector('#grid #needsyou .nycard .tag.urgent');
+        b.parentNode.querySelector('.nytitle').textContent='Pick the checkout button colour before the storefront release goes out';
+        var r=b.getBoundingClientRect();
+        return {h:Math.round(r.height),fs:parseFloat(getComputedStyle(b).fontSize),fits:document.documentElement.scrollWidth<=innerWidth}})()`;
+      out.badge = {};
+      for (const width of [1440, 390]) {
+        await send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width < 600 });
+        await sleep(500);
+        out.badge[width] = await evaluate(badge);
+      }
+      await send('Emulation.clearDeviceMetricsOverride');
+      await sleep(300);
       await evaluate(`document.querySelector('#grid #needsyou .nyby button[data-by="workspace"]').click()`);
       out.byWorkspace = await evaluate(cols);
       out.reloaded = await load();

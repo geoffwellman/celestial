@@ -121,6 +121,9 @@ test_dash_v2page_needs_you_is_a_board_grouped_by_urgency_then_the_owners_pick() 
   # fixed columns stay, empty ones too, so "nothing urgent" is visible
   assert_eq "$(_vpj '.byUrgency|map("\(.col)=\(.ids|join(","))")|join(" ")')" \
     "urgent=1759800000000000001 blocks= wait=1759800000000000003,1759800000000000002"
+  # one line: under two font-sizes tall (it wrapped to "URGEN/T" at 1440 once)
+  assert_eq "$(_vpj '[.badge[]|.h < (2*.fs+4)]|all')" "true" || { echo "badge wraps: $(printf '%s' "$OUT" | jq -c .badge)"; return 1; }
+  assert_eq "$(_vpj '.badge["390"].fits')" "true"
   assert_eq "$(_vpj '.byWorkspace|map("\(.col)=\(.ids|length)")|join(" ")')" "alpha=2 bundle=1"
   assert_eq "$(_vpj .reloaded)" "true"
   assert_eq "$(_vpj '.afterReload|map(.col)|join(" ")')" "alpha bundle"

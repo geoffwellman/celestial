@@ -136,7 +136,7 @@ so there are reviewers at all.
 flowchart LR
   via["pi, omp and OpenCode agents<br/>on a via: gateway profile"] --> gw["cel gateway<br/>one door on 127.0.0.1"]
   rev["every PR reviewer<br/>(always pi)"] --> gw
-  own["Claude Code, codex, agy<br/>their own sign-in"] -.-> direct(["the provider directly"])
+  own["Claude Code and codex: normally their own sign-in<br/>agy: always its own (refuses via: gateway)"] -.-> direct(["the provider directly"])
   gw --> c1["Claude subscription 1"]
   gw --> c2["Claude subscription 2"]
   gw --> cx["Codex subscription"]
@@ -144,7 +144,8 @@ flowchart LR
 
 A profile with `via: gateway` reaches its model through `cel gateway`, which
 holds several Claude and Codex subscriptions and keeps each agent on one
-account. Reviewers always go through it; OpenCode requires it; agy refuses it.
+account. Reviewers always go through it; OpenCode requires it; Claude Code and
+codex normally use their own sign-in; agy refuses it.
 Details: [Gateway](docs/gateway.md#gateway--several-subscriptions-behind-one-door).
 
 ### Every setup
