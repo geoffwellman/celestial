@@ -14,9 +14,9 @@ human.
 
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-e3b34c)](LICENSE)
 
-![Celestial dashboard with isometric workstations and selectable work orders](docs/images/factory-floor.webp)
+![Celestial dashboard: since-you-last-looked counts and the Needs you board, with decisions from fictional workspaces acme and example-app grouped by urgency, each with a recommended option](docs/images/dashboard.webp)
 
-*Illustrative work in the live dashboard. No agent execution is simulated.*
+*The dashboard (`cel dash`) on fictional fixture data.*
 
 ---
 
@@ -90,19 +90,78 @@ you into GitHub, Linear or agent accounts.
 
 ## Setups at a glance
 
+### One box: core, product agents, reviewers
+
+```mermaid
+flowchart TB
+  owner(["you"])
+  core["cel core<br/>one per box, reads root's mail, never builds"]
+  steward["cel steward<br/>systemd timer: nudges, cleanup"]
+  subgraph acme["workspace acme"]
+    atlas["atlas-orch<br/>atlas's agent, builds and lands"]
+    billing["billing-orch<br/>billing's agent, builds and lands"]
+    ra["reviewer<br/>one per PR"]
+    rb["reviewer<br/>one per PR"]
+  end
+  subgraph lab["workspace lab"]
+    gizmo["gizmo-orch"]
+  end
+  owner <--> core
+  core -- "cel inbox" --> atlas
+  core -- "cel inbox" --> billing
+  core -- "cel inbox" --> gizmo
+  atlas -- "cel run reviewer" --> ra
+  billing -- "cel run reviewer" --> rb
+  ra -- "verdict by inbox" --> atlas
+  rb -- "verdict by inbox" --> billing
+  steward -. "every 5 min" .-> acme
+  steward -. "every 5 min" .-> lab
+```
+
+Every setup is built on this one. You talk to `cel core`, one per box, which
+reads `root`'s mail in every workspace and directs each product's agent; each
+product's agent builds and lands its own PRs and starts one reviewer per PR.
+Every agent runs in a visible Herdr pane or Rex session
+([sessions](docs/sessions-herdr-and-rex.md#sessions-herdr-and-rex)), and the
+[steward](docs/background-services.md#the-steward--the-only-scheduled-process)
+ticks over the box without calling a model.
+Selected by: `cel core` once per box; one `products:` entry per product (a repo
+that is in no product is its own product); `layout: { orchestrators: auto }`
+so `cel ws up <workspace>` starts every product's agent; and a `review:` block
+so there are reviewers at all.
+
+### How agents reach models: the gateway
+
+```mermaid
+flowchart LR
+  via["pi, omp and OpenCode agents<br/>on a via: gateway profile"] --> gw["cel gateway<br/>one door on 127.0.0.1"]
+  rev["every PR reviewer<br/>(always pi)"] --> gw
+  own["Claude Code, codex, agy<br/>their own sign-in"] -.-> direct(["the provider directly"])
+  gw --> c1["Claude subscription 1"]
+  gw --> c2["Claude subscription 2"]
+  gw --> cx["Codex subscription"]
+```
+
+A profile with `via: gateway` reaches its model through `cel gateway`, which
+holds several Claude and Codex subscriptions and keeps each agent on one
+account. Reviewers always go through it; OpenCode requires it; agy refuses it.
+Details: [Gateway](docs/gateway.md#gateway--several-subscriptions-behind-one-door).
+
+### Every setup
+
 A **feature team** is short-lived agents one product's agent leads for one
 feature; a **team workspace** is one workspace several people share. Every
 setup builds on the first row. [docs/setups.md](docs/setups.md) draws each
-one, says when to choose it and names the config that selects it.
+other one, says when to choose it and names the config that selects it.
 
 | Setup | In one line |
 |---|---|
-| [One box](docs/setups.md#one-box-core-product-agents-reviewers) | `cel core` per box directs one agent per product; each PR gets its own reviewer |
+| [One box](#one-box-core-product-agents-reviewers) | `cel core` per box directs one agent per product; each PR gets its own reviewer |
 | [One product, solo](docs/setups.md#one-product-solo-the-default) (the default) | the product's agent branches, gates, opens the PR and lands it once its reviewer approved that head |
 | [Solo lanes](docs/setups.md#solo-lanes-several-goals-on-one-product) | two or three large goals on one product, one agent each |
 | [Feature team](docs/setups.md#a-feature-team-led-by-the-products-agent) | builders, qa and design under the product's agent, which stays the only integrator |
 | [Team workspace](docs/setups.md#a-team-workspace-shared-by-several-people) | several people share `workspace.yaml`; each box keeps its own routing and keys |
-| [The gateway](docs/setups.md#how-agents-reach-models-the-gateway) | several subscriptions behind one loopback door |
+| [The gateway](#how-agents-reach-models-the-gateway) | several subscriptions behind one loopback door |
 
 ## A tour of the docs
 

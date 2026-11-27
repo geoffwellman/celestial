@@ -1,0 +1,2 @@
+### Changed
+- The README hero is a fresh screenshot of the current dashboard on fictional fixture data (`docs/images/dashboard.webp`); the retired v1 factory-floor image is gone. The One box and gateway diagrams move to the README front page (setups.md links to them) and now show the steward, Herdr/Rex sessions, reviewer verdicts by inbox, and which runtimes go through the gateway (pi, omp, OpenCode and every reviewer; Claude Code, codex and agy use their own sign-in).
