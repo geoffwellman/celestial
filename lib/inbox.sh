@@ -1008,20 +1008,31 @@ _inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
   [ -n "$who" ] || who="$(_inbox_me)"
   ws="$(_inbox_ws "$ws")"
   have flock || die 'cel inbox wait: flock is not on PATH'
-  local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-wait" lkfd
+  local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-wait" lkfd gtfd
   mkdir -p "$lkd" 2>/dev/null || true
   local lock; lock="$lkd/$(_inbox_sanitise "$ws").$who.lock"
+  # A PROBE NEVER REFUSES A WAITER. --check can ask the lock only by taking
+  # it for a moment, and a waiter trying it in that moment would find it held
+  # and stand down with nobody armed. So a probe and a waiter's try take turns
+  # on a gate beside the lock, each holding it only across its one try (a probe
+  # lets go of the lock before the gate): behind the gate, a held lock is
+  # another waiter's. A turn is bounded - a gate never let go costs 5s, then
+  # the try goes ahead without it.
   if [ "$check" -eq 1 ]; then
     [ -e "$lock" ] || return 1
-    { exec {lkfd}>>"$lock"; } 2>/dev/null || return 1
-    if flock -n "$lkfd"; then exec {lkfd}>&-; return 1; fi
-    exec {lkfd}>&-; return 0
+    { exec {gtfd}>>"$lock.gate" {lkfd}>>"$lock"; } 2>/dev/null || return 1
+    flock -w 5 "$gtfd" 2>/dev/null || true
+    if flock -n "$lkfd"; then exec {lkfd}>&- {gtfd}>&-; return 1; fi
+    exec {lkfd}>&- {gtfd}>&-; return 0
   fi
-  { exec {lkfd}>>"$lock"; } 2>/dev/null || die "cel inbox wait: cannot open $lock"
+  { exec {gtfd}>>"$lock.gate" {lkfd}>>"$lock"; } 2>/dev/null || die "cel inbox wait: cannot open $lock"
+  flock -w 5 "$gtfd" 2>/dev/null || true
   if ! flock -n "$lkfd"; then
+    exec {lkfd}>&- {gtfd}>&-
     printf 'cel inbox wait: already armed for %s in %s - nothing started\n' "$who" "$ws"
-    exec {lkfd}>&-; return 0
+    return 0
   fi
+  exec {gtfd}>&-
   [ -n "$parent" ] || parent="$(_inbox_runtime_ancestor)" || parent=""
   local f n tfd tpid line rc why="" waited=0 me="${BASHPID:-$$}" tick="${CEL_WATCH_PARENT_POLL:-5}" poll="${CEL_INBOX_WAIT_POLL:-30}" follow=()
   # A WAITER IS BOUNDED. One with no agent runtime above it would never be
