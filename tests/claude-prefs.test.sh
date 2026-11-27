@@ -123,3 +123,49 @@ test_prefs_keep_a_user_hook_that_shares_an_entry_with_the_placeholder() {
   assert_contains "$cmds" "mine-too"
   rm -rf "$h"
 }
+
+# Claude's guard (tools/hooks/orchestrator-guard.sh) is registered as a
+# PreToolUse hook naming the INSTALLED plane (the cel on PATH), never the
+# checkout this code runs from.
+_cp_installed() { # <root> -> an installed plane at <root>, its cel first on PATH
+  mkdir -p "$1/bin" "$1/tools/hooks"
+  printf '#!/bin/sh\n' > "$1/bin/cel"; chmod +x "$1/bin/cel"
+  : > "$1/tools/hooks/orchestrator-guard.sh"
+}
+_cp_guard_entry() { # <root> -> the exact entry, compact and key-sorted
+  local cmd; printf -v cmd 'bash %q' "$1/tools/hooks/orchestrator-guard.sh"
+  jq -cS -n --arg c "$cmd" '{matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit", hooks: [{type: "command", command: $c, timeout: 10}]}'
+}
+_cp_guard_entries() { # <settings> -> every PreToolUse entry naming the guard
+  jq -cS '[.hooks.PreToolUse[]? | select(any(.hooks[]?; (.command // "") | test("orchestrator-guard")))]' "$1"
+}
+test_prefs_register_the_guard_in_a_fresh_home() {
+  local T; T="$(mktemp -d)"; _cp_installed "$T/installed"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(_cp_guard_entries "$T/home/.claude/settings.json")" "[$(_cp_guard_entry "$T/installed")]"
+  rm -rf "$T"
+}
+test_prefs_guard_keeps_foreign_hooks_and_rerun_is_a_noop() {
+  local T s; T="$(mktemp -d)"; _cp_installed "$T/installed"; s="$T/home/.claude/settings.json"
+  mkdir -p "$T/home/.claude"
+  echo '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"moshi-hook"}]},{"matcher":"*","hooks":[{"type":"command","command":"stackchan notify"},{"type":"command","command":"orca hook"}]}]}}' > "$s"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(jq -r '[.hooks.PreToolUse[].hooks[].command] | .[0:3] | join("|")' "$s")" "moshi-hook|stackchan notify|orca hook"
+  assert_eq "$(_cp_guard_entries "$s")" "[$(_cp_guard_entry "$T/installed")]"
+  # a foreign hook added after ours stays after it: the re-run moves nothing
+  jq '.hooks.PreToolUse += [{"matcher":"Edit","hooks":[{"type":"command","command":"later"}]}]' "$s" > "$s.t" && mv "$s.t" "$s"
+  local before; before="$(cat "$s")"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(cat "$s")" "$before"
+  rm -rf "$T"
+}
+test_prefs_guard_replaces_a_stale_celestial_entry_only() {
+  local T s; T="$(mktemp -d)"; _cp_installed "$T/installed"; s="$T/home/.claude/settings.json"
+  mkdir -p "$T/home/.claude"
+  # an older install's entry (a worktree path), sharing an entry with a user hook
+  echo '{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write","hooks":[{"type":"command","command":"bash /old/wt/tools/hooks/orchestrator-guard.sh","timeout":10},{"type":"command","command":"mine"}]},{"matcher":"Bash","hooks":[{"type":"command","command":"bash /older/tools/hooks/orchestrator-guard.sh"}]}]}}' > "$s"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(_cp_guard_entries "$s")" "[$(_cp_guard_entry "$T/installed")]"
+  assert_eq "$(jq -c '.hooks.PreToolUse[0]' "$s")" '{"hooks":[{"command":"mine","type":"command"}],"matcher":"Bash|Edit|Write"}'
+  rm -rf "$T"
+}

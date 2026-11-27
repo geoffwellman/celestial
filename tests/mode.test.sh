@@ -59,7 +59,7 @@ test_mode_fleet_is_refused_and_writes_nothing() {
   _mws
   local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle fleet --no-restart 2>&1 )" \
     && { echo "switched to fleet"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)"
+  assert_contains "$out" "fan-out was retired on 2026-11-08: build in the product's solo agent (or its feature team, cel team)"
   assert_eq "$(_changed_lines)" 0
   rm -rf "$T"
   _mws_legacy

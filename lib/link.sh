@@ -180,21 +180,29 @@ link_herdr_layouts() {
 # Box-wide Claude Code preferences the plane asserts everywhere. Objects are
 # deep-merged; the plane's UserPromptSubmit hook is appended once, preserving
 # the user's handlers. Its script path is resolved here so Claude need not
-# inherit CEL_ROOT in unrelated sessions.
+# inherit CEL_ROOT in unrelated sessions. Claude's guard
+# (tools/hooks/orchestrator-guard.sh) is one PreToolUse entry naming the
+# INSTALLED plane (installed_plane_root, lib/agy.sh), never a worktree: every
+# other PreToolUse hook (the user's, moshi's, Orca's...) stays where it is,
+# and only a guard hook an older install wrote is replaced. Codex has no hook
+# API, so it has no guard to register.
 link_claude_prefs() {
   local prefs="$CEL_ROOT/tools/claude/settings-prefs.json"
   local settings="$HOME/.claude/settings.json"
   if [ -f "$prefs" ]; then
     mkdir -p "$HOME/.claude"
     [ -f "$settings" ] || echo '{}' > "$settings"
-    local hook_command merged
+    local hook_command guard_command merged
     printf -v hook_command 'bash %q' "$CEL_ROOT/tools/hooks/inbox-drain.sh"
-    merged="$(jq -S --arg hook_command "$hook_command" --slurpfile p "$prefs" '
+    printf -v guard_command 'bash %q' "$(installed_plane_root)/tools/hooks/orchestrator-guard.sh"
+    merged="$(jq -S --arg hook_command "$hook_command" --arg guard_command "$guard_command" --slurpfile p "$prefs" '
       def append_unique:
         reduce .[] as $item
           ([]; if any(.[]; . == $item) then . else . + [$item] end);
       . as $current
       | ($p[0] | .hooks.UserPromptSubmit[0].hooks[0].command = $hook_command) as $plane
+      | {matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit",
+         hooks: [{type: "command", command: $guard_command, timeout: 10}]} as $guard
       | ($current * $plane)
       # An entry an older install wrote with the placeholder unresolved runs a
       # command that does not exist on every prompt; the plane wrote it, so it
@@ -204,6 +212,14 @@ link_claude_prefs() {
               | map(.hooks = [(.hooks // [])[] | select(((.command // "") | test("^__CEL_[A-Z_]+__$")) | not)])
               | map(select((.hooks | length) > 0)) +
             ($plane.hooks.UserPromptSubmit // [])) | append_unique)
+      # The guard entry, once. A guard hook naming any other path (an older
+      # install, a worktree) is dropped from its entry; an entry left empty goes.
+      | .hooks.PreToolUse =
+          (($current.hooks.PreToolUse // [])
+            | map(if . == $guard then . else
+                .hooks = [(.hooks // [])[] | select(((.command // "") | test("/tools/hooks/orchestrator-guard\\.sh")) | not)] end)
+            | map(select((.hooks | length) > 0))
+            | if any(.[]; . == $guard) then . else . + [$guard] end)
     ' "$settings")" || return 1
     if [ "$merged" != "$(jq -S . "$settings")" ]; then
       printf '%s\n' "$merged" > "$settings"

@@ -118,6 +118,10 @@ cel - the celestial plane
                                 (workspace default: session_backend: herdr)
   cel sessions rex-upgrade [--check]  upgrade rex once every Rex agent is idle,
                                 then resume them (the steward runs it every 30m)
+  cel sessions retire-reviewer <repo>#<pr> [--focus f | --qa f] [--workspace w] [--dry-run]
+                                retire a PR's reviewer (or its --focus/--qa
+                                extra) and drop its registry row; a QA agent's
+                                preview goes with it; --dry-run says if it may
   cel shellenv                  print shell env; eval this in your rc
 
   cel ws new <name> [--org o]   scaffold a workspace that does not exist yet
@@ -189,13 +193,14 @@ cel - the celestial plane
   cel solo approvals <repo>#<pr>... [--json]
                                 every reviewer a PR needs and its word on the
                                 current head, by land's rule
-  cel team start|add|ack|event|verdict|status|retire|close <feature> ...
+  cel team start|add|ack|event|verdict|status|retire|close|cap <feature> ...
                                 a feature team under the product's lead: the
                                 lead starts it and adds scoped members (each
                                 admitted against the box budget, reserved,
                                 ready once up AND acked); members report by
                                 event and verdict; close refuses to drop a
-                                builder's unpushed work. cel team help
+                                builder's unpushed work; cap sets the team's
+                                spend cap (members default to zero). cel team help
   cel forge repo|whoami <repo>  a repo's forge (GitHub or Forgejo) and the
                                 account this workspace acts as on it
   cel forge pr view|checks|reviews <repo>#<n> [--json]
@@ -315,8 +320,10 @@ cel - the celestial plane
                                 evidence is read from git and the PR, never
                                 passed in
 
-  cel steward                   one proactive tick: gc, review + ticket sweeps,
-                                stall nudges, blocked agents, server liveness
+  cel steward [--no-gc]         one proactive tick: gc (--no-gc skips it), the
+                                review, solo and team PR sweeps, unread mail,
+                                AFK lands, quota, memory, orphans, services,
+                                servers, and orchestrator and Rex liveness
   cel steward --install         run it every 5 min via a systemd user timer -
                                 without this NOTHING is proactive; --interval
                                 <min> to retune, --remove to stop
@@ -333,9 +340,11 @@ cel - the celestial plane
                                 --orphans: reap processes with no owner at all
                                 (watchers whose console exited, fixtures whose
                                 worktree is gone, shells on dead ptys, killed
-                                gate runners); --box: also sweep docker and
-                                the toolchain caches (never anything
-                                irreplaceable); --dry-run to see them first
+                                gate runners); --box: also sweep docker (as
+                                cel box sweep-docker), package and browser
+                                caches and what the factory itself made
+                                (never a volume, a kept or in-use image, or
+                                anything irreplaceable); --dry-run to see them first
   cel box space [--json]        what is large on this box, what of it is
                                 reclaimable, and which of it the janitor may
                                 delete - ours, regenerable, or someone's
@@ -344,6 +353,12 @@ cel - the celestial plane
   cel box diag                  two bounded lines for a disk alert: docker's
                                 images / build cache / volumes, and running
                                 docker builds with the agent that owns each
+  cel box docker-safety         the version-1 Docker retention contract (JSON:
+                                keep label, keep file/dir, producer lock file)
+  cel box sweep-docker [--dry-run]
+                                only the Docker sweep: unused, unkept images
+                                and the build cache; prints the bytes freed
+                                (an upper bound in a dry run); exit 2 = no docker
   cel drive list|tail|send|receipt
                                 see an orchestrator's conversation (from its
                                 session file) and mail it as owner, with a
@@ -357,8 +372,13 @@ cel - the celestial plane
   cel build-slot -- <cmd>       run a heavy build (cargo build/test...) in the
                                 box-wide build slot: one at a time by default
                                 (build.slots), CARGO_BUILD_JOBS = half the cores
-  cel watchdog [status|print|install|uninstall] is the system-level user-manager watchdog
-                                installed; print shows the one-time owner command
+  cel watchdog [status|print|install|uninstall]
+                                a system timer that restarts this user's
+                                systemd manager (then dash and pages) if the
+                                OOM-killer took it: status says whether it
+                                is installed (the default); install/uninstall
+                                need passwordless sudo; print shows the
+                                one-time owner commands for a box without it
   cel serve start <name> --owner <alias> --workspace <ws>
                                 [--ttl 8h] [--port N] -- <command>
   cel serve list [--json]      ledgered server memory, age, TTL (or permanent), last request
@@ -420,7 +440,7 @@ case "${1:-help}" in
               "$(cel_build_sha)" "$(cel_build_branch)";;
   fleet)    shift; . "$CEL_ROOT/lib/fleet.sh";   cmd_fleet "$@";;
   work|history)
-            c_err "cel $1: fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming) - cel fleet, cel forge pr list and cel dash show products, PRs and mail"
+            c_err "cel $1: fan-out was retired on 2026-11-08: build in the product's solo agent (or its feature team, cel team) - cel fleet, cel forge pr list and cel dash show products, PRs and mail"
             exit 2;;
   steward)  shift; . "$CEL_ROOT/lib/steward.sh"; cmd_steward "$@";;
   afk)      shift; . "$CEL_ROOT/lib/afk.sh";     cmd_afk "$@";;

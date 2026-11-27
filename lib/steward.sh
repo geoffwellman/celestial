@@ -2911,12 +2911,17 @@ _steward_services() {
   _steward_services_for box ""
 }
 
-# One workspace, or the box when <ws> is `box` and <wsdir> is empty.
+# One workspace, or the box when <ws> is `box` and <wsdir> is empty. A box
+# service's blocker goes to root in the first registered workspace (as the
+# build-daemon and unledgered-server reports do): no agent reads a `box`
+# mailbox, so a blocker raised there was heard by nobody.
 _steward_services_for() { # <ws> <wsdir>
-  local ws="$1" wsdir="$2" e name url health hauth restart port key count restarted msg last note where
+  local ws="$1" wsdir="$2" e name url health hauth restart port key count restarted msg last note where mws="$1"
   if [ "$ws" != box ]; then
     [ -n "$wsdir" ] || return 0
     [ -f "$wsdir/workspace.yaml" ] || return 0
+  else
+    mws="$(registry_names 2>/dev/null | head -n1)"; [ -n "$mws" ] || mws=box
   fi
   while IFS= read -r e; do
     [ -n "$e" ] || continue
@@ -2934,7 +2939,7 @@ _steward_services_for() { # <ws> <wsdir>
     hauth="$(printf '%s' "$e" | jq -r '.health_auth // ""')"
     if svc_listening "$port" && svc_health_ok "$port" "$health" "$hauth"; then
       _steward_svc_write "$key" 0 0
-      [ "${count:-0}" -ge 2 ] && _steward_clear "$ws" "service-$ws-$name" \
+      [ "${count:-0}" -ge 2 ] && _steward_clear "$mws" "service-$ws-$name" \
         "$name is answering on :$port again"
       continue
     fi
@@ -2957,6 +2962,6 @@ _steward_services_for() { # <ws> <wsdir>
     where=" --workspace $ws"; [ "$ws" = box ] && where=""
     msg="steward: service $name ($ws) is down - nothing answered $health on :$port for two consecutive ticks.${note} Last line of its pane: ${last:-nothing to read}. Start it with 'cel services start $name$where' or read it with 'cel services logs $name$where'."
     c_err "$msg"
-    _steward_raise "$ws" "service-$ws-$name" blocked "$msg"
+    _steward_raise "$mws" "service-$ws-$name" blocked "$msg"
   done < <(if [ "$ws" = box ]; then _svc_box; else _svc_declared "$wsdir"; fi)
 }

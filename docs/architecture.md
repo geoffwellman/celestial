@@ -724,11 +724,13 @@ guarded.
 Coverage differs by runtime. omp and pi load the guard (`agents.yaml`
 `guard_hook`) on launches of core, root, orchestrator (solo agents and lanes
 included), member and reviewer; a role-less `direct` launch gets none.
-Claude's adapter (`tools/hooks/orchestrator-guard.sh`)
-runs only where the owner has registered it as a PreToolUse hook in
-`~/.claude/settings.json`: nothing in cel registers it. OpenCode's adapter
+Claude's adapter (`tools/hooks/orchestrator-guard.sh`) is registered by
+`cel setup`/`cel update` (`link_claude_prefs`) as one PreToolUse entry in
+`~/.claude/settings.json` for Bash, Edit, Write, MultiEdit and NotebookEdit,
+naming the installed plane; Claude reads are not checked. OpenCode's adapter
 classifies shell, write, edit and patch calls but not reads. Codex has no
-guard adapter at all. No adapter inspects MCP tool calls, in any runtime.
+hook API, so no guard adapter at all. No adapter inspects MCP tool calls, in
+any runtime.
 
 The guard reads a command line as bash does (`_guard_lines` in
 lib/guard.sh), whichever adapter hands it in - all of them pass the tool

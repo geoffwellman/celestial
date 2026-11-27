@@ -316,21 +316,25 @@ test_box_service_start_records_state_off_any_workspace() {
 }
 
 # The steward sweep supervises box services, which no workspace declares. Two
-# down ticks raise ONE rolled-up blocker, `restart: auto` restarts once, and
-# the blocker clears when the service answers again.
+# down ticks raise ONE rolled-up blocker - to root in the first registered
+# workspace, never a `box` mailbox no agent reads - `restart: auto` restarts
+# once, and the blocker clears when the service answers again.
 test_steward_sweep_watches_box_services() {
   _svc_box_setup
   source "$CEL_ROOT/lib/steward.sh"
   export CEL_INBOX_DIR="$T/inbox"
   export CEL_STEWARD_STATE="$T/steward-state"
-  printf 'workspaces: {}\n' > "$CEL_REGISTRY"
   printf '{"name":"cel-auth-broker","port":47311,"cmd":"omp auth-broker serve","cwd":"%s","health":"/","restart":"auto"}\n' "$T" \
     > "$CEL_SERVICES_D/cel-auth-broker.json"
   _steward_services >/dev/null 2>&1
-  assert_eq "$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)" ""
+  assert_eq "$(_inbox_open_fp alpha "service-box-cel-auth-broker" steward root)" ""
   _steward_services >/dev/null 2>&1
-  local id; id="$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)"
-  [ -n "$id" ] || { echo "two down ticks raised no blocker for a box service"; _svc_teardown; return 1; }
+  local id; id="$(_inbox_open_fp alpha "service-box-cel-auth-broker" steward root)"
+  [ -n "$id" ] || { echo "two down ticks raised no blocker to root for a box service"; _svc_teardown; return 1; }
+  assert_eq "$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)" ""
+  # a third down tick updates the open item: still one
+  _steward_services >/dev/null 2>&1
+  assert_eq "$(_inbox_open_fp_ids alpha "service-box-cel-auth-broker" steward root | wc -l)" 1
   assert_contains "$(cat "$T/calls")" "pane run"   # restart: auto, exactly once
   # ...and it comes back: a real server on the declared port, and the blocker
   # is resolved rather than left for someone to wonder about.
@@ -342,7 +346,7 @@ test_steward_sweep_watches_box_services() {
   local i; for i in 1 2 3 4 5 6 7 8 9 10; do
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.3; done
   _steward_services >/dev/null 2>&1
-  assert_eq "$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)" ""
+  assert_eq "$(_inbox_open_fp alpha "service-box-cel-auth-broker" steward root)" ""
   _svc_teardown
 }
 

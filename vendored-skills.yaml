@@ -1,5 +1,5 @@
 # Third-party skills vendored into core/skills/<name>/ and linked into every
-# runtime (claude, omp, pi, codex, opencode) exactly like the plane's own core
+# runtime (claude, omp, pi, codex, opencode, agy) exactly like the plane's own core
 # skills - or, with `set:`, into core/workspace-skills/<name>/ and reached
 # only by the agents of workspaces that opt into that set. Each is pinned like
 # optional-plugins.yaml: an exact upstream commit, never a branch, tag or
