@@ -101,19 +101,34 @@ agy_kickoff() { # <agent-name> -> the first turn of every cel agy launch
 
 agy_hooks_file() { printf '%s/.gemini/config/hooks.json' "$HOME"; }
 
-# THE INSTALLED PLANE, never the checkout this code runs from: a box-wide hook
-# entry (agy's here, Claude's guard in lib/link.sh) outlives a worktree or a
-# review checkout. It is the root of the `cel` on PATH (cel shellenv puts the
-# installed one there).
-installed_plane_root() {
+# THE INSTALLED PLANE, never the checkout this code runs from: the agy entry
+# is box-wide and outlives a worktree or a review checkout. It is the root of
+# the `cel` on PATH (cel shellenv puts the installed one there).
+agy_hooks_root() {
+  _cel_path_root || printf '%s' "$CEL_ROOT"
+}
+_cel_path_root() { # -> the root of the `cel` on PATH; fails when there is none
   local c
   c="$(type -P cel 2>/dev/null)" && c="$(readlink -f -- "$c")" && [ "${c%/bin/cel}" != "$c" ] \
     && { printf '%s' "${c%/bin/cel}"; return 0; }
-  printf '%s' "$CEL_ROOT"
+  return 1
+}
+# STRICT, for Claude's guard (lib/link.sh): the `cel` on PATH, and only when
+# it is not a linked git worktree (a solo or review checkout put first on
+# PATH). No fallback to CEL_ROOT: fails when there is no installed plane.
+installed_plane_root() {
+  local r g c
+  r="$(_cel_path_root)" || return 1
+  if g="$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" \
+    && c="$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    && [ "$g" != "$c" ]; then
+    return 1
+  fi
+  printf '%s' "$r"
 }
 
 agy_hooks_entry() { # [root] -> the `celestial` value, script paths resolved
-  local root="${1:-$(installed_plane_root)}" hook guard
+  local root="${1:-$(agy_hooks_root)}" hook guard
   printf -v hook 'bash %q' "$root/tools/hooks/agy-hook.sh"
   printf -v guard 'bash %q' "$root/tools/hooks/agy-guard.sh"
   jq -cn --arg h "$hook" --arg g "$guard" '{
@@ -138,7 +153,7 @@ agy_hooks_current() {
 # entry would name scripts that are not there, and a missing guard is silent.
 agy_hooks_link() {
   local f target root merged tmp lk rc=0
-  f="$(agy_hooks_file)"; root="$(installed_plane_root)"
+  f="$(agy_hooks_file)"; root="$(agy_hooks_root)"
   [ -f "$root/tools/hooks/agy-guard.sh" ] && [ -f "$root/tools/hooks/agy-hook.sh" ] \
     || { c_err "agy: the installed plane at $root has no agy hooks - cel update first; the celestial guard and inbox hooks are NOT installed"; return 1; }
   mkdir -p "${f%/*}" || return 1
