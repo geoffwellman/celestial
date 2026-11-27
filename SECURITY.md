@@ -42,8 +42,9 @@ response-time SLA.
 - Only the separate public pages tier is intended for internet sharing. Share
   URLs are bearer capabilities. Expiry/revocation stops future server reads,
   not copies already downloaded by a recipient.
-- Cleanup refuses dirty, live or unknown work. Its external Git/herdr checks
-  cannot provide an atomic transaction against unrelated manual changes.
+- Cleanup refuses dirty, live or unknown work. Its external Git and session
+  backend (Rex/herdr) checks cannot provide an atomic transaction against
+  unrelated manual changes.
   Retain backups; do not use GC as a substitute for durable work storage.
 - Fresh-install pins do not make the whole machine reproducible. Existing
   tools, distro packages, transitive dependencies and upstream self-updates
