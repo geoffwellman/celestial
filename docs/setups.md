@@ -8,34 +8,10 @@ both.
 
 ## One box: core, product agents, reviewers
 
-```mermaid
-flowchart TB
-  owner(["you"])
-  core["cel core<br/>one per box, never builds"]
-  subgraph acme["workspace acme"]
-    atlas["atlas-orch<br/>atlas's agent"]
-    billing["billing-orch<br/>billing's agent"]
-    ra["reviewer<br/>one per PR"]
-    rb["reviewer<br/>one per PR"]
-  end
-  subgraph lab["workspace lab"]
-    gizmo["gizmo-orch"]
-  end
-  owner <--> core
-  core -- "cel inbox" --> atlas
-  core -- "cel inbox" --> billing
-  core -- "cel inbox" --> gizmo
-  atlas -- "cel run reviewer" --> ra
-  billing -- "cel run reviewer" --> rb
-```
-
-Every setup is built on this one. You talk to `cel core`, one per box, which
-reads `root`'s mail in every workspace and directs each product's agent; each
-product's agent builds and lands its own PRs and starts one reviewer per PR.
-Selected by: `cel core` once per box; one `products:` entry per product (a repo
-that is in no product is its own product); `layout: { orchestrators: auto }`
-so `cel ws up <workspace>` starts every product's agent; and a `review:` block
-so there are reviewers at all.
+Every setup is built on this one: `cel core` per box directs one agent per
+product, and each PR gets its own reviewer. It is drawn, with the config that
+selects it, on the front page:
+[One box](../README.md#one-box-core-product-agents-reviewers).
 
 ## One product, solo (the default)
 
@@ -147,15 +123,7 @@ never both build it. Details: [Team workspaces](profiles.md#team-workspaces) and
 
 ## How agents reach models: the gateway
 
-```mermaid
-flowchart LR
-  agents["agents on a via: gateway profile<br/>and every PR reviewer"] --> gw["cel gateway<br/>one door on 127.0.0.1"]
-  gw --> c1["Claude subscription 1"]
-  gw --> c2["Claude subscription 2"]
-  gw --> cx["Codex subscription"]
-```
-
-A profile with `via: gateway` reaches its model through `cel gateway`, which
-holds several subscriptions and keeps each agent on one account. Reviewers
-always go through it. Details:
+Several subscriptions behind one loopback door, and which runtimes go through
+it, are drawn on the front page:
+[the gateway](../README.md#how-agents-reach-models-the-gateway). Details:
 [Gateway](gateway.md#gateway--several-subscriptions-behind-one-door).

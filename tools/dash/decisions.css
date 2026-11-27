@@ -14,8 +14,12 @@
   border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;
   padding:10px 13px;margin:0 0 8px;min-width:0;overflow-wrap:anywhere}
 .nycard.urgent{border-left-color:var(--bad)}
+/* a badge is one word: never wrapped, never squeezed. The card's
+   overflow-wrap:anywhere would otherwise let a flex row shrink it to one
+   character per line ("URGEN/T") */
 .nycard .tag{font:600 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;
-  padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent)}
+  padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent);
+  white-space:nowrap;overflow-wrap:normal;flex:none}
 .nycard .tag.urgent{background:var(--bad);color:#fff;margin-right:8px}
 .nymeta{font:11.5px var(--mono);color:var(--dim);margin:3px 0 8px}
 .nymeta .blocks{color:var(--warn)}
