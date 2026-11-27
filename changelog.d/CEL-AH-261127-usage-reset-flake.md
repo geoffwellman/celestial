@@ -1,0 +1,2 @@
+### Fixed
+- `test_v2_usage_reads_a_zoneless_reset_as_utc_like_the_shared_rule` no longer flakes one second apart: it built the zoneless reset and the epoch-seconds reset from two separate `date +%s` reads, so a run straddling a second boundary expected the zoneless time while the epoch window (correctly) drew one second later. Both now come from one clock read; the dashboard's reset parsing was already exact and is unchanged.
