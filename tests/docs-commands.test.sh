@@ -179,3 +179,83 @@ PY
 )"
   [ -z "$out" ] || { printf 'cel help does not name:\n%s\n' "$out"; return 1; }
 }
+
+# BOTH CHECKS READ EVERY DOC. The README is a front page and the detail lives
+# in one file per topic under docs/; a topic file the checkers did not read
+# could show a retired command or a dead link and nothing would fail.
+test_docs_checks_read_every_docs_file() {
+  local out
+  out="$(python3 - "$CEL_ROOT" <<'PY'
+import glob, os, sys
+root = sys.argv[1]
+sys.path.insert(0, root + "/tests/lib")
+import docs_commands, docs_links
+want = {os.path.realpath(p) for p in glob.glob(root + "/docs/**/*.md", recursive=True)}
+want.add(os.path.realpath(root + "/README.md"))
+if len(want) < 20:
+    print(f"found only {len(want)} docs - the README split left too few topic files")
+for name, mod in (("docs_commands", docs_commands), ("docs_links", docs_links)):
+    got = {os.path.realpath(p) for p in mod.default_docs(root)}
+    for miss in sorted(want - got):
+        print(f"{name} does not read {os.path.relpath(miss, root)}")
+PY
+)"
+  [ -z "$out" ] || { printf '%s\n' "$out" >&2; return 1; }
+}
+
+# EVERY RELATIVE LINK AND #ANCHOR RESOLVES. tests/lib/docs_links.py reads
+# README.md, CONTRIBUTING.md, SECURITY.md and docs/**/*.md; a section moved
+# to another file leaves its old #anchor behind, and that fails here.
+test_docs_links_all_resolve() {
+  local out rc=0
+  out="$(python3 "$CEL_ROOT/tests/lib/docs_links.py" "$CEL_ROOT" 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ] || { printf '%s\n' "$out" >&2; return 1; }
+  local n; n="$(printf '%s\n' "$out" | sed -n 's/^checked //p')"
+  [ "${n:-0}" -ge 100 ] || { echo "checked only ${n:-0} links - the extractor found too few" >&2; return 1; }
+}
+
+test_docs_links_refuses_broken_links_and_anchors() {
+  local T; T="$(mktemp -d)"
+  mkdir -p "$T/docs/images"
+  : >"$T/docs/images/shot.webp"; : >"$T/LICENSE"
+  cat >"$T/docs/topic.md" <<'MD'
+# Gateway — several subscriptions behind one door
+## What `cel gc` keeps
+## Versioning & updates
+## Notes
+## Notes
+<a id="custom-spot"></a>
+MD
+  cat >"$T/README.md" <<'MD'
+[ok](docs/topic.md#gateway--several-subscriptions-behind-one-door) [ok](docs/topic.md#what-cel-gc-keeps)
+[ok](docs/topic.md#versioning--updates) [ok](docs/topic.md#notes-1) [ok](docs/topic.md#custom-spot)
+![ok](docs/images/shot.webp) [ok](LICENSE) [ok](#local) [ok](https://example.com/x#y) [ok](docs/)
+[gone](docs/nosuch.md)
+[no anchor](docs/topic.md#notes-2)
+[not md](LICENSE#top)
+[here](#nowhere)
+![img](docs/images/missing.png)
+[out](../outside.md)
+`[in a code span](docs/nosuch.md)` and [ref]: docs/also-missing.md
+[ref]: docs/also-missing.md
+
+```
+[in a fence](docs/nosuch.md)
+```
+
+## Local
+MD
+  local out rc=0
+  out="$(python3 "$CEL_ROOT/tests/lib/docs_links.py" "$T" 2>/dev/null)" || rc=$?
+  assert_eq "$rc" 1 || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "README.md:4: docs/nosuch.md: no such file" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "README.md:5: docs/topic.md#notes-2: no such anchor in docs/topic.md" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "README.md:6: LICENSE#top: an anchor into a file that is not markdown" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "README.md:7: #nowhere: no such anchor in README.md" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "README.md:8: docs/images/missing.png: no such file" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "README.md:9: ../outside.md: leaves the tree" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "README.md:11: docs/also-missing.md: no such file" || { rm -rf "$T"; return 1; }
+  # the good links on lines 1-3, the code span and the fence are not reported
+  assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 7 || { printf '%s\n' "$out" >&2; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}

@@ -1027,7 +1027,7 @@ Both private surfaces use `tools/http-security.mjs`: exact configured
 Host/Origin checks and a per-process CSRF token. `GET /api/session` is the
 trusted automation handshake, not a login. The public pages tier intentionally
 accepts dynamic tunnel hostnames but never exposes those controls. See the
-[README](../README.md#private-http-services) for configuration and the
+[private HTTP services](what-lives-where.md#private-http-services) for configuration and the
 [security policy](../SECURITY.md) for the trust boundary.
 
 ## Installation and release

@@ -65,7 +65,7 @@ test_dash_one_old_ports_are_closed() {
   _do_down
 }
 
-# /classic is retired and only redirects to / (README still documents it).
+# /classic is retired and only redirects to / (docs/watch-and-steer.md still documents it).
 test_dash_one_classic_redirects_to_the_front_door() {
   _do_setup
   "$CEL_ROOT/bin/cel" dash --ensure >/dev/null 2>&1

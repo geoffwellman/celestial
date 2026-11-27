@@ -11,13 +11,9 @@ cel release celestial 0.3.0             # dispatches the Release workflow
 cel release status celestial            # current version, commits since, newest Release, run in flight
 ```
 
-On a terminal the dispatch follows the run to its conclusion and names the
-Release it cut; in a script, or with `--no-follow`, it returns after the
-dispatch (`--follow` forces following). Where celestial is the only repo in the
-workspace declaring a `release:` block, the short form `cel release 0.3.0`
-means exactly this; see ["Releasing a product"](../README.md#releasing-a-product)
-for the declaration the verb reads. Under `cel afk` a release is dispatched
-only if AFK admits it.
+How the dispatch is followed, AFK's admission, the short form
+`cel release 0.3.0` and the `release:` declaration the verb reads are in
+["Releasing a product"](releasing.md).
 
 Or run the **Release** workflow from the Actions tab with the same version.
 Its `verify` job first runs the same checks as every pull request (the reused
