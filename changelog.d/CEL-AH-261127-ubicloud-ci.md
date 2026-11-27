@@ -1,0 +1,2 @@
+### Changed
+- CI and the release workflow run on Ubicloud's GitHub Actions runners (`ubicloud-standard-2`: Ubuntu 24.04 x64, 2 vCPU, 8 GB) instead of GitHub's `ubuntu-24.04`. Job and check names are unchanged, so the required "Tests and publication hygiene" check still gates `main`. The runner image is built from GitHub's own runner-images templates, so the setup steps are unchanged; the suite's parallel pool follows `nproc` and runs two files at a time there. Jobs need the Ubicloud GitHub app installed with access to this repository, or they queue with no runner.
