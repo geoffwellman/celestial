@@ -1008,20 +1008,31 @@ _inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
   [ -n "$who" ] || who="$(_inbox_me)"
   ws="$(_inbox_ws "$ws")"
   have flock || die 'cel inbox wait: flock is not on PATH'
-  local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-wait" lkfd
+  local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-wait" lkfd gtfd
   mkdir -p "$lkd" 2>/dev/null || true
   local lock; lock="$lkd/$(_inbox_sanitise "$ws").$who.lock"
+  # A PROBE NEVER REFUSES A WAITER. --check can ask the lock only by taking
+  # it for a moment, and a waiter trying it in that moment would find it held
+  # and stand down with nobody armed. So a probe and a waiter's try take turns
+  # on a gate beside the lock, each holding it only across its one try (a probe
+  # lets go of the lock before the gate): behind the gate, a held lock is
+  # another waiter's. A turn is bounded - a gate never let go costs 5s, then
+  # the try goes ahead without it.
   if [ "$check" -eq 1 ]; then
     [ -e "$lock" ] || return 1
-    { exec {lkfd}>>"$lock"; } 2>/dev/null || return 1
-    if flock -n "$lkfd"; then exec {lkfd}>&-; return 1; fi
-    exec {lkfd}>&-; return 0
+    { exec {gtfd}>>"$lock.gate" {lkfd}>>"$lock"; } 2>/dev/null || return 1
+    flock -w 5 "$gtfd" 2>/dev/null || true
+    if flock -n "$lkfd"; then exec {lkfd}>&- {gtfd}>&-; return 1; fi
+    exec {lkfd}>&- {gtfd}>&-; return 0
   fi
-  { exec {lkfd}>>"$lock"; } 2>/dev/null || die "cel inbox wait: cannot open $lock"
+  { exec {gtfd}>>"$lock.gate" {lkfd}>>"$lock"; } 2>/dev/null || die "cel inbox wait: cannot open $lock"
+  flock -w 5 "$gtfd" 2>/dev/null || true
   if ! flock -n "$lkfd"; then
+    exec {lkfd}>&- {gtfd}>&-
     printf 'cel inbox wait: already armed for %s in %s - nothing started\n' "$who" "$ws"
-    exec {lkfd}>&-; return 0
+    return 0
   fi
+  exec {gtfd}>&-
   [ -n "$parent" ] || parent="$(_inbox_runtime_ancestor)" || parent=""
   local f n tfd tpid line rc why="" waited=0 me="${BASHPID:-$$}" tick="${CEL_WATCH_PARENT_POLL:-5}" poll="${CEL_INBOX_WAIT_POLL:-30}" follow=()
   # A WAITER IS BOUNDED. One with no agent runtime above it would never be
@@ -1035,10 +1046,13 @@ _inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
   if tail --pid="$me" -n 0 /dev/null >/dev/null 2>&1; then follow=(-s "$tick" --pid="$me"); fi
   exec {tfd}< <(exec {lkfd}>&-; exec tail -n 0 -F "${follow[@]}" "$f" 2>/dev/null)
   tpid=$!
+  # Every kill of the tail allows for it being gone (and reaped) already:
+  # cel runs under set -e, and a failed kill would end the waiter there - rc
+  # 1, nothing said - before it could say why it stopped.
   # shellcheck disable=SC2064
-  trap "kill $tpid 2>/dev/null; trap - EXIT; exit 130" INT TERM
+  trap "kill $tpid 2>/dev/null || true; trap - EXIT; exit 130" INT TERM
   # shellcheck disable=SC2064
-  trap "kill $tpid 2>/dev/null" EXIT
+  trap "kill $tpid 2>/dev/null || true" EXIT
   while :; do
     # a mailbox that does not parse is something to read, not nothing
     n="$(_inbox_count_one "$ws" "$who" 2>/dev/null)" || { [ "${n:-0}" -gt 0 ] 2>/dev/null || n=1; }
@@ -1051,7 +1065,7 @@ _inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
       elif [ "$(date +%s)" -ge "$deadline" ]; then why="it reached its ${CEL_INBOX_WAIT_MAX:-86400}s limit"
       fi
       if [ -n "$why" ]; then
-        kill "$tpid" 2>/dev/null; exec {tfd}<&- {lkfd}>&-; trap - INT TERM EXIT
+        kill "$tpid" 2>/dev/null || true; exec {tfd}<&- {lkfd}>&-; trap - INT TERM EXIT
         # NOT A WAKE WITH MAIL: no mail is claimed, and the exit status says so
         printf 'cel inbox wait: stopped without mail for %s in %s - %s. Start cel inbox wait again if you are still running.\n' "$who" "$ws" "$why"
         return 3
@@ -1060,10 +1074,12 @@ _inbox_wait() { # [--for who] [--workspace w] [--parent pid] [--check]
       [ "$waited" -lt "$poll" ] || { waited=0; break; }
     done
   done
-  kill "$tpid" 2>/dev/null; exec {tfd}<&-; trap - INT TERM EXIT
+  kill "$tpid" 2>/dev/null || true; exec {tfd}<&-; trap - INT TERM EXIT
   printf 'cel inbox: %s unread for %s in %s\n' "$n" "$who" "$ws"
+  # A preview only: a mailbox it cannot parse is still a wake (above), and
+  # the wake still ends with what to do and exits 0, pipefail or not.
   inbox_unread_json "$ws" "$who" 2>/dev/null \
-    | jq -r '"INBOX \(.kind // "status") from \(.from // "?"): \(.message // "" | tostring | gsub("\n"; " ") | .[0:300])"' 2>/dev/null | tail -n 3
+    | jq -r '"INBOX \(.kind // "status") from \(.from // "?"): \(.message // "" | tostring | gsub("\n"; " ") | .[0:300])"' 2>/dev/null | tail -n 3 || true
   printf 'Read it (cel inbox read --for %s --workspace %s; an agy turn has it attached), act on it, and start cel inbox wait again before the turn ends.\n' "$who" "$ws"
 }
 

@@ -445,6 +445,19 @@ _aw_setup() {
 }
 _aw_down() { rm -rf "$CEL_INBOX_DIR" "$XDG_RUNTIME_DIR"; }
 _aw_gone() { local i; for i in $(seq 1 40); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done; return 1; }
+# --check asked until it answers <rc> (0 armed, 1 not), for up to ~10s. Never
+# a fixed sleep: a waiter takes its lock a moment after it starts, and a
+# killed one's lock goes with the last process holding it - both later than
+# any fixed pause on a loaded runner.
+_aw_check_until() { # <rc>
+  local i rc
+  for i in $(seq 1 100); do
+    rc=0; _agy_sub _inbox_wait --check --for widget-lane-a --workspace demo || rc=$?
+    [ "$rc" -eq "$1" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
 
 test_inbox_wait_returns_at_once_for_waiting_mail_and_consumes_nothing() {
   _aw_setup
@@ -469,19 +482,54 @@ test_inbox_wait_blocks_until_mail_arrives_then_exits() {
   rm -f "$o"; _aw_down
 }
 
+# Under the suite's set -e a bare command that fails ends the test with no
+# message, so nothing here may fail by timing alone: the first waiter is
+# stopped by TERM only (its trap takes its tail with it) - killing its tail
+# first left it either no child to find or an exit of its own that beat the
+# kill aimed at it.
 test_inbox_wait_is_one_per_reader_and_check_says_whether_it_runs() {
   _aw_setup
   _agy_sub _inbox_wait --check --for widget-lane-a --workspace demo && { echo "armed with no waiter"; _aw_down; return 1; }
   ( _inbox_wait --for widget-lane-a --workspace demo >/dev/null 2>&1 ) & local w=$!
-  sleep 1.5
-  _agy_sub _inbox_wait --check --for widget-lane-a --workspace demo || { echo "check missed a live waiter"; kill "$w"; _aw_down; return 1; }
-  local out; out="$(timeout 5 bash -c 'source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/inbox.sh"; _inbox_wait --for widget-lane-a --workspace demo')"
+  _aw_check_until 0 || { echo "check missed a live waiter"; kill "$w"; _aw_down; return 1; }
+  local out rc=0
+  out="$(timeout 20 bash -c 'source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/inbox.sh"; _inbox_wait --for widget-lane-a --workspace demo')" || rc=$?
+  [ "$rc" -eq 0 ] || { echo "a second waiter was not refused (rc $rc)"; kill "$w"; _aw_down; return 1; }
   assert_contains "$out" "already"
-  kill -0 "$w" 2>/dev/null || { echo "the first waiter died"; _aw_down; return 1; }
-  pkill -P "$w" 2>/dev/null; kill "$w" 2>/dev/null; _aw_gone "$w"
-  sleep 0.5
-  _agy_sub _inbox_wait --check --for widget-lane-a --workspace demo && { echo "armed after its waiter went"; _aw_down; return 1; }
+  kill "$w" 2>/dev/null || { echo "the first waiter died"; _aw_down; return 1; }
+  _aw_gone "$w" || { echo "the first waiter outlived its TERM"; kill -9 "$w"; _aw_down; return 1; }
+  _aw_check_until 1 || { echo "armed after its waiter went"; _aw_down; return 1; }
   _aw_down
+}
+
+# A --check holds the lock for the moment it asks. A waiter that tries the
+# lock in that moment waits its turn and arms; it does not take the probe for
+# a waiter and stand down with nobody armed. The probe is held inside that
+# moment here (a flock shim on its PATH alone) until the waiter has made its
+# try: it is waiting on a flock of its own, or it has gone.
+test_inbox_wait_is_not_stood_down_by_a_check_in_flight() {
+  _aw_setup
+  # a reader that has had a waiter, so the lock is there for a probe to take
+  ( CEL_INBOX_WAIT_MAX=0 CEL_WATCH_PARENT_POLL=1 _inbox_wait --for widget-lane-a --workspace demo >/dev/null 2>&1 ) || true
+  local d i; d="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\n%q "$@" || exit\n[ "$1" != -n ] && exit\n: > %q\nfor i in $(seq 1 100); do [ -e %q ] && exit; sleep 0.1; done\n' \
+    "$(command -v flock)" "$d/held" "$d/go" > "$d/flock"
+  chmod +x "$d/flock"
+  ( PATH="$d:$PATH"; _inbox_wait --check --for widget-lane-a --workspace demo ) & local p=$!
+  for i in $(seq 1 100); do [ ! -e "$d/held" ] || break; sleep 0.1; done
+  [ -e "$d/held" ] || { echo "the probe never took the lock"; kill "$p"; rm -rf "$d"; _aw_down; return 1; }
+  ( _inbox_wait --for widget-lane-a --workspace demo > "$d/out" 2>&1 ) & local w=$!
+  for i in $(seq 1 100); do
+    { pgrep -P "$w" -x flock || ! kill -0 "$w"; } >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  : > "$d/go"
+  # the probe holds the lock until it is done, so ask only then
+  wait "$p" || true
+  _aw_check_until 0 || { echo "a check in flight stood the waiter down: $(cat "$d/out")"; kill "$w" 2>/dev/null || true; rm -rf "$d"; _aw_down; return 1; }
+  kill "$w"
+  _aw_gone "$w" || { echo "the waiter outlived its TERM"; kill -9 "$w"; rm -rf "$d"; _aw_down; return 1; }
+  rm -rf "$d"; _aw_down
 }
 
 test_inbox_wait_goes_when_its_parent_goes() {
@@ -505,6 +553,36 @@ test_inbox_wait_orphan_is_bounded_and_stops_without_claiming_mail() {
   assert_contains "$(cat "$o")" "stopped without mail"
   _agy_sub _inbox_wait --check --for widget-lane-a --workspace demo && { echo "still armed"; _aw_down; return 1; }
   rm -f "$o"; _aw_down
+}
+
+# A real `cel inbox wait` (cel's own set -e) whose mailbox tail ends says so
+# and exits 3. By the time it stops the tail, the tail is gone and reaped:
+# that kill failing must not end the waiter first, with 1 and nothing said.
+test_inbox_wait_whose_tail_ends_says_so_and_exits_3() {
+  _aw_setup
+  local o t="" i rc=0; o="$(mktemp)"
+  "$CEL_ROOT/bin/cel" inbox wait --for widget-lane-a --workspace demo > "$o" 2>&1 & local w=$!
+  for i in $(seq 1 100); do t="$(pgrep -P "$w" -f '^tail -n 0 -F')" && break; sleep 0.1; done
+  [ -n "$t" ] || { echo "the waiter never started its tail"; cat "$o"; kill "$w"; rm -f "$o"; _aw_down; return 1; }
+  kill "$t"
+  _aw_gone "$w" || { echo "the waiter outlived its tail"; kill "$w"; rm -f "$o"; _aw_down; return 1; }
+  wait "$w" || rc=$?
+  assert_eq "$rc" 3 || { cat "$o"; rm -f "$o"; _aw_down; return 1; }
+  assert_contains "$(cat "$o")" "stopped without mail for widget-lane-a in demo - its mailbox tail ended"
+  rm -f "$o"; _aw_down
+}
+
+# A mailbox that does not parse is something to read: a real `cel inbox
+# wait` over one wakes (exit 0) and still says what to do, though it cannot
+# preview the mail.
+test_inbox_wait_over_a_torn_mailbox_wakes_and_says_what_to_do() {
+  _aw_setup
+  printf '{"to":"widget-lane-a","from":"root","message":"half\n' > "$(_inbox_file demo)"
+  local out rc=0
+  out="$(timeout 20 "$CEL_ROOT/bin/cel" inbox wait --for widget-lane-a --workspace demo 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; _aw_down; return 1; }
+  assert_contains "$out" "start cel inbox wait again before the turn ends"
+  _aw_down
 }
 
 # agy's gateway route is not wired: such a profile is refused, not rerouted.
