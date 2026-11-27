@@ -726,13 +726,15 @@ test_v2_usage_draws_a_window_whose_reset_passed_with_no_number() {
 # A RESET WITH NO ZONE IS UTC, as the shared rule reads it (sub_epoch in
 # lib/quota.sh), whatever zone the dashboard runs in; epoch seconds are
 # seconds. Read as local time at UTC+14, a reset three hours ahead was eleven
-# hours gone, and the card drew a running window as reset.
+# hours gone, and the card drew a running window as reset. Both resets come
+# from ONE clock read: two `date +%s` calls straddling a second boundary gave
+# an epoch one second past the zoneless string it must equal (AH-261127).
 test_v2_usage_reads_a_zoneless_reset_as_utc_like_the_shared_rule() {
   export TZ=Pacific/Kiritimati
   _v2_boot; _v2_quota_fixture
   local ahead secs
-  ahead="$(date -u -d "@$(( $(date +%s) + 10800 ))" +%Y-%m-%dT%H:%M:%S)"
   secs="$(( $(date +%s) + 10800 ))"
+  ahead="$(date -u -d "@$secs" +%Y-%m-%dT%H:%M:%S)"
   jq --arg z "$ahead" --argjson s "$secs" '.subscriptions[1].windows[0] |= (.used_pct = 30 | .resets_at = $z)
     | .subscriptions[2].windows[0] |= (.used_pct = 30 | .resets_at = $s)' \
     "$T/quota.json" > "$T/q.json" && mv "$T/q.json" "$T/quota.json"
