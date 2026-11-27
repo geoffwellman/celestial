@@ -287,7 +287,7 @@ _release_status() { # [product] [--all-workspaces] [--json]
     return 0
   fi
   if [ -z "$rows" ]; then
-    c_warn "no repo here declares a release: block - see README"
+    c_warn "no repo here declares a release: block - see docs/releasing.md"
     return 0
   fi
   c_hd "Releases"
@@ -316,7 +316,7 @@ _release_resolve_repo() { # <wsdir> <product> <explicit-repo> <value>
   fi
   case "${#found[@]}" in
     1) printf '%s' "${found[0]}"; return 0 ;;
-    0) _rrefuse "cel release: $product declares no release: block - see README"; return 1 ;;
+    0) _rrefuse "cel release: $product declares no release: block - see docs/releasing.md"; return 1 ;;
     *) _rrefuse "cel release: $product has ${#found[@]} releasable repos ($(printf '%s ' "${found[@]}" | sed 's/ $//;s/ /, /g')) - name one: cel release $product $value --repo <name>"; return 1 ;;
   esac
 }
