@@ -36,9 +36,11 @@ jobs:
     name: Regression suite
     if: github.event_name != 'schedule'
     runs-on: ubicloud-standard-2
-    # Measured 14-19 minutes end to end on main (Nov 2026); headroom for a slow
-    # runner without letting a hung run sit for the 6-hour default.
-    timeout-minutes: 30
+    # Measured 23-25 minutes end to end on ubicloud-standard-2 (Nov 2026; the
+    # suite step alone 23-24 minutes, two files at a time, against 12-13 on
+    # GitHub's 4-vCPU runner); headroom for a slower runner without letting a
+    # hung run sit for the 6-hour default.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
