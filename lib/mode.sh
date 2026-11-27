@@ -245,7 +245,7 @@ cmd_mode() { # [product] [solo] [--workspace w] [--no-restart]
       solo) want="$1"; shift ;;
       # Retired with fan-out; refused for one release so a habit gets an
       # answer. Nothing is written.
-      fleet) die "cel mode: fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)" ;;
+      fleet) die "cel mode: fan-out was retired on 2026-11-08: build in the product's solo agent (or its feature team, cel team)" ;;
       -h|--help)
         printf 'usage: cel mode [<product>] [solo] [--workspace <w>] [--no-restart]\n'
         return 0 ;;

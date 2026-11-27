@@ -123,3 +123,104 @@ test_prefs_keep_a_user_hook_that_shares_an_entry_with_the_placeholder() {
   assert_contains "$cmds" "mine-too"
   rm -rf "$h"
 }
+
+# Claude's guard (tools/hooks/orchestrator-guard.sh) is registered as a
+# PreToolUse hook naming the INSTALLED plane (the cel on PATH), never the
+# checkout this code runs from.
+_cp_installed() { # <root> -> an installed plane at <root>, its cel first on PATH
+  mkdir -p "$1/bin" "$1/tools/hooks"
+  printf '#!/bin/sh\n' > "$1/bin/cel"; chmod +x "$1/bin/cel"
+  : > "$1/tools/hooks/orchestrator-guard.sh"
+}
+_cp_guard_entry() { # <root> -> the exact entry, compact and key-sorted
+  local cmd; printf -v cmd 'bash %q' "$1/tools/hooks/orchestrator-guard.sh"
+  jq -cS -n --arg c "$cmd" '{matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit", hooks: [{type: "command", command: $c, timeout: 10}]}'
+}
+_CP_MATCHER='Bash|Edit|Write|MultiEdit|NotebookEdit'
+_cp_guard_entries() { # <settings> -> every PreToolUse entry of exactly our guard shape
+  jq -cS --arg m "$_CP_MATCHER" '[.hooks.PreToolUse[]? | select(.matcher == $m and any(.hooks[]?;
+    (.command // "") | test("^bash (\u0027[^\u0027]*/tools/hooks/orchestrator-guard\\.sh\u0027|([^\\s\\\\\u0027]|\\\\.)+/tools/hooks/orchestrator-guard\\.sh)$")))]' "$1"
+}
+_cp_path_without_cel() { # -> $PATH minus every directory holding a cel
+  local d out="" IFS=:
+  for d in $PATH; do [ -x "$d/cel" ] || out="${out:+$out:}$d"; done
+  printf '%s' "$out"
+}
+test_prefs_register_the_guard_in_a_fresh_home() {
+  local T; T="$(mktemp -d)"; _cp_installed "$T/installed"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(_cp_guard_entries "$T/home/.claude/settings.json")" "[$(_cp_guard_entry "$T/installed")]"
+  rm -rf "$T"
+}
+test_prefs_guard_keeps_foreign_hooks_and_rerun_is_a_noop() {
+  local T s; T="$(mktemp -d)"; _cp_installed "$T/installed"; s="$T/home/.claude/settings.json"
+  mkdir -p "$T/home/.claude"
+  echo '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"moshi-hook"}]},{"matcher":"*","hooks":[{"type":"command","command":"stackchan notify"},{"type":"command","command":"orca hook"}]}]}}' > "$s"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(jq -r '[.hooks.PreToolUse[].hooks[].command] | .[0:3] | join("|")' "$s")" "moshi-hook|stackchan notify|orca hook"
+  assert_eq "$(_cp_guard_entries "$s")" "[$(_cp_guard_entry "$T/installed")]"
+  # a foreign hook added after ours stays after it: the re-run moves nothing
+  jq '.hooks.PreToolUse += [{"matcher":"Edit","hooks":[{"type":"command","command":"later"}]}]' "$s" > "$s.t" && mv "$s.t" "$s"
+  local before; before="$(cat "$s")"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(cat "$s")" "$before"
+  rm -rf "$T"
+}
+test_prefs_guard_replaces_a_stale_celestial_entry_only() {
+  local T s; T="$(mktemp -d)"; _cp_installed "$T/installed"; s="$T/home/.claude/settings.json"
+  mkdir -p "$T/home/.claude"
+  # an older install's entry (a worktree path), sharing an entry with a user
+  # hook, and a second one with a quoted path
+  echo '{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"bash /old/wt/tools/hooks/orchestrator-guard.sh","timeout":10},{"type":"command","command":"mine"}]},{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"bash /older\\ dir/tools/hooks/orchestrator-guard.sh"}]}]}}' > "$s"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(_cp_guard_entries "$s")" "[$(_cp_guard_entry "$T/installed")]"
+  # the one-time reorder: the user hook keeps its entry and place, ours goes last
+  assert_eq "$(jq -c '.hooks.PreToolUse[0]' "$s")" '{"hooks":[{"command":"mine","type":"command"}],"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit"}'
+  assert_eq "$(jq '.hooks.PreToolUse | length' "$s")" 2
+  rm -rf "$T"
+}
+# Only our exact shape is ours: another project's guard, ours with extra args,
+# a .bak path, or our command under another matcher are never touched.
+test_prefs_guard_never_touches_foreign_guard_hooks() {
+  local T s foreign; T="$(mktemp -d)"; _cp_installed "$T/installed"; s="$T/home/.claude/settings.json"
+  mkdir -p "$T/home/.claude"
+  foreign='[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"bash /other/project/hooks/orchestrator-guard.sh"},{"type":"command","command":"bash /old/tools/hooks/orchestrator-guard.sh --strict"},{"type":"command","command":"bash /old/tools/hooks/orchestrator-guard.sh.bak"},{"type":"command","command":"sh /old/tools/hooks/orchestrator-guard.sh"}]},{"matcher":"Bash","hooks":[{"type":"command","command":"bash /old/tools/hooks/orchestrator-guard.sh"}]}]'
+  jq -n --argjson f "$foreign" '{hooks: {PreToolUse: $f}}' > "$s"
+  HOME="$T/home" PATH="$T/installed/bin:$PATH" link_claude_prefs >/dev/null
+  assert_eq "$(jq -cS '.hooks.PreToolUse[0:2]' "$s")" "$(jq -cS -n --argjson f "$foreign" '$f')"
+  assert_eq "$(_cp_guard_entries "$s")" "[$(_cp_guard_entry "$T/installed")]"
+  rm -rf "$T"
+}
+# No installed plane (no cel on PATH, or the cel on PATH is a linked
+# worktree, or one without the script): warn, register nothing, and leave an
+# existing entry alone - never fall back to the checkout this runs from.
+test_prefs_guard_skipped_without_an_installed_plane() {
+  local T s before out; T="$(mktemp -d)"; s="$T/home/.claude/settings.json"
+  mkdir -p "$T/home/.claude"
+  echo '{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"bash /kept/tools/hooks/orchestrator-guard.sh","timeout":10}]}]}}' > "$s"
+  before="$(jq -cS .hooks.PreToolUse "$s")"
+  out="$(HOME="$T/home" PATH="$(_cp_path_without_cel)" link_claude_prefs 2>&1)"
+  assert_contains "$out" "guard entry not registered"
+  assert_eq "$(jq -cS .hooks.PreToolUse "$s")" "$before"
+  # an installed plane without the script
+  mkdir -p "$T/noscript/bin"; printf '#!/bin/sh\n' > "$T/noscript/bin/cel"; chmod +x "$T/noscript/bin/cel"
+  HOME="$T/home" PATH="$T/noscript/bin:$PATH" link_claude_prefs >/dev/null 2>&1
+  assert_eq "$(jq -cS .hooks.PreToolUse "$s")" "$before"
+  # a fresh HOME with no plane gets no guard entry at all
+  HOME="$T/fresh" PATH="$(_cp_path_without_cel)" link_claude_prefs >/dev/null 2>&1
+  assert_eq "$(jq -c '.hooks.PreToolUse // []' "$T/fresh/.claude/settings.json")" "[]"
+  rm -rf "$T"
+}
+test_prefs_guard_skipped_when_the_cel_on_path_is_a_worktree() {
+  local T s; T="$(mktemp -d)"; s="$T/home/.claude/settings.json"
+  git init -q "$T/repo" && _cp_installed "$T/repo" \
+    && git -C "$T/repo" add -A && git -C "$T/repo" -c user.name=t -c user.email=t@example.invalid commit -qm init \
+    && git -C "$T/repo" worktree add -q "$T/wt" 2>/dev/null
+  [ -x "$T/wt/bin/cel" ] || { echo "fixture worktree not made"; rm -rf "$T"; return 1; }
+  HOME="$T/home" PATH="$T/wt/bin:$PATH" link_claude_prefs >/dev/null 2>&1
+  assert_eq "$(_cp_guard_entries "$s")" "[]"
+  # ...while the main checkout itself counts as installed
+  HOME="$T/home" PATH="$T/repo/bin:$PATH" link_claude_prefs >/dev/null 2>&1
+  assert_eq "$(_cp_guard_entries "$s")" "[$(_cp_guard_entry "$T/repo")]"
+  rm -rf "$T"
+}

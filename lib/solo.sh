@@ -337,7 +337,7 @@ _solo_resolve() { # <ref> <workspace-or-empty>
     || die "cel solo: '$repo' is not a repo of workspace '$(ws_name "$SOLO_WSDIR")'"
   SOLO_PRODUCT="$(ws_product_of_repo "$SOLO_WSDIR" "$repo")"
   [ "$(ws_build_mode "$SOLO_WSDIR" "$SOLO_PRODUCT")" = solo ] \
-    || die "cel solo: '$repo' belongs to '$SOLO_PRODUCT', which is not in solo mode - fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)"
+    || die "cel solo: '$repo' belongs to '$SOLO_PRODUCT', which is not in solo mode - fan-out was retired on 2026-11-08: build in the product's solo agent (or its feature team, cel team)"
   SOLO_REPO="$repo"; SOLO_PR="$pr"
 }
 

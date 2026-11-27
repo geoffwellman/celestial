@@ -180,21 +180,36 @@ link_herdr_layouts() {
 # Box-wide Claude Code preferences the plane asserts everywhere. Objects are
 # deep-merged; the plane's UserPromptSubmit hook is appended once, preserving
 # the user's handlers. Its script path is resolved here so Claude need not
-# inherit CEL_ROOT in unrelated sessions.
+# inherit CEL_ROOT in unrelated sessions. Claude's guard
+# (tools/hooks/orchestrator-guard.sh) is one PreToolUse entry naming the
+# INSTALLED plane (installed_plane_root, lib/agy.sh), never a worktree or
+# review checkout: with no installed plane, or one without the script, it is
+# skipped with a warning and any existing entry is left alone. Every other
+# PreToolUse hook (the user's, moshi's, Orca's, another project's guard)
+# stays as it is; only a hook of exactly the shape this writes - our matcher,
+# command `bash <path>/tools/hooks/orchestrator-guard.sh` and nothing else -
+# naming another path is replaced. Codex has no hook API, so it has no guard.
 link_claude_prefs() {
   local prefs="$CEL_ROOT/tools/claude/settings-prefs.json"
   local settings="$HOME/.claude/settings.json"
   if [ -f "$prefs" ]; then
     mkdir -p "$HOME/.claude"
     [ -f "$settings" ] || echo '{}' > "$settings"
-    local hook_command merged
+    local hook_command guard_command="" groot merged
     printf -v hook_command 'bash %q' "$CEL_ROOT/tools/hooks/inbox-drain.sh"
-    merged="$(jq -S --arg hook_command "$hook_command" --slurpfile p "$prefs" '
+    if groot="$(installed_plane_root)" && [ -f "$groot/tools/hooks/orchestrator-guard.sh" ]; then
+      printf -v guard_command 'bash %q' "$groot/tools/hooks/orchestrator-guard.sh"
+    else
+      c_warn "claude guard: no installed plane with tools/hooks/orchestrator-guard.sh (the cel on PATH, not a worktree) - guard entry not registered; cel update from the installed plane"
+    fi
+    merged="$(jq -S --arg hook_command "$hook_command" --arg guard_command "$guard_command" --slurpfile p "$prefs" '
       def append_unique:
         reduce .[] as $item
           ([]; if any(.[]; . == $item) then . else . + [$item] end);
       . as $current
       | ($p[0] | .hooks.UserPromptSubmit[0].hooks[0].command = $hook_command) as $plane
+      | {matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit",
+         hooks: [{type: "command", command: $guard_command, timeout: 10}]} as $guard
       | ($current * $plane)
       # An entry an older install wrote with the placeholder unresolved runs a
       # command that does not exist on every prompt; the plane wrote it, so it
@@ -204,6 +219,21 @@ link_claude_prefs() {
               | map(.hooks = [(.hooks // [])[] | select(((.command // "") | test("^__CEL_[A-Z_]+__$")) | not)])
               | map(select((.hooks | length) > 0)) +
             ($plane.hooks.UserPromptSubmit // [])) | append_unique)
+      # The guard entry, once, unless there is no installed plane to name
+      # (then PreToolUse is left exactly as it was). A stale hook is one of
+      # exactly our shape in an entry with our matcher; it is dropped from its
+      # entry and an entry left empty goes. ONE-TIME REORDER: when a stale
+      # guard shared an entry with a user hook, that user hook keeps its
+      # entry and place, and the new guard entry is appended at the end -
+      # after that, a re-run moves nothing.
+      | if $guard_command == "" then . else
+        .hooks.PreToolUse =
+          (($current.hooks.PreToolUse // [])
+            | map(if . == $guard or .matcher != $guard.matcher then . else
+                .hooks = [(.hooks // [])[] | select(((.command // "") | test("^bash (\u0027[^\u0027]*/tools/hooks/orchestrator-guard\\.sh\u0027|([^\\s\\\\\u0027]|\\\\.)+/tools/hooks/orchestrator-guard\\.sh)$")) | not)] end)
+            | map(select((.hooks | length) > 0))
+            | if any(.[]; . == $guard) then . else . + [$guard] end)
+        end
     ' "$settings")" || return 1
     if [ "$merged" != "$(jq -S . "$settings")" ]; then
       printf '%s\n' "$merged" > "$settings"

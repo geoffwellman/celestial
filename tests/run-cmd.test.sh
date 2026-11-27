@@ -50,7 +50,7 @@ test_run_orchestrator_targets_repo() {
 }
 # FAN-OUT IS RETIRED. The old worker/scout/spike roles are refused for a
 # release with an answer, not a launch, and the cel-fanout stub says the same.
-_FANOUT_RETIRED="fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)"
+_FANOUT_RETIRED="fan-out was retired on 2026-11-08: build in the product's solo agent (or its feature team, cel team)"
 test_run_worker_is_refused_as_retired() {
   _ws; local out
   out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --dry-run 2>&1)" \

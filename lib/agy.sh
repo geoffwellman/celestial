@@ -101,14 +101,30 @@ agy_kickoff() { # <agent-name> -> the first turn of every cel agy launch
 
 agy_hooks_file() { printf '%s/.gemini/config/hooks.json' "$HOME"; }
 
-# THE INSTALLED PLANE, never the checkout this code runs from: the entry is
-# box-wide and outlives a worktree or a review checkout. It is the root of the
-# `cel` on PATH (cel shellenv puts the installed one there).
+# THE INSTALLED PLANE, never the checkout this code runs from: the agy entry
+# is box-wide and outlives a worktree or a review checkout. It is the root of
+# the `cel` on PATH (cel shellenv puts the installed one there).
 agy_hooks_root() {
+  _cel_path_root || printf '%s' "$CEL_ROOT"
+}
+_cel_path_root() { # -> the root of the `cel` on PATH; fails when there is none
   local c
   c="$(type -P cel 2>/dev/null)" && c="$(readlink -f -- "$c")" && [ "${c%/bin/cel}" != "$c" ] \
     && { printf '%s' "${c%/bin/cel}"; return 0; }
-  printf '%s' "$CEL_ROOT"
+  return 1
+}
+# STRICT, for Claude's guard (lib/link.sh): the `cel` on PATH, and only when
+# it is not a linked git worktree (a solo or review checkout put first on
+# PATH). No fallback to CEL_ROOT: fails when there is no installed plane.
+installed_plane_root() {
+  local r g c
+  r="$(_cel_path_root)" || return 1
+  if g="$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" \
+    && c="$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    && [ "$g" != "$c" ]; then
+    return 1
+  fi
+  printf '%s' "$r"
 }
 
 agy_hooks_entry() { # [root] -> the `celestial` value, script paths resolved

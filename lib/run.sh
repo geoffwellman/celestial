@@ -2711,7 +2711,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       # cel team add's launcher; see _run_member_token_spend.
       member) role=member; shift ;;
       # Retired with fan-out; refused for one release so a habit gets an answer.
-      worker|scout|spike) die "cel run $1: fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)" ;;
+      worker|scout|spike) die "cel run $1: fan-out was retired on 2026-11-08: build in the product's solo agent (or its feature team, cel team)" ;;
       # `console` is core's old name and stays an alias of it.
       core|console) role=core; shift ;;
       # SOLO IS THE PRODUCT'S AGENT, not a new kind of pane: same directory,
@@ -2878,7 +2878,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       build_mode="$(ws_build_mode "$wsdir" "$product")"
       case "$build_mode" in
         solo) ;;
-        fleet) die "cel run: $product is set to mode: fleet - fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming). Switch it with: cel mode $product solo" ;;
+        fleet) die "cel run: $product is set to mode: fleet - fan-out was retired on 2026-11-08: build in the product's solo agent (or its feature team, cel team). Switch it with: cel mode $product solo" ;;
         *) die "cel run: product '$product' has mode '$build_mode' - want solo (workspace.yaml)" ;;
       esac
       solo=1

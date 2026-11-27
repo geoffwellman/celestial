@@ -137,3 +137,45 @@ MD
   assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 4 || { printf '%s\n' "$out" >&2; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# `cel help` NAMES EVERY COMMAND bin/cel DISPATCHES. Each alternative of each
+# label in the top-level case (flags, help itself and the retired `work` and
+# `history` aside) must appear in the usage text as `cel <command>`.
+test_cel_help_names_every_dispatched_command() {
+  local help labels c missing=""
+  help="$(bash "$CEL_ROOT/bin/cel" help)"
+  labels="$(awk '/^case "\$\{1:-help\}" in/ { on = 1; next } on && /^esac/ { exit }
+    on && match($0, /^  [a-z][a-z|-]*\)/) { print substr($0, 3, RLENGTH - 3) }' "$CEL_ROOT/bin/cel" | tr '|' '\n')"
+  [ "$(printf '%s\n' "$labels" | grep -c .)" -ge 30 ] || { echo "read too few dispatch labels: $labels"; return 1; }
+  for c in $labels; do
+    case "$c" in help|work|history|-*) continue ;; esac
+    grep -Eq "(^|[^a-z-])cel $c([^a-z-]|\$)" <<<"$help" || missing="$missing $c"
+  done
+  [ -z "$missing" ] || { echo "cel help does not name:$missing"; return 1; }
+}
+
+# ...and every verb of every command that takes one (VERB_COMMANDS), read
+# from its own case labels by tests/lib/docs_commands.py. An internal verb is
+# listed and marked internal, not hidden; only `<cmd> help` itself is exempt.
+test_cel_help_names_every_verb_of_every_command() {
+  local out
+  out="$(python3 - "$CEL_ROOT" <<'PY'
+import re, subprocess, sys
+root = sys.argv[1]
+sys.path.insert(0, root + "/tests/lib")
+import docs_commands
+_, verbs, _ = docs_commands.commands(root)
+text = subprocess.run(["bash", root + "/bin/cel", "help"], capture_output=True, text=True).stdout
+if len(verbs) < 15:
+    print(f"read verbs for only {len(verbs)} commands")
+for cmd in sorted(verbs):
+    if not verbs[cmd]:
+        print(f"cel {cmd}: no verbs read")
+    for verb, live in sorted(verbs.get(cmd, {}).items()):
+        if live and verb != "help" \
+                and not re.search(r"(?<![a-z-])" + re.escape(verb) + r"(?![a-z-])", text):
+            print(f"cel {cmd} {verb}")
+PY
+)"
+  [ -z "$out" ] || { printf 'cel help does not name:\n%s\n' "$out"; return 1; }
+}
