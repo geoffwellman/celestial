@@ -1,20 +1,41 @@
 # Architecture
 
 Celestial is an AI software factory implemented as a GNU/Linux command-line
-control plane around Git worktrees, [herdr](https://herdr.dev), coding-agent CLIs and a small pair of Node HTTP
-servers. It is not a scheduler with its own agent runtime or an isolation
-boundary against the local user.
+control plane around Git worktrees, two terminal session backends
+([herdr](https://herdr.dev) panes and managed Rex sessions), coding-agent CLIs
+and a small pair of Node HTTP servers. It is not a scheduler with its own agent
+runtime or an isolation boundary against the local user.
+
+- [Code and state](#code-and-state)
+- [Launch and lifecycle](#launch-and-lifecycle)
+  ([launch environment by role](#launch-environment-by-role))
+- [Preservation before cleanup](#preservation-before-cleanup)
+- [Source-control forges](#source-control-forges)
+- [Credentials](#credentials)
+- [HTTP surfaces](#http-surfaces)
+- [Installation and release](#installation-and-release)
 
 ## Code and state
 
 - `bin/cel` performs the platform check, loads shell modules and dispatches
-  commands. `lib/` owns the mechanisms; `agents.yaml` describes agent commands,
-  injection strategies and fresh-install pins.
+  commands. `lib/` owns the mechanisms; `agents.yaml` describes the six
+  runtimes (`claude`, `omp`, `pi`, `codex`, `opencode`, `agy`): their
+  commands, injection, resume and skill strategies and fresh-install pins.
+  `externals.yaml` pins, by commit, the third-party plugins setup installs;
+  `optional-plugins.yaml` lists opt-in ones.
 - `core/roles/` contains role prompts. `core/skills/` contains reusable workflows
   and their executables, including `cel-verify` and `cel-linear`, plus
   third-party skills pinned in `vendored-skills.yaml` and checked by
   `tools/skills/vendor.py`. `lib/link.sh` links every one into each runtime's
-  skills directory (for omp and pi, `<agent root>/skills`).
+  `skills_dir` (for omp and pi, `<agent root>/skills`). A vendored skill with
+  a `set:` (for example `cloudflare`, `expo`) lives in `core/workspace-skills/`
+  instead and reaches only agents launched for a workspace whose
+  `workspace.yaml` names that set in `skill_sets:`: `ws_link_vendored_skills`
+  links it under the workspace's `.cel/skills/`, and each launch names that
+  directory by the runtime's `workspace_skills` strategy (`--add-dir`,
+  `--plugin-dir`, `--skill`, `OPENCODE_CONFIG`, an agent file; Codex gets
+  them linked but disabled in its `config.toml`, enabled per launch with
+  `-c`). Nothing is written into a product repo.
 - A separately owned workspace contains `workspace.yaml`, optional layouts,
   skills and dependency overlays, plus product clones under `repos/`.
   Workspace content and credentials do not belong in this repository.
@@ -28,8 +49,9 @@ boundary against the local user.
 ## Launch and lifecycle
 
 Workspace resolution supplies policy, role, runtime, profile and environment.
-`cel run` starts the selected role in a visible Herdr pane by default, or an
-explicitly selected managed Rex session. Solo agents and reviewers use the
+`cel run` starts the selected role in a visible Herdr pane by default, or in a
+managed Rex session when `--session-backend rex`, `CEL_SESSION_BACKEND` or the
+workspace's `session_backend:` selects it. Solo agents and reviewers use the
 same GitHub and ticket interfaces that an operator can invoke directly.
 
 A product's build mode (`ws_build_mode`) is `solo` when the product declares
@@ -161,9 +183,17 @@ strategies pre-approve tool permissions. Only use trusted workspace content,
 skills and dependencies, and understand the accounts available to each agent.
 
 The steward performs a deterministic sweep: cleanup, review/ticket/mailbox
-nudges, stalled-agent reporting, server maintenance and update checks. The
-optional systemd user timer defaults to five minutes. A sweep itself makes no
-model call, but a prompted agent may start paid work.
+nudges, blocked-agent reporting, server maintenance and update checks. The
+optional systemd user timer (`cel steward --install`) defaults to five
+minutes. A sweep itself makes no model call, but a prompted agent may start
+paid work. A PR linked to an open owner decision (`cel decide ask --pr
+<repo>#<n>`, from any workspace, matched on the repo's `owner/name`) gets no
+per-PR nudge while the question is open (`_steward_pr_held`), and a PR
+labelled `hold` or `superseded` is left alone. The steward also watches the
+box-wide suite lock `tests/run.sh` takes: a hold past
+`CEL_SUITE_HOLD_WARN_SECS` (default 1800) is reported to root and to the
+holder, named from `/proc/locks` rather than the lock file, and the lock is
+never broken.
 
 ### Launch environment by role
 
@@ -380,6 +410,15 @@ clean HEAD must be proven contained in the verified default branch, or match
 the exact head of a GitHub-merged PR; additional local commits invalidate
 that proof.
 
+A worktree is live while any process of this user stands in it. The cwd
+table is read once per run (one `/proc` pass) and can only keep;
+`_gc_has_process_live` walks `/proc` again for that one worktree immediately
+before any removal. A process whose cwd cannot be read vetoes every removal,
+except a fixed set of system processes matched by exact name (the user
+systemd manager, `(sd-pam)`, `ssh-agent`, `sshd-session`, `sftp-server`) and
+zombies, and Samba's `smbd`, which occupies only the shares it exports. A
+`/proc` table that cannot be read at all is a veto too.
+
 ### Gateway credentials for an omp that starts native
 
 An omp session can switch models in flight, and its launch environment is the
@@ -406,9 +445,9 @@ within `CEL_PANE_READY_MS` (30000). Past the deadline, or when herdr cannot
 describe the pane, or an agent occupies it, the launch dies before anything is
 typed: no prefix, no agent start, no reviewer record. A terminal or shell that
 changes while waiting, or after the text is typed, is refused as a change of
-owner. The same gate covers core, root, orchestrator, solo, reviewer and
-`--restart`.
-Limit: herdr 0.9.1 exposes no structured "prompt drawn" field, so the 3-probe
+owner. The same gate covers every Herdr launch - core, root, orchestrator,
+solo, reviewer, member - and `--restart`.
+Limit: herdr exposes no structured "prompt drawn" field, so the 3-probe
 stability is a mitigation, not proof the prompt is ready; a supported herdr
 field is the upstream prerequisite. The foreground process group must equal the
 shell pid, as herdr's own prompt predicate requires. `herdr agent start` is attempted once and never retried; if it is
@@ -446,6 +485,20 @@ Reviewers and members never resume from a receipt: after a restart the product
 agent resumes through its recorded line, and a reviewer relaunched by `cel run
 reviewer` (or a member re-added by `cel team add`) opens as a window in the
 resumed product agent's session.
+
+Each Rex agent's runtime runs in a systemd user scope of its own under
+`cel-agents.slice` (`_rex_agent_scope`, `lib/rex.sh`): `systemd-run --user
+--scope` execs it in place, so the PID the receipt and Rex report is
+unchanged. The scope carries `MemoryMax` (default 40% of RAM),
+`MemorySwapMax` (25% of swap) and `OOMPolicy` (`continue` by default, so an
+out-of-memory kill takes one process, not the agent's scope); the slice
+carries `MemoryMax`/`MemoryHigh` across all agents (85%/75% of RAM), set on
+the live slice at every launch. The box config's `agent_memory:` overrides
+each. With no `systemd-run`, or no user manager answering within
+`CEL_AGENT_MANAGER_TIMEOUT` (5 s), the agent runs in the server's cgroup with
+a warning. The Rex server itself is started in its own transient scope with
+`OOMPolicy=continue`, so one killed process no longer stops the server and
+every session with it.
 
 Known Rex API limits (revision 10): Rex has no compare-and-swap for these
 calls, so two check-then-act gaps remain and are narrowed, not closed. (1)
@@ -668,6 +721,14 @@ classifier, no jq, a tool call it cannot parse, a file tool without its path,
 a tool it does not know), and it never approves - a pass prints nothing,
 which leaves agy's own permission policy in charge. agy's MCP tools are not
 guarded.
+Coverage differs by runtime. omp and pi load the guard (`agents.yaml`
+`guard_hook`) on launches of core, root, orchestrator (solo agents and lanes
+included), member and reviewer; a role-less `direct` launch gets none.
+Claude's adapter (`tools/hooks/orchestrator-guard.sh`)
+runs only where the owner has registered it as a PreToolUse hook in
+`~/.claude/settings.json`: nothing in cel registers it. OpenCode's adapter
+classifies shell, write, edit and patch calls but not reads. Codex has no
+guard adapter at all. No adapter inspects MCP tool calls, in any runtime.
 
 The guard reads a command line as bash does (`_guard_lines` in
 lib/guard.sh), whichever adapter hands it in - all of them pass the tool
@@ -783,8 +844,8 @@ is `land_ci_gate` (`lib/land.sh`): it takes `{number, head_sha, base_ref}`
 and one `forge_pr_checks` read, so the base's required checks (GitHub
 classic protection and rulesets, or Forgejo's branch protection rules) and
 their latest runs on the head come from the same provider-dispatched answer.
-gc and release still call `gh` directly and move onto these operations
-separately.
+`cel release` still calls `gh` directly; `cel gc` asks a Forgejo repo's PR of
+`forge_pr_view` and a GitHub one's of `gh` as the workspace.
 
 ### Review policy: extra reviewers and QA agents
 

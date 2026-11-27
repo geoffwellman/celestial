@@ -2,29 +2,35 @@
 
 ## Cutting a version
 
-One verb, and the rest follows. From the box:
+One verb, and the rest follows. From a workspace that declares the celestial
+repository:
 
 ```
-cel release celestial 0.3.0 --dry-run   # the notes that would ship, and the plan
-cel release celestial 0.3.0             # dispatches the Cut job; prints the run URL
-cel release status celestial            # current version, commits since, newest Release
+cel release celestial 0.3.0 --dry-run   # the plan and the pending notes; dispatches nothing
+cel release celestial 0.3.0             # dispatches the Release workflow
+cel release status celestial            # current version, commits since, newest Release, run in flight
 ```
 
-From `~/ws/plane`, where celestial is the only repo declaring a `release:`
-block, the older short form `cel release 0.3.0` still means exactly this; see
-["Releasing a product"](../README.md#releasing-a-product) for the declaration
-the verb reads.
+On a terminal the dispatch follows the run to its conclusion and names the
+Release it cut; in a script, or with `--no-follow`, it returns after the
+dispatch (`--follow` forces following). Where celestial is the only repo in the
+workspace declaring a `release:` block, the short form `cel release 0.3.0`
+means exactly this; see ["Releasing a product"](../README.md#releasing-a-product)
+for the declaration the verb reads. Under `cel afk` a release is dispatched
+only if AFK admits it.
 
-or run the **Release** workflow's `Cut` from the Actions tab with the same
-version. The job runs the suite and the hygiene scans, rewrites `VERSION`,
+Or run the **Release** workflow from the Actions tab with the same version.
+Its `verify` job first runs the same checks as every pull request (the reused
+CI workflow: suite and hygiene scans); the `cut` job then rewrites `VERSION`,
 renames `## [Unreleased]` to `## [<version>] - <date>` with a fresh empty
-`[Unreleased]` above it, and opens a `release: v<version>` pull request with
-the section as its body. **Merge that PR** - main takes no direct pushes, so
-the bump is a reviewed change like any other. The annotated `v<version>` tag
-and the GitHub Release are then cut from main by the same workflow, with the
+`[Unreleased]` above it, folds in and removes the `changelog.d/` fragments, and
+opens a ready-for-review `release: v<version>` pull request with the section as
+its body. **Merge that PR** - main takes no direct pushes, so the bump is a
+reviewed change like any other. When its squash lands on main, the `publish`
+job creates the annotated `v<version>` tag and the GitHub Release, with the
 CHANGELOG section as their notes; boxes on the `release` channel see it on
 their next `cel update --check`. A `v*` tag pushed by hand publishes the same
-way, and a tag whose `VERSION` disagrees fails the job.
+way, and a tag or commit whose version disagrees with `VERSION` fails the job.
 
 Everything below is publication hygiene - the one-time question of whether
 this repository may be public at all, not the per-version one.
@@ -60,15 +66,21 @@ separate publication surfaces.
 
 ```sh
 python3 tools/release/hygiene.py
+python3 tools/release/hygiene.py --history origin/main..HEAD
 python3 tools/release/hygiene.py --require-private-patterns \
   --private-patterns /secure/path/private-patterns.txt
 ```
 
-The external file contains one case-insensitive Python regular expression per
-line; blank lines and `#` comments are ignored. It must be outside the source
-root and contain at least one pattern. Scan findings report categories and
-redacted locations, not matched credential values. Exit 0 means no detected
-findings, 1 means findings, and 2 means the scan could not complete.
+`--history REVS` also scans the commits `git rev-list REVS` names (CI uses the
+pull request's own `base..head` ancestry); `--all-history` scans every local
+ref, commit and tag. The external file (or `CEL_PRIVATE_PATTERNS_FILE`)
+contains one case-insensitive Python regular expression per line; blank lines
+and `#` comments are ignored, and a pattern that matches the empty string is
+refused. It must be outside the source root and, with
+`--require-private-patterns`, contain at least one pattern. Scan findings
+report categories and redacted locations, not matched credential values. Exit 0
+means no detected findings, 1 means findings, and 2 means the scan could not
+complete.
 
 ## Clean-history publication
 

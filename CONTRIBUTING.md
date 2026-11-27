@@ -16,12 +16,17 @@ node --test tests/http-server.test.mjs
 python3 tools/release/hygiene.py
 ```
 
-The shell runner accepts a test-name filter, for example:
+The shell runner accepts a test-name substring filter, a single test file, or
+both, for example:
 
 ```sh
 bash tests/run.sh gc_
-node --test tests/http-server.test.mjs
+bash tests/run.sh disk_headroom
+bash tests/run.sh release.test.sh
 ```
+
+A filtered run still waits for the box-wide suite lock, so only one suite runs
+at a time.
 
 Tests use temporary Git repositories, isolated state roots and executable
 fixtures for external CLIs. Preserve that isolation. Never point a regression

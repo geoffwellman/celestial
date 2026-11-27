@@ -3,8 +3,9 @@
 **One coding agent per product: it builds, tests, opens PRs, gets each one reviewed and lands it — in a pane you can see and steer.**
 
 One clone per dev box. Celestial organises work into *workspaces*, equips
-coding agents (Claude Code, oh-my-pi, codex, opencode, pi), and runs each
-product's agent in a visible [herdr](https://herdr.dev) pane or Rex session.
+coding agents (Claude Code, oh-my-pi, pi, codex, OpenCode and the Google
+Antigravity CLI), and runs each product's agent in a visible
+[herdr](https://herdr.dev) pane or Rex session.
 The product agent plans, writes, tests and opens pull requests itself; every
 PR gets its own reviewer agent, and the product agent lands it through one
 checked path (`cel solo land`) under your workspace policy. You stay at the
@@ -18,6 +19,21 @@ human.
 *Illustrative work in the live dashboard. No agent execution is simulated.*
 
 ---
+
+## Contents
+
+- [Why](#why) · [Give this to your agent](#give-this-to-your-agent) · [Quick start](#quick-start)
+- [Setups at a glance](#setups-at-a-glance) · [Configure your teams](#configure-your-teams)
+- [How it works](#how-it-works): [core](#how-it-works), [solo lanes](#solo-lanes-several-big-goals-one-agent-each), [commands inside an agent](#commands-inside-an-agent), [solo mode](#solo-mode), [feature teams](#feature-teams)
+- [Runtimes](#runtimes): install, launch, skills, resume, inbox wake and guard for each CLI
+- [Sessions: Herdr and Rex](#sessions-herdr-and-rex): Rex restarts and upgrades, per-agent memory scopes, reviewer retirement
+- [The review loop](#the-review-loop): extra reviewers, QA agents, what a reviewer may run
+- [Agents talk without hijacking your keyboard](#agents-talk-without-hijacking-your-keyboard) (the inbox)
+- [Watch and steer](#watch-and-steer): fleet, dashboard, gc, box space, Docker retention
+- [What runs in the background](#what-runs-in-the-background): the steward, servers, hooks, services
+- [Profiles](#profiles-runtime-model-and-effort-per-role) · [Subscriptions](#subscriptions) · [Gateway](#gateway--several-subscriptions-behind-one-door)
+- [Tickets](#tickets) · [Commands](#commands) · [What lives where](#what-lives-where) ([what `cel gc` keeps](#what-cel-gc-keeps))
+- [Requirements](#requirements) ([vendored skills](#vendored-skills)) · [Releasing a product](#releasing-a-product) · [Versioning & updates](#versioning--updates)
 
 ## Why
 
@@ -39,7 +55,8 @@ visibility and housekeeping around the agents:
 
 ## Give this to your agent
 
-You already have a coding agent — Claude Code, oh-my-pi, pi, codex, opencode.
+You already have a coding agent — Claude Code, oh-my-pi, pi, codex, OpenCode,
+the Antigravity CLI.
 Paste this into it and let it do the install:
 
 ```
@@ -185,7 +202,7 @@ flowchart LR
     orch["atlas-orch<br/>main agent"]
     checkout["atlas-checkout<br/>lane checkout"]
     search["atlas-search<br/>lane search"]
-    checkout -. "cel inbox about shared files" .- search
+    checkout -. "inbox mail about shared files" .- search
   end
   prs["each agent: its own branches,<br/>PRs and reviewers"]
   main[("main")]
@@ -468,14 +485,15 @@ role_profiles:
   solo: mine
   team-builder: mine
 products:
-  - name: atlas                # by name; only role_profiles is read here
+  - name: atlas                # by name; role_profiles and orchestrator: manual are read here
     role_profiles: { team-qa: mine }
 env:
   TMPDIR: /tmp/you             # per-box settings; keys still go in env.local
 ```
 
 The local file may change only `role_profiles`, `worker_profiles`, `env:` and
-the `role_profiles` of a `products[]` or `repos[]` entry, and set `me:`.
+the `role_profiles` of a `products[]` or `repos[]` entry, set `me:`, and turn
+a product's agent off on this box (`products[].orchestrator: manual`).
 Policy, repos, people, homes, review, gates and the box budget stay in the
 shared files. To change the contract, edit `workspace.yaml`, commit and push;
 teammates `git pull` and run `cel ws sync acme`.
@@ -535,21 +553,35 @@ grouping: policy, ticket tracker, environment, profiles, dashboard. A
 together. Its agent's pane and mailbox are `<product>-orch`. `root` is the
 mailbox name for "the top, whoever is listening", which is `cel core`.
 `cel run root` still starts a standing director inside one workspace, but it
-is not the path this README assumes. The product orchestrator and the solo
-agent are one role (`core/roles/solo.md`; `project-orchestrator.md` points at
-it): it builds small work itself and leads a [feature team](#feature-teams)
-when a feature needs one.
+is not the path this README assumes: it refuses while core is live (unless
+`--force`), and `cel core` refuses while any workspace's `*-root` agent is
+live. The product orchestrator and the solo agent are one role
+(`core/roles/solo.md`; `project-orchestrator.md` points at it): it builds
+small work itself and leads a [feature team](#feature-teams) when a feature
+needs one.
 
 `cel core` (also `cel console`, `cel run core` and `cel run console`) starts
-the box's coordinator: one agent pane, standing in no workspace, that reads
+the box's coordinator: one agent, standing in no workspace, that reads
 `root`'s mail in every workspace, holds cross-product priorities and
 blockers, reads state and code read-only, directs product agents by inbox,
 starts and restarts them, and shows or sets a product's mode with `cel mode`.
-It does not build or land PRs - the guard refuses those and names the product
-agent's route. It runs from agents.yaml `defaults.core` (omp on gateway Opus),
-resumes its last session, and refuses a second copy; `cel core --restart`
-relaunches it in its own pane, `--fresh` starts a new conversation. Mail sent
-to `core` lands in `root`.
+It runs the role in `core/roles/core.md` with no workspace policy block, in
+`~/.local/share/cel/core` (`CEL_CORE_DIR`), as `CEL_ROLE=core`; its alias is
+`core` and mail sent to `core` lands in `root`. Its runtime, model and effort
+come from `agents.yaml` `defaults.core` - out of the box omp,
+`anthropic/claude-opus-5-5`, `medium`, through the gateway (`via: gateway`
+is supported for core on omp only). `--model` and `--thinking` override
+them; `--profile` is refused, since profiles are bound per workspace. It
+resumes its last session and refuses a second copy; `cel core --restart`
+relaunches it, `--fresh` starts a new conversation.
+
+Core does not build or land PRs. The guard treats it as a read-only
+coordinator (no repository or forge writes) and also refuses
+`cel solo land|review`, `cel spike`, `cel forge pr close|ready`,
+`cel forge run rerun`, `cel run reviewer|root`, `herdr agent start`,
+`herdr worktree create|open|remove` and `cel learn|release|promote|update|setup`,
+naming the product agent's route instead. Its one configuration write is
+`cel mode`.
 
 ### A workspace with its own GitHub account
 
@@ -662,335 +694,6 @@ session identity. It cannot be combined with restart, fresh, profile, thinking
 or backend changes. Model syntax validation is offline; it is not a provider
 availability check.
 
-### Choose Herdr or Rex for new sessions
-
-The terminal host is independent of the agent runtime and model. Herdr stays
-the default; select Rex for a new session with:
-
-```sh
-cel run solo --product celestial --lane ui --session-backend rex
-cel run reviewer --repo celestial --pr 123 --session-backend rex
-cel core --session-backend rex
-cel sessions --json
-```
-
-Or set `session_backend: rex` in a workspace's `workspace.yaml` for its new
-`cel run` sessions. `--session-backend herdr` overrides it. Existing live agents
-are never moved: a restart retains their current terminal host. After a process
-has exited, normal new-launch defaults apply; keep `--session-backend rex` in
-recovery commands unless the workspace default is Rex. Rex must already be
-installed; Celestial does not adopt unrelated Rex sessions. A product agent,
-lane, root or core gets its own named Rex session. A reviewer - and a team
-member whose lead runs in Rex - opens as a window labelled with its alias in
-its product agent's session instead, so a product's whole team is one session
-group; when that session cannot be proven live it gets a session of its own,
-and says so. The command prints its session (and window) and terminal IDs.
-Use `rex ls`, `rex window ls -s <session>`, `rex capture -s <session> -b
-<block>` and Rex's native controls, not Herdr commands, for those terminals.
-Retiring a reviewer or member closes only its own window, never the session.
-
-Role prompts, model/profile selection, workspace and gateway environment,
-inbox identity and review gates are unchanged. Pi/OMP report their real turn
-state and native conversation file through the inbox extension. Claude's
-`SessionStart`/`UserPromptSubmit` hooks report its native UUID and idle/working
-state; its existing inbox `Stop` hook reports idle only when there is no mail
-to continue processing. Reports require the receipt's live runtime PID ancestry;
-neither a guessed PID nor a backend environment label suffices. An explicit
-Claude `--resume` UUID is also captured directly from launch arguments.
-These hooks never type into a pending owner draft or wake idle Claude sessions.
-Runtimes without native observation stay conservatively busy. A restart never
-silently discards an unreported native conversation: it refuses unless `--fresh`
-is explicit. Managed Rex sessions appear alongside Herdr agents in Celestial's
-inventory; automatic Herdr pane cleanup never closes a Rex terminal.
-
-### Rex server restarts and rex upgrades
-
-A Rex server restart ends every program in its sessions. Each core, root,
-orchestrator and solo-lane receipt records the `cel run` line that brings it
-back (its role, product, lane, workspace and the profile/model/thinking you
-named; a lane keeps its remembered choices). Every steward tick records the
-running server instance and the live managed agents; when the instance changes,
-each agent that was live under the old server and was not stopped, retired or
-relaunched since is resumed ONCE through that line, into its saved session, and
-root gets one summary. Reviewers never resume: they, and agents launched
-before relaunch lines were recorded, are listed in the summary with
-the command to run.
-
-A resume that only ran out of time - an OpenCode launcher refusing on one of
-its own timeouts (`server_not_ready`, `guard_not_loaded`, `admission_timeout`,
-`models_not_admitted`, a `*_request_timeout`), as a cold box after an upgrade
-can make it - is run once more after `CEL_REX_RESUME_RETRY_SECS` (60), unless
-the agent is live again by then or its retirement has begun. If the retry
-also fails, the summary reports it once and says it was retried. A refusal
-for any other reason (guard, auth, scope, session, a veto or a duplicate) is
-reported without a retry. Nor is it retried when the first attempt's dead
-terminal could not be closed, when the agent was relaunched or stopped during
-the wait, or when its saved session no longer matches. A pass retries at most
-`CEL_REX_RESUME_RETRY_MAX` (3) agents within `CEL_REX_RESUME_RETRY_BUDGET_SECS`
-(300); the rest are reported with "retry skipped: restore time cap". Retries
-add about 3 minutes to that steward tick, at most about 7.
-
-Before resuming, the restore repairs what a restart leaves behind. The new
-server restores the old sessions as empty shells under the same labels: for
-each agent being resumed, the sessions with its label are closed only when at
-least one block was seen and every block's process report names child and
-foreground as null - an omitted key, an error, an empty or unreadable session
-counts as alive and is never touched. A
-client-autostarted server runs with `--exit-empty`, so closing the last shell
-can end it: if no server answers, a persistent one (`rex server start`, in its
-own systemd scope with `OOMPolicy=continue`, with `--tailscale` when the old one served the tailnet) is
-started before any resume. If the old server served the tailnet and the new
-one does not, `rex server tailscale on` is run and verified. The summary names
-the server's version and API revision before and after.
-
-The steward also keeps rex current, at most every 30 minutes:
-
-```sh
-cel sessions rex-upgrade --check   # newer rex? busy, not resumable, or unmanaged sessions?
-cel sessions rex-upgrade           # one round now
-```
-
-A round runs only when apt's candidate for rex is newer than the installed
-version and comes from `https://pkgs.superlogical.com` exactly (that host, not
-one containing the name; `apt-cache policy rex`, without `apt-get update`). It
-waits up to `CEL_REX_UPGRADE_IDLE_SECS` (120) for every live Rex agent to be
-idle, and skips the round otherwise. Root is told once, and nothing changes,
-while the round is blocked by any live agent it could not resume (a reviewer,
-an older receipt, a missing saved session) or by ANY Rex session
-that is not a live managed launch - a session you opened yourself, or an old
-empty shell: stopping the server ends every session, and only managed agents
-come back. Close those sessions (`rex ls`, `rex kill`) to let it proceed. That
-alert is said once per rex version, whoever is in the way, and the steward
-reminds root once more if that version has stayed blocked for over 24 hours. Then
-it records the agents, installs exactly the version it vetted
-(`sudo -n apt-get install --only-upgrade -y rex=<version>`), restarts the
-per-user Rex server in its own systemd scope if the package did not, resumes
-each recorded agent, checks it is still alive after a short settle, and sends
-root one summary. New Celestial launches wait while it runs.
-
-### Rex agents' memory: one runaway, one kill
-
-Every program a Rex terminal runs is a child of the Rex server. Each managed
-Rex launch therefore starts its terminal's command through
-`systemd-run --user --scope` (which execs it in place: same PID, same receipt)
-into a scope of its own, `cel-agent-<name>-<epoch>-<pid>.scope`, under
-`cel-agents.slice` (systemd nests it as `cel.slice/cel-agents.slice`). The
-agent's runtime and everything it starts - builds, test binaries, browsers -
-live there, not in the server's cgroup. Past the agent's `MemoryMax` the kernel
-kills that agent's largest process; in a box-wide out-of-memory the kernel's
-choice is the runaway, in its own scope. Either way the server's scope is not
-the one that loses a process, and the server's scope runs with
-`OOMPolicy=continue` besides (a scope's default, `stop`, ends the server and
-every session when any process in it is killed - what happened on
-2026-11-21). `systemd-cgls --user-unit cel-agents.slice` shows who is where.
-
-The limits live in the box config, `~/.local/share/cel/config.yaml`, in MB:
-
-```yaml
-agent_memory:
-  max_mb: 9583          # one agent's scope MemoryMax          (default: 40% of RAM)
-  swap_max_mb: 2047     # one agent's scope MemorySwapMax      (default: 25% of swap)
-  slice_max_mb: 20364   # cel-agents.slice MemoryMax, all agents (default: 85% of RAM)
-  slice_high_mb: 17968  # cel-agents.slice MemoryHigh, throttle  (default: 75% of RAM)
-  oom_policy: continue  # continue | kill | stop                 (default: continue)
-```
-
-The numbers shown are the defaults on a 23.4 GiB box with 8 GiB of swap; every
-default is computed from `/proc/meminfo` at launch. A value that is not a whole
-number of MB (or an unknown policy) is the default. `oom_policy` is the agent
-scope's: `continue` kills only the process the kernel chose, so an agent sees
-its test binary killed and carries on; `kill` ends the agent's whole scope,
-runtime included; `stop` stops it. The per-agent limits apply to new launches
-(and resumes); the slice limits are set on the live slice at every launch
-(`systemctl --user set-property --runtime`), so a change reaches agents already
-running at the next launch. `systemd-oomd` is not used.
-
-Without a systemd user manager (no `systemd-run`, or `systemctl --user` not
-answering within `CEL_AGENT_MANAGER_TIMEOUT` seconds, default 5) a launch
-warns that the agent runs inside the Rex server's own cgroup and proceeds as
-before. If the manager refuses the slice limits, the launch warns and the
-agent still gets its own scope; a `slice_high_mb` above `slice_max_mb` is
-ignored and both take their defaults. Herdr sessions are unchanged.
-
-Nothing here moves what is already running. A Rex server that is running
-keeps its cgroup and its `OOMPolicy` - including one a Rex client auto-started
-inside some other unit's cgroup - until it is moved into a scope of its own or
-restarted, and an agent launched before keeps sharing the server's cgroup
-until it is relaunched. To move a running server without ending any session,
-adopt its process into a new scope (one exact PID from
-`pgrep -f '^/usr/bin/rex server run '`):
-
-```sh
-busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
-  org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \
-  "cel-rex-server-$(date +%s).scope" fail 2 PIDs au 1 <pid> OOMPolicy s continue 0
-```
-
-Its agents stay where they are until relaunched. The alternative is a server
-restart, which ends every program in every session (see
-[above](#rex-server-restarts-and-rex-upgrades)); stop and start it in one
-line, or a client auto-starts the next server in its own cgroup:
-`rex server stop && systemd-run --user --scope --unit cel-rex-server-$(date +%s) -p OOMPolicy=continue -- rex server start --tailscale`.
-
-### Retire a completed Rex reviewer, keep its evidence
-
-```sh
-cel sessions retire-reviewer widget#12 --workspace demo --dry-run
-cel sessions retire-reviewer widget#12 --workspace demo
-```
-
-The targeted command, reviewer GC and `cel solo land` share the same native
-proof. Idle alone is never eligibility: the PR must be merged or closed (an
-open PR can still take a push or a re-review request, so its reviewer stays),
-the PR's final head must have a completed canonical solo review round,
-the actual Pi leaf must be settled, and no tool, background job, queued input,
-inbox retry debt, unread mail or draft may remain. A completed `changes`
-round is not an approval and retirement never changes its verdict.
-
-After a successful merge, `cel solo land` retires that PR's Rex reviewer the
-same way. A reviewer it has to keep (still mid-turn, mail owed, proof
-unavailable) is named and left for the next `cel gc` sweep; retirement never
-fails a land.
-
-New canonical Rex/Pi reviewers expose a private native handshake. It samples
-the real live leaf and in-memory debt, then rechecks them before supported
-graceful shutdown. Only after the original runtime and owned infrastructure
-have exited does the backend remove the exact empty Rex session and reconcile
-its registry row. Extra terminals, replacement processes and unknown evidence
-are protected. Older uninstrumented reviewers are kept, not silently reloaded
-or stopped using a saved-file/idle guess. A reviewer that went by other means
-(its pane is off the roster, its PID generation has exited and no retirement
-proof is in flight) loses only its registry row to `cel gc`, so the PR can be
-reviewed again; its receipt, checkout and native log stay.
-
-A kept checkout does not stay forever. `cel gc` removes a reviewer checkout
-(under `~/.local/state/cel/reviews`) once all of these are facts: its PR is
-merged or closed - asked of the repo's own forge, GitHub or Forgejo, the
-answer naming exactly that PR; unreadable is kept - and closed (an ISO-8601
-time from 2000 on) more than `CEL_REVIEW_CHECKOUT_KEEP_DAYS` (default 3) days
-ago; no reviewer of the PR is recorded and no pane, process cwd or open file
-of this user is in it; no retained Rex retirement packet cites it; and it
-holds nothing of its own - an untracked or modified file (ignored build output
-does not count) or a commit only it has keeps it, and the sweep names it. A
-private clone (not a worktree) must also be the PR's: HEAD at or behind the
-PR's head, or cloned from the repo. All of it is asked again right before the
-remove, under the lock `cel run` holds while it starts a reviewer, so one
-starting at that moment wins. A linked worktree goes by a plain `git worktree
-remove`. The verdicts and evidence under the workspace's `.cel` stay. At most
-`CEL_GC_REVIEW_CHECKOUT_CAP` (default 30) checkouts are asked of the forge
-per pass, oldest first, and the summary line counts what went and the space
-it freed (`cel gc --dry-run` shows what would).
-
-A reviewer's inbox watcher is owned infrastructure only while its every child
-is recognised. Its jq child counts if it runs the launch checkout's current
-`_INBOX_WATCH_JQ` (lib/inbox.sh) or a program an earlier release started
-watchers with, listed by sha256 in `tools/reviewers/inbox-watch-programs.mjs`;
-so a reviewer whose watcher predates a `cel update` can still be retired. Any
-other program keeps the reviewer `protected`. A change to `_INBOX_WATCH_JQ`
-adds its hash there, beside the old ones (retire.test.mjs fails until it does).
-
-The command returns JSON: `eligible` for a dry-run candidate, `retired` only
-after verified settlement, `protected` for known outstanding work/unsupported
-contexts, or `unknown` for missing proof or incomplete teardown. A partial
-failure retains private prepared/exit evidence for an identity-checked retry;
-do not purge the receipt or proof to force cleanup. Protocol messages live in
-`<receipt>.retirement/`, outside the flat Rex runtime-receipt inventory.
-If native shutdown committed before the controller copied its exit journal,
-a non-dry retry can recover that missing copy from the exact durable protocol
-request/response. Existing malformed or negative journals are never replaced
-with a more favorable protocol response; a dry run does not repair journals.
-
-Native history, archived instructions/verdict, checkout and review artifacts
-are retained. Fresh rounds use a separate checkout rather than erasing a
-retired round. Before every new-head or re-review handoff, run the canonical
-`cel run reviewer --repo widget --pr 12 --workspace demo` first, then send its
-inbox request: it reuses a live reviewer or starts the next round. Saved
-retirement history is evidence, not permission to approve or close a new round.
-
-
-### Scoped OpenCode gateway migration
-
-OpenCode is pinned to the verified **2.2.5 CLI release**, not the legacy npm
-package or GitHub's stale latest-release pointer. Updates install digest-checked
-official assets at the existing executable's location (fresh installs use
-`~/.local/bin`); they never restart an agent or change accounts.
-
-The gateway path starts with a prepared per-agent native-v2 configuration:
-`ompgw-codex/gpt-6.1-sol`, medium effort, evidenced 500K context/128K output
-limits, and the existing credential reference. Nothing imports credentials or
-edits global OpenCode settings. Roles live under
-`.cel/opencode/<agent>/role-<role>.md`. The plugin is a directory package with
-an explicit server export, not a standalone v1 hook file.
-
-`cel gateway opencode-models` prints the read-only gateway chat inventory as
-JSON. Advertised supported Codex/GPT and Anthropic chat IDs remain available
-when exact cached capabilities are absent; those entries use native defaults,
-not invented limits or sibling metadata. Exact capabilities enrich entries
-where available. OMP-only aliases and unsupported image APIs stay excluded.
-It uses only the existing private key and model-list/cache reads: no mint,
-refresh, account inspection, inference, or native account integration.
-
-```sh
-cel gateway opencode-models --sync --workspace <registered-name> --agent <existing-alias> --dry-run
-cel gateway opencode-models --sync --workspace <registered-name> --agent <existing-alias>
-```
-
-Sync accepts only the existing private, UID-owned, non-symlinked
-`.cel/opencode/<alias>/role-orchestrator.opencode.json` and role file under the
-registered workspace; arbitrary global paths are not accepted. Namespace
-directories must be UID-owned and not group/world-writable; mode 0755 is
-allowed while role/config files remain private. It refuses noncanonical/custom
-configuration rather than discarding it. Dry-run writes
-nothing and prints only inventory/eligibility and activation status. Publication
-holds the sibling config lock, retains a private backup, and atomically replaces
-the config with mode 0600. Root/agent Sol-medium defaults, role/plugin, gateway
-route, URL and environment-key reference remain unchanged; unrelated scopes and
-native sessions/PIDs/settings are not modified. **File publication is not live
-availability:** an existing process captured inline configuration at launch.
-The result reports `activationRequired`; coordinated activation at the same
-native SID boundary belongs to its owner. This command never reloads/restarts.
-
-```sh
-cel run solo --product <product> --profile <scoped-profile> --session-backend rex --fresh --handoff /absolute/checkpoint.md
-```
-
-The native `--prompt` kickoff instructs a fresh session to read the handoff;
-an archived OMP log is consultation material, never a native resume. Subsequent
-continuation accepts only an existing migrated OpenCode `ses_...` root with
-the exact directory and scoped agent. Without a catalog the exact Sol-medium
-selection remains required; a canonical catalog additionally admits an
-owner-selected eligible provider/model and its native variant, without an
-automatic fallback or changing the launch default. Storage errors, pending
-migrations and missing IDs refuse before stopping/relaunching a runtime:
-v2's bare `--session` can otherwise create a missing session.
-
-The canonical parent owns a private authenticated `serve --stdio` process.
-Before attaching the TUI it verifies the actual server PID/version, exact
-native plugin source/location and active status, migration readiness, saved
-session identity, and scoped model availability. A private admission marker
-prevents a loaded resume plugin from draining inbox mail before those checks.
-Missing/failed plugins never admit an unguarded TUI. The server's stdin lease
-and native child processes are owned by this launch, not a shared service.
-The server's copy of the config sets `experimental.location_idle_timeout` to
-`false`: OpenCode otherwise unloads a location's services, the plugin's idle
-inbox observer among them, after 60 minutes without session activity, and an
-agent idle that long stopped waking for mail.
-
-The plugin preserves primary/child identity and delivers idle inbox messages
-through native synthetic input, never terminal typing. Medium is persisted
-in the native model selection and sent as Responses reasoning effort. Final
-HTTP and WebSocket boundaries preserve the agent-owned affinity route despite
-OpenCode's own header defaults. Shared guard policy covers native shell,
-write, edit and patch hooks; `--auto` never waives explicit denials.
-
-An existing completed v1 migration marker is not proof that a later v1 session
-exists in v2. Preserve a consistent database/WAL-visible backup first. When
-native lookup refuses, investigate on a disposable copy; do not reset a live
-migration marker or replace shared native storage. Any supported native import
-must preserve original parent/child IDs and history without overwriting an
-unrelated session. Installation is not authorization to quit/reload a held
-runtime. Never dump environments or credentials as identity evidence.
-
 ### Commands inside an agent
 
 Core and solo agents all take the same small set of commands,
@@ -1012,14 +715,22 @@ starting a turn, so the agent sees what its owner ran.
 | `/cel-focus <product>` | `herdr agent focus <product>-orch` | core only |
 
 omp and pi register them through the inbox extension
-(`tools/hooks/inbox.omp.ts`); Claude Code gets `~/.claude/commands/cel-*.md`
-links from `cel setup`/`cel update`. The `cel-` prefix is deliberate: omp has
-built-in `/review` and `/restart`, Claude Code built-in `/status` and
-`/review`.
+(`tools/hooks/inbox.omp.ts`, for core, root and product agents); Claude Code
+gets `~/.claude/commands/cel-*.md` links from `cel setup`/`cel update`. The
+`cel-` prefix is deliberate: omp has built-in `/review` and `/restart`, Claude
+Code built-in `/status` and `/review`. codex, OpenCode and agy panes have no
+`/cel-*` commands; run `cel here <verb>` in a shell instead. Core cannot
+`review` or `land`; a lane's `restart` restarts that lane, never the main
+agent; root's is refused (use `cel run root --restart`).
 
 `cel run <role>` starts any station with its role injected and permissions
-pre-approved. `policy.pr_open: draft | ready` decides whether a PR opens as a
-draft (default) or ready for review with the workspace reviewer requested.
+pre-approved; with no role it is Direct mode (`<repo>-direct` in the repo).
+`policy.pr_open: draft | ready` decides whether a PR opens as a draft (the
+default; on Forgejo a `WIP:` title) or ready for review; its reviewer is
+started separately with `cel run reviewer`. `cel solo land` refuses a draft,
+so a workspace whose agents land their own PRs sets `pr_open: ready` beside
+`merge: self`. `cel ws new` writes neither: it asks for the merge policy
+(default `humans-only`) and writes `policy: { merge: <answer>, pr: required }`.
 `pr: none` on a repo entry (or as the workspace-level `policy.pr`) skips the
 PR for that repo: the agent rebases onto origin's default branch and pushes,
 fast-forward only.
@@ -1048,33 +759,42 @@ nothing. `cel run solo` starts the solo agent directly.
 
 The solo agent is still *the product's agent*: same directory, pane name and
 mailbox (`<product>-orch`) as an orchestrator, so mail, decisions, the
-steward and the dashboard reach it unchanged. It launches with `CEL_ROLE=solo`;
-the guard then lets it write code, commit, push, open PRs and start a
-reviewer for its own PR, and refuses starting other agents and
-`gh pr merge`. `role_profiles: { solo: <profile> }` binds its model; without
-one it uses the orchestrator's binding.
+steward and the dashboard reach it unchanged. `cel run solo` and `cel run
+orchestrator` start the same agent: role file `core/roles/solo.md`, launched
+with `CEL_ROLE=solo`, `CEL_PRODUCT=<product>` and, for a lane,
+`CEL_LANE=<lane>`. The guard lets it write code, commit, push, open PRs and
+start a reviewer for its own PR, and refuses starting any other Celestial
+agent or pane (`cel run reviewer` excepted), recording a verdict on its own
+PR, `cel decide answer|drop`, merging by any route but `cel solo land`, and
+changing its forge except through `cel forge`. Its model is
+`role_profiles.solo` (narrowed per product or repo), else
+`role_profiles.orchestrator`, else `runtime.orchestrator` (default `claude`).
 
 Its PRs follow the workspace's PR and review policy, keyed by the PR itself:
 
 - the reviewer records `cel solo review <repo>#<n> approved|changes --head
-  <sha> --by <alias>` (an approval must equal the PR's current head; verdicts
+  <full 40-character sha> --by <alias>` (an approval must equal the PR's current head; verdicts
   live in `<ws>/.cel/solo-reviews.json`, an extra reviewer's under
   `<repo>#<n>/review-<focus>`) and sends findings to
   `<product>-orch` (the lane that started it, or the lane the repo declares
   with [`repos[].lane`](#solo-lanes-several-big-goals-one-agent-each)). The solo agent itself can never record a verdict on its
   own PR, and only it (or a person) lands one - not a reviewer;
-- `cel solo land <repo>#<n>` merges with the checks in `lib/land.sh`:
-  `merge: self`, an open non-draft PR the workspace's account opened (or an
-  author the repo lists in `pr_authors`, below), an approval of the exact head
-  from every reviewer the review policy
-  requires ([extra reviewers](#extra-reviewers-a-focus-by-hand-or-by-policy)),
-  no red check, no conflict, and every
-  check the base branch requires - through classic branch protection or a
-  repository/organisation ruleset - green on that head. It merges only that
-  head (`--match-head-commit`), and CI on the head is the evidence the squash
-  body cites. Only when neither protection nor any ruleset requires a check
-  does the repo gate run locally instead, in a clean checkout at exactly that
-  head; requirements that cannot be read refuse the land.
+- `cel solo land <repo>#<n>` (`lib/solo.sh`; the CI rule in `lib/land.sh`)
+  merges once it finds: `merge: self`; an open non-draft PR the workspace's
+  account opened (or an author the repo lists in `pr_authors`, below); for the
+  plain reviewer, the forge's review decision `approved` or a recorded
+  `approved` verdict at the current head, plus each
+  [extra reviewer's](#extra-reviewers-a-focus-by-hand-or-by-policy) or QA
+  agent's own approval of that head; no red check and none still running; no
+  conflict; and every check the base branch requires - through classic branch
+  protection or a repository/organisation ruleset - green on that head. It
+  merges only that head (`--match-head-commit`), and CI on the head is the
+  evidence the squash body cites. Only when neither protection nor any ruleset
+  requires a check does the repo gate run locally instead, in the solo
+  agent's own clean worktree at exactly that head (none is a refusal), after
+  proving the forge's `refs/pull/<n>/head` is that commit; requirements that
+  cannot be read refuse the land. With [AFK](#commands) on, AFK must admit
+  the land first. After the merge it retires the PR's reviewers and QA agents.
 - the land says who landed it. The forge shows every land as merged by the
   workspace's account (on Forgejo, and on GitHub when that account is the
   owner's), so `cel solo land` names the agent itself: the squash message ends
@@ -1205,6 +925,365 @@ write holds the folder's lock and JSON is replaced whole.
 - **Closing** — `cel team retire <f> <alias>` closes one member's pane; `cel
   team close <f>` retires everyone and refuses while a builder's work is not
   on origin, unless `--force-keep` (which keeps those worktrees).
+
+## Runtimes
+
+Celestial launches six coding-agent CLIs. `agents.yaml` describes each one -
+install, pin, skills directory, role injection, launch flags, resume - and
+`cel run` reads it; the runtime-specific glue lives in `lib/run.sh`,
+`lib/opencode.sh` and `lib/agy.sh`. `cel agents` lists them with install
+status and injection strategy.
+
+| | Claude Code (`claude`) | oh-my-pi (`omp`) | pi (`pi`) | codex (`codex`) | OpenCode (`opencode`) | Antigravity CLI (`agy`) |
+|---|---|---|---|---|---|---|
+| **Install and pin** | native binary 2.1.300, SHA-256 per architecture, then `claude install <version>`; updater `claude update` | release binary 18.14.0, SHA-256 per architecture; updater `omp update` | npm global `@earendil-works/pi-coding-agent@1.4.0` (follows the active node, below); extensions pinned in `tools/pi/extensions.txt`; updater `pi update --self` | official `install.sh` for 0.154.0, checked against its SHA-256; updater `codex update` | release tarball 2.2.5 (x64 or arm64), SHA-256, installed where `opencode` already is, else `~/.local/bin`; `cel update` reinstalls the pin | release tarball 1.5.14, SHA-256, installed like OpenCode; `cel update` reinstalls the pin, and every launch sets `AGY_CLI_DISABLE_AUTO_UPDATE=true` |
+| **Launch** | `--dangerously-skip-permissions`, `--model`, `--effort` | `--auto-approve`, `--model`, `--thinking`; core, root and product agents also get `--config=core/omp-orchestrator.yml` | `--model`, `--thinking`; agent root pinned (`PI_CODING_AGENT_DIR`) | `--ask-for-approval never --sandbox workspace-write`, `--model`, `-c model_reasoning_effort=` | `tools/opencode/launch.mjs`: a private `opencode serve` that must load the celestial plugin, then the TUI attached to it; model and effort come from the scoped config, never flags; needs a `via: gateway` profile | `--dangerously-skip-permissions`, `--model`, `--effort low\|medium\|high`, `--agent cel-<agent>`; `via: gateway` profiles are refused |
+| **Role prompt** | `--append-system-prompt-file` | `--append-system-prompt` | `--append-system-prompt` | the first prompt (does not survive compaction) | `.cel/opencode/<agent>/role-<role>.md`, agent `cel-<role>` in the scoped config | `~/.gemini/config/agents/cel-<agent>.md`, rewritten every launch |
+| **Skills** (core / workspace sets) | `~/.claude/skills` / `--add-dir` | `~/.omp/agent/skills` / `--plugin-dir` | `~/.pi/agent/skills` / `--skill` | `~/.codex/skills` / linked there disabled, enabled per launch with `-c skills.config=[…]` | `~/.config/opencode/skills` / `OPENCODE_CONFIG` | `~/.gemini/antigravity-cli/skills` / the agent file's `skills:` list |
+| **Restart (`--restart`)** | `--resume <session id>` | `--resume <session file>` | `--session <session file>` | cannot resume: starts fresh and says so | `--session ses_…` (an existing native v2 root with the same directory and agent); another runtime's history moves over only with `--fresh --handoff <file>` | `--conversation <id>`, refused unless that conversation exists |
+| **Woken by idle mail** | Rex only: a watcher notifies over Claude's native peer socket. In Herdr, mail is read when a turn is submitted and continues an active turn, but an idle agent is **not** woken | inbox extension (`inbox.omp.ts`): when idle with an empty composer it starts a turn with the mail | same extension | **no**: mail waits until the agent runs `cel inbox read` | the celestial plugin hands mail to the idle session as native input | its hooks keep a `cel inbox wait` running as an agy background task; its exit on new mail is the wake |
+| **Guard** | `tools/hooks/orchestrator-guard.sh` as a `PreToolUse` hook (Bash, Read, Edit, Write, MultiEdit, NotebookEdit) - **not installed by cel**: add it to `~/.claude/settings.json` (its header gives the entry) | `orchestrator-guard.omp.ts` on core, root, product-agent, member and reviewer launches (not a Direct pane): bash, edit, write, read | same, via `--extension` | **none** (codex's own workspace-write sandbox only) | plugin hooks: shell, write, edit and patch; reads are not checked | `agy-guard.sh` (`PreToolUse` in `~/.gemini/config/hooks.json`, every agy session); fails closed for an agent cel launched |
+| **Roles** | any but reviewer; the default `runtime:` for root and product agents | any but reviewer; core's default (`defaults.core`) | every role; the only reviewer runtime | any but reviewer | product agent (solo or lane) only | root, product agent, lane, member |
+
+**MCP tool calls are guarded in no runtime.** Each adapter checks only the
+tools listed above: Claude's `mcp__*` tools fall outside its match, omp and pi
+pass every tool they do not list, OpenCode classifies only shell, write, edit
+and patch, agy passes `call_mcp_tool` explicitly, and codex has no guard. An
+MCP server that runs commands or writes files (REA, for example) is outside
+every guard.
+
+- **Roles.** Root and product agents take `runtime:` from `workspace.yaml`
+  (default `claude`) unless a bound profile says otherwise; team members
+  default to the orchestrator runtime. Reviewers and QA agents always run on
+  pi, whatever `review.runtime` or a profile says - pi's inbox extension is
+  what wakes an idle reviewer. Core comes from `defaults.core`.
+- **Effort.** A level a runtime does not accept is clamped down its own
+  ladder (agy: `xhigh` and `max` become `high`). A runtime with no model flag
+  refuses a profile that names a model rather than ignoring it.
+- **Setup and update.** `cel setup` installs every runtime (`--agents a,b`:
+  only those). `cel update` updates what is installed with each updater above
+  and never installs a missing optional runtime. Pins govern fresh installs;
+  see [Requirements](#requirements).
+- **agy's hooks.** Every agy launch merges one `celestial` entry into
+  `~/.gemini/config/hooks.json` (guard, session, inbox), keeping the entries
+  already there; if it cannot, nothing is launched.
+- **Missing workspace skills.** A launch that cannot carry its workspace's
+  [skill sets](#vendored-skills) is refused.
+
+### OpenCode: the scoped gateway launch
+
+OpenCode is pinned to the verified **2.2.5 CLI release** (`agents.yaml`), not
+the legacy npm package or GitHub's stale latest-release pointer. `cel setup`
+and `cel update` install the digest-checked official asset next to the
+existing executable (fresh installs use `~/.local/bin`); they never restart an
+agent or change accounts. OpenCode runs only as a product agent (solo or
+lane), on a `via: gateway` profile.
+
+The gateway path starts with a prepared per-agent native-v2 configuration:
+`ompgw-codex/gpt-6.1-sol`, medium effort, evidenced 500K context/128K output
+limits, and the existing credential reference. Nothing imports credentials or
+edits global OpenCode settings. Roles live under
+`.cel/opencode/<agent>/role-<role>.md`. The plugin is a directory package with
+an explicit server export, not a standalone v1 hook file.
+
+`cel gateway opencode-models` prints the read-only gateway chat inventory as
+JSON. Advertised supported Codex/GPT and Anthropic chat IDs remain available
+when exact cached capabilities are absent; those entries use native defaults,
+not invented limits or sibling metadata. Exact capabilities enrich entries
+where available. OMP-only aliases and unsupported image APIs stay excluded.
+It uses only the existing private key and model-list/cache reads: no mint,
+refresh, account inspection, inference, or native account integration.
+
+```sh
+cel gateway opencode-models --sync --workspace <registered-name> --agent <existing-alias> --dry-run
+cel gateway opencode-models --sync --workspace <registered-name> --agent <existing-alias>
+```
+
+Sync accepts only the existing private, UID-owned, non-symlinked
+`.cel/opencode/<alias>/role-orchestrator.opencode.json` and role file under the
+registered workspace; arbitrary global paths are not accepted. Namespace
+directories must be UID-owned and not group/world-writable; mode 0755 is
+allowed while role/config files remain private. It refuses noncanonical/custom
+configuration rather than discarding it. Dry-run writes
+nothing and prints only inventory/eligibility and activation status. Publication
+holds the sibling config lock, retains a private backup, and atomically replaces
+the config with mode 0600. Root/agent Sol-medium defaults, role/plugin, gateway
+route, URL and environment-key reference remain unchanged; unrelated scopes and
+native sessions/PIDs/settings are not modified. **File publication is not live
+availability:** an existing process captured inline configuration at launch.
+The result reports `activationRequired`; coordinated activation at the same
+native SID boundary belongs to its owner. This command never reloads/restarts.
+
+```sh
+cel run solo --product <product> --profile <scoped-profile> --session-backend rex --fresh --handoff /absolute/checkpoint.md
+```
+
+The native `--prompt` kickoff instructs a fresh session to read the handoff;
+an archived OMP log is consultation material, never a native resume. Subsequent
+continuation accepts only an existing migrated OpenCode `ses_...` root with
+the exact directory and scoped agent. Without a catalog the exact Sol-medium
+selection remains required; a canonical catalog additionally admits an
+owner-selected eligible provider/model and its native variant, without an
+automatic fallback or changing the launch default. Storage errors, pending
+migrations and missing IDs refuse before stopping/relaunching a runtime:
+v2's bare `--session` can otherwise create a missing session.
+
+The launcher owns a private, authenticated `serve --stdio` server. Before
+attaching the TUI it verifies the server, the native plugin, migration
+readiness, the saved session and the selected model, and holds inbox mail
+until those checks pass; a missing or failed plugin never admits an unguarded
+TUI. The server's copy of the config sets
+`experimental.location_idle_timeout: false`: OpenCode otherwise unloads a
+location's services, the plugin's idle inbox observer among them, after 60
+minutes without session activity, and an agent idle that long stopped waking
+for mail. The plugin delivers idle mail as native synthetic input, never
+terminal typing, and binds a fresh root created before its first observer
+tick, so a `--handoff` kickoff always runs. Medium is persisted in the native
+model selection and sent as Responses reasoning effort. The shared guard
+covers shell, write, edit and patch (not reads, not MCP tools); `--auto`
+never waives an explicit denial.
+
+A completed v1 migration marker does not prove a later v1 session reached
+v2: back up the database first and investigate on a disposable copy; never
+reset a live marker or replace shared native storage. Installation is not
+authorisation to quit or reload a held runtime.
+
+## Sessions: Herdr and Rex
+
+An agent is a terminal session, not a service: it stops when its terminal
+does. The terminal host is independent of the agent runtime and model. Herdr
+stays the default; select Rex for a new session with:
+
+```sh
+cel run solo --product celestial --lane ui --session-backend rex
+cel run reviewer --repo celestial --pr 123 --session-backend rex
+cel core --session-backend rex
+cel sessions --json
+```
+
+Or set `session_backend: rex` in a workspace's `workspace.yaml` for its new
+`cel run` sessions. The order is `--session-backend`, then
+`CEL_SESSION_BACKEND`, then the workspace's `session_backend`, then Herdr.
+Existing live agents are never moved: a restart retains their current
+terminal host. After a process
+has exited, normal new-launch defaults apply; keep `--session-backend rex` in
+recovery commands unless the workspace default is Rex. Rex must already be
+installed; Celestial does not adopt unrelated Rex sessions. A product agent,
+lane, root or core gets its own named Rex session. A reviewer - and a team
+member whose lead runs in Rex - opens as a window labelled with its alias in
+its product agent's session instead, so a product's whole team is one session
+group; when that session cannot be proven live it gets a session of its own,
+and says so. The command prints its session (and window) and terminal IDs.
+Use `rex ls`, `rex window ls -s <session>`, `rex capture -s <session> -b
+<block>` and Rex's native controls, not Herdr commands, for those terminals.
+Retiring a reviewer or member closes only its own window, never the session.
+
+Role prompts, model and profile, environment, inbox identity and review gates
+are the same on both hosts. Pi/OMP (inbox extension), Claude
+(session/submit/Stop hooks), OpenCode (its plugin) and agy (its hooks) report
+their real turn state and native conversation; a report counts only when it
+comes from the receipt's live runtime process tree, and a runtime without
+native observation stays conservatively busy. These hooks never type into
+the terminal or a pending owner draft. A restart refuses to discard an
+unreported native conversation unless `--fresh` is given. Rex sessions appear
+alongside Herdr agents in Celestial's inventory (`cel sessions`, `cel fleet`,
+the dashboard), and Herdr's pane cleanup never closes a Rex terminal.
+
+### Rex server restarts and rex upgrades
+
+A Rex server restart ends every program in its sessions. Each core, root,
+orchestrator and solo-lane receipt records the `cel run` line that brings it
+back (its role, product, lane, workspace and the profile/model/thinking you
+named; a lane keeps its remembered choices). Every steward tick records the
+running server instance and the live managed agents; when the instance changes,
+each agent that was live under the old server and was not stopped, retired or
+relaunched since is resumed ONCE through that line, into its saved session, and
+root gets one summary. Each resumed agent is also told that its background
+shells, subagents and servers ended with the old server. Reviewers and team
+members never resume. Nor does an agent launched before relaunch lines were
+recorded, one whose runtime never reported a native session, or one whose
+saved session no longer matches its receipt. Each is listed in the summary
+with the command to run.
+
+A resume that only ran out of time - an OpenCode launcher refusing on one of
+its own timeouts (`server_not_ready`, `guard_not_loaded`, `admission_timeout`,
+`models_not_admitted`, a `*_request_timeout`), as a cold box after an upgrade
+can make it - is run once more after `CEL_REX_RESUME_RETRY_SECS` (60), unless
+the agent is live again by then or its retirement has begun. If the retry
+also fails, the summary reports it once and says it was retried. A refusal
+for any other reason (guard, auth, scope, session, a veto or a duplicate) is
+reported without a retry. Nor is it retried when the first attempt's dead
+terminal could not be closed, when the agent was relaunched or stopped during
+the wait, or when its saved session no longer matches. A pass retries at most
+`CEL_REX_RESUME_RETRY_MAX` (3) agents within `CEL_REX_RESUME_RETRY_BUDGET_SECS`
+(300); the rest are reported with "retry skipped: restore time cap". Retries
+add about 3 minutes to that steward tick, at most about 7.
+
+Before resuming, the restore repairs what a restart leaves behind. The new
+server restores the old sessions as empty shells under the same labels: for
+each agent being resumed, the sessions with its label are closed only when at
+least one block was seen and every block's process report names child and
+foreground as null - an omitted key, an error, an empty or unreadable session
+counts as alive and is never touched. A
+client-autostarted server runs with `--exit-empty`, so closing the last shell
+can end it: if no server answers, a persistent one (`rex server start`, in its
+own systemd scope with `OOMPolicy=continue`, with `--tailscale` when the old one served the tailnet) is
+started before any resume. If the old server served the tailnet and the new
+one does not, `rex server tailscale on` is run and verified. The summary names
+the server's version and API revision before and after.
+
+The steward also keeps rex current, at most every 30 minutes:
+
+```sh
+cel sessions rex-upgrade --check   # newer rex? busy, not resumable, or unmanaged sessions?
+cel sessions rex-upgrade           # one round now
+```
+
+A round runs only when apt's candidate for rex is newer than the installed
+version and comes from `https://pkgs.superlogical.com` exactly (that host, not
+one containing the name; `apt-cache policy rex`, without `apt-get update`). It
+waits up to `CEL_REX_UPGRADE_IDLE_SECS` (120) for every live Rex agent to be
+idle, and skips the round otherwise. Root is told once, and nothing changes,
+while the round is blocked by any live agent it could not resume (a reviewer,
+an older receipt, a missing saved session) or by ANY Rex session
+that is not a live managed launch - a session you opened yourself, or an old
+empty shell: stopping the server ends every session, and only managed agents
+come back. Close those sessions (`rex ls`, `rex kill`) to let it proceed. That
+alert is said once per rex version, whoever is in the way, and the steward
+reminds root once more if that version has stayed blocked for over 24 hours. Then
+it records the agents, installs exactly the version it vetted
+(`sudo -n apt-get install --only-upgrade -y rex=<version>`), restarts the
+per-user Rex server in its own systemd scope if the package did not, resumes
+each recorded agent, checks it is still alive after a short settle, and sends
+root one summary. New Celestial launches wait while it runs. If apt does not
+install the vetted version, nothing is stopped, and root is told once that
+the upgrade failed and why.
+
+Rex is the only thing Celestial upgrades on its own. Coding-agent runtimes
+and Celestial itself move when you run `cel update` (see
+[Versioning & updates](#versioning--updates)).
+
+### Rex agents' memory: one runaway, one kill
+
+Every program a Rex terminal runs is a child of the Rex server. Each managed
+Rex launch therefore starts its terminal's command through
+`systemd-run --user --scope` (which execs it in place: same PID, same receipt)
+into a scope of its own, `cel-agent-<name>-<epoch>-<pid>.scope`, under
+`cel-agents.slice` (systemd nests it as `cel.slice/cel-agents.slice`). The
+agent's runtime and everything it starts - builds, test binaries, browsers -
+live there, not in the server's cgroup. Past the agent's `MemoryMax` the kernel
+kills that agent's largest process; in a box-wide out-of-memory the kernel's
+choice is the runaway, in its own scope. Either way the server's scope is not
+the one that loses a process, and the server's scope runs with
+`OOMPolicy=continue` besides (a scope's default, `stop`, ends the server and
+every session when any process in it is killed - what happened on
+2026-11-21). `systemd-cgls --user-unit cel-agents.slice` shows who is where.
+
+The limits live in the box config, `~/.local/share/cel/config.yaml`, in MB:
+
+```yaml
+agent_memory:
+  max_mb: 9583          # one agent's scope MemoryMax          (default: 40% of RAM)
+  swap_max_mb: 2047     # one agent's scope MemorySwapMax      (default: 25% of swap)
+  slice_max_mb: 20364   # cel-agents.slice MemoryMax, all agents (default: 85% of RAM)
+  slice_high_mb: 17968  # cel-agents.slice MemoryHigh, throttle  (default: 75% of RAM)
+  oom_policy: continue  # continue | kill | stop                 (default: continue)
+```
+
+The numbers shown are the defaults on a 23.4 GiB box with 8 GiB of swap; every
+default is computed from `/proc/meminfo` at launch. A value that is not a whole
+number of MB (or an unknown policy) is the default. `oom_policy` is the agent
+scope's: `continue` kills only the process the kernel chose, so an agent sees
+its test binary killed and carries on; `kill` ends the agent's whole scope,
+runtime included; `stop` stops it. The per-agent limits apply to new launches
+(and resumes); the slice limits are set on the live slice at every launch
+(`systemctl --user set-property --runtime`), so a change reaches agents already
+running at the next launch. `systemd-oomd` is not used.
+
+Without a systemd user manager (no `systemd-run`, or `systemctl --user` not
+answering within `CEL_AGENT_MANAGER_TIMEOUT` seconds, default 5) a launch
+warns that the agent runs inside the Rex server's own cgroup and proceeds as
+before. If the manager refuses the slice limits, the launch warns and the
+agent still gets its own scope; a `slice_high_mb` above `slice_max_mb` is
+ignored and both take their defaults. Herdr sessions are unchanged.
+
+Nothing here moves what is already running: a running server keeps its
+cgroup and `OOMPolicy` (including one a Rex client auto-started inside some
+other unit's cgroup), and an agent launched earlier shares the server's cgroup
+until it is relaunched. To move a live server without ending any session,
+adopt its PID (`pgrep -f '^/usr/bin/rex server run '`) into a scope of its
+own:
+
+```sh
+busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+  org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \
+  "cel-rex-server-$(date +%s).scope" fail 2 PIDs au 1 <pid> OOMPolicy s continue 0
+```
+
+Otherwise restart it in one line, which ends every session
+([above](#rex-server-restarts-and-rex-upgrades)):
+`rex server stop && systemd-run --user --scope --unit cel-rex-server-$(date +%s) -p OOMPolicy=continue -- rex server start --tailscale`.
+
+### Retire a completed Rex reviewer, keep its evidence
+
+```sh
+cel sessions retire-reviewer widget#12 --workspace demo --dry-run
+cel sessions retire-reviewer widget#12 --workspace demo
+```
+
+`--focus F` or `--qa F` names an extra reviewer or QA agent of the PR instead
+of its main reviewer. The targeted command handles Rex reviewers only; Herdr
+reviewers are retired by `cel gc`. The PR's state is asked of the repo's own
+forge (GitHub or Forgejo). Before a real attempt, a reviewer's own
+group-writable evidence is made private; a dry run changes nothing.
+
+The targeted command, reviewer GC and `cel solo land` share the same native
+proof. Idle alone is never eligibility: the PR must be merged or closed (an
+open PR can still take a push or a re-review request, so its reviewer stays),
+the PR's final head must have a completed canonical solo review round,
+the actual Pi leaf must be settled, and no tool, background job, queued input,
+inbox retry debt, unread mail or draft may remain. A completed `changes`
+round is not an approval and retirement never changes its verdict.
+
+After a successful merge, `cel solo land` retires that PR's Rex reviewer the
+same way. A reviewer it has to keep (still mid-turn, mail owed, proof
+unavailable) is named and left for the next `cel gc` sweep; retirement never
+fails a land.
+
+New Rex/Pi reviewers expose a private native handshake. It samples the live
+leaf and in-memory debt, checks them again before graceful shutdown, and only
+after the runtime has exited is the exact empty Rex session removed and its
+registry row reconciled. Extra terminals, replacement processes and unknown
+evidence are protected; older reviewers without the handshake are kept. A
+reviewer that has gone by other means (off the roster, its PID gone, no
+retirement in flight) loses only its registry row to `cel gc`, so the PR can
+be reviewed again; its receipt, checkout and native log stay.
+
+A kept checkout does not stay forever: `cel gc` removes reviewer checkouts
+(under `~/.local/state/cel/reviews`) whose PR closed more than
+`CEL_REVIEW_CHECKOUT_KEEP_DAYS` (default 3) days ago and that hold nothing of
+their own - the full rule is in [What `cel gc` keeps](#what-cel-gc-keeps).
+The verdicts and evidence under the workspace's `.cel` stay.
+
+A reviewer's inbox watcher is owned infrastructure only while its every child
+is recognised. Its jq child counts if it runs the launch checkout's current
+`_INBOX_WATCH_JQ` (lib/inbox.sh) or a program an earlier release started
+watchers with, listed by sha256 in `tools/reviewers/inbox-watch-programs.mjs`;
+so a reviewer whose watcher predates a `cel update` can still be retired. Any
+other program keeps the reviewer `protected`. A change to `_INBOX_WATCH_JQ`
+adds its hash there, beside the old ones (retire.test.mjs fails until it does).
+
+The command returns JSON with a status of `eligible` (dry run), `retired`,
+`protected` (outstanding work or an unsupported context) or `unknown` (missing
+proof or incomplete teardown). A partial failure keeps private evidence in
+`<receipt>.retirement/` for an identity-checked retry; never purge it to force
+cleanup. Native history, verdicts, the checkout and review artefacts are
+always kept, and a fresh round uses a separate checkout. For a new head or a
+re-review, run `cel run reviewer --repo widget --pr 12 --workspace demo`
+first, then send its inbox request: it reuses a live reviewer or starts the
+next round. Saved retirement history is evidence, not permission to approve
+or close a new round.
+
 
 ## The review loop
 
@@ -1419,14 +1498,24 @@ are mid-sentence merges with your draft. Routine agent-to-agent traffic goes
 through `cel inbox` instead - a JSONL mailbox per workspace, with a read
 cursor per *reader* so a standing root pane and `cel core` can both drain
 root's mail without stealing each other's place. Delivery is inbox-only, but
-idle wake depends on runtime. Claude Code's global `UserPromptSubmit` hook
-drains mail on submission; its launch-time `Stop` hook continues for mail
-arriving during a turn. Managed **Rex Claude lanes** also start a receipt-bound
-idle watcher through `claude-session.sh`. It sends a native Unix peer event,
-not terminal text, into the same conversation without submitting the owner's
-draft. Mail stays unread until Claude or its normal inbox hook reads it.
-The Pi/OMP inbox extension watches mail, raises `ui.notify`, and injects unread
-items into a turn. The Claude watcher does not depend on a `Monitor` tool.
+idle wake depends on runtime (the [Runtimes](#runtimes) table):
+
+- **pi and omp**: the inbox extension watches mail, raises `ui.notify`, and
+  injects unread items into a turn, starting one when the agent is idle.
+- **Claude Code**: the global `UserPromptSubmit` hook drains mail on
+  submission and the launch-time `Stop` hook continues for mail arriving
+  during a turn. Only a **Rex** launch also gets a receipt-bound idle watcher
+  (`claude-session.sh`), which sends a native Unix peer event, not terminal
+  text, into the same conversation without submitting the owner's draft; an
+  idle Claude in a Herdr pane is not woken.
+- **OpenCode**: its plugin hands mail to the idle session as native input.
+- **agy**: it wakes only when one of its own background tasks finishes, so its
+  hooks keep `cel inbox wait` running as that task; it exits on new mail
+  without reading it, and that exit is the wake. Mail waiting when a turn
+  starts is attached to it.
+- **codex**: no inbox hook; mail waits until the agent runs `cel inbox read`.
+
+Mail stays unread until the agent's own hook or `cel inbox read` reads it.
 Direct `herdr agent prompt` is limited to one-time launch kickoffs and the
 owner's deliberate interrupts. Escalations remain inbox items, not pane
 prompts.
@@ -1462,8 +1551,10 @@ A mailbox nobody reads is a **fault**, not silence. `cel fleet --json` carries
 live pane whose alias matches the mailbox, or a running `cel core`, or empty —
 `cel doctor` says `alpha: root has 13 unread, oldest 7h, nobody reading it`,
 and the steward raises one rolled-up `blocked` item per workspace (which takes
-the desktop-notification path, as an `escalation` now does too) when an unread
-escalation is older than `CEL_ROOT_UNREAD_SECS` with nobody alive to read it.
+the desktop-notification path, as an `escalation` now does too) when an
+unread escalation, decision or blocker (the steward's own mail aside) is
+older than `CEL_ROOT_UNREAD_SECS` (default 3600, an hour) and nobody -
+matching pane, `cel core` or the console - is reading root's mailbox.
 
 What is left gets **ranked**. `cel inbox open --for root --ranked` and the
 dashboard card show the top `inbox.top_n` (3) of the
@@ -1494,7 +1585,7 @@ losing messages.
 - **Memory is part of that read.** `cel fleet` prints `mem` per product and
   `box 6.9G free of 24G` on each workspace's head line; `--json` carries the
   numbers and a `box` block. The steward raises one blocker under 10% naming
-  the largest trees — it never kills anything.
+  the largest trees (cleared at 15%) — it never kills anything.
 - **`cel dash`** — one dashboard for the whole box: an attention queue ("needs
   you"), every in-flight branch joined with its agent + PR + CI state across
   every workspace, sticky filters, and a composer that mails a product agent.
@@ -1513,29 +1604,35 @@ losing messages.
   runnable by hand. `cel gc --orphans` reaps what the plane started and nobody
   owns any more: inbox watchers whose agent exited, test fixtures whose
   worktree is gone, bare shells on ptys no pane owns, gate runners whose suite
-  was killed. The steward does it once a tick and says so in one line.
-  The worktree pass covers every repo a registered workspace declares, by the
-  real path of its clone (`repos/<name>` may be a symlink to a clone
-  elsewhere), and every worktree git records for it, wherever it lives; it
-  prunes records whose directory has been gone a week, never one whose parent
-  directory is missing too (an unmounted disk). It never removes anything
-  under `~/orca/workspaces` (`owner`), a follow-main `local-*` tree
-  (`follow-main owned`), or a worktree something else claims (locked, a
-  registered checkout, holding another tree or checkout, a pane or agent in
-  it). `cel gc` prints, and `cel doctor` repeats from the last sweep, one line
-  per repo: worktrees, removed, kept by reason.
+  was killed. Only this user's processes reparented to init are candidates;
+  box services, permanent servers and protected launch lines are never taken.
+  The steward does it once a tick and says so in one line. The worktree pass
+  covers herdr worktrees, every solo agent's worktrees and every repo a
+  registered workspace declares, by the real path of its clone (`repos/<name>`
+  may be a symlink to a clone outside `~/ws`), and every worktree git records
+  for it, wherever it lives. It never touches `~/orca/workspaces` or a
+  follow-main `local-*` tree. What it keeps, and why, is in
+  [What `cel gc` keeps](#what-cel-gc-keeps). `cel gc` prints, and
+  `cel doctor` repeats from the last sweep, one line per repo: worktrees,
+  removed, stale records pruned, kept by reason.
 - **`cel box space`** / **`cel gc --box`** — the box is a resource the factory
   spends. `cel box space` measures what is large, what of it is reclaimable,
-  and which of three classes it is in: **ours** (worktrees, `~/.cache/cel`),
-  **regenerable** (docker images and build cache, toolchain caches — deleting
-  costs a re-download, never data) and **someone's** (restore dumps, dated
-  backups — reported with an age and a suggestion, and never swept by
-  anything). `cel gc --box` sweeps the first two after the worktree pass. Docker
-  removes only unreferenced, unprotected full image IDs (without force), plus
-  build cache; there is no image age filter. `--dry-run` reports the same policy
-  without deleting. The steward sweeps on a six-hour cadence and `cel doctor`
-  warns below a free-space floor, naming the largest reclaimable class and the
-  command that clears it. `cel box diag` is the
+  and which of three classes it is in: **ours** (`~/.cache/cel` entries older
+  than 7 days, `~/.local/state/cel/scratch` older than 3), **regenerable**
+  (docker images and build cache; bun, npm, uv and pip caches older than 14
+  days; Playwright, Puppeteer and Selenium downloads older than 30 — deleting
+  costs a re-download, never data) and **someone's** (`~/restore`,
+  `~/backups` — reported with an age and a suggestion, and never swept by
+  anything). It also shows the reviewer panes and the memory they hold.
+  Worktrees are not a box class: only `cel gc`'s worktree pass removes them.
+  `cel gc --box` sweeps the first two after the worktree pass; only direct
+  children of a cache root go, never the root. Docker removes only
+  unreferenced, unprotected full image IDs (without force), plus build cache;
+  there is no image age filter. `--dry-run` reports the same policy without
+  deleting. The steward sweeps on a six-hour cadence
+  (`CEL_STEWARD_BOX_WINDOW`) and `cel doctor` warns below a free-space floor
+  (`CEL_BOX_FREE_FLOOR_GB`, default 20), naming the largest reclaimable class
+  and the command that clears it. `cel box diag` is the
   same question asked by an alert: at most two bounded lines - docker's own
   images / build cache / volumes summary (left out when docker is absent,
   slow past `CEL_BOX_DIAG_TIMEOUT` seconds, default 30, or not this user's to
@@ -1551,7 +1648,8 @@ the resolved `keep_file`, `keep_dir`, `lock_file`, and `keep_label` (`cel.keep=t
 `cel box sweep-docker [--dry-run]` runs only the Docker sweep, prints a byte
 count (an upper bound in dry runs), and exits nonzero on unknown observations
 or mutation failure; exit 2 means Docker is unavailable. No image/system,
-container or volume prune is used. Build-cache prune remains a separate step.
+container or volume prune is used; build cache is cleared by
+`docker builder prune --all --force` as its own step of the same sweep.
 
 For recurring 20 GiB recovery, reviewed runtime/handler pins, producer observations,
 native notification verification and transactional service migration, see the
@@ -1589,9 +1687,10 @@ container inspection refuse all Docker mutation. Absent default paths are
 allowed; absent executor ownership preserves the whole executor namespace.
 
 **Producers must share the ownership lock**, including builds, image import,
-tag moves and keep-file replacement. The sweep holds the lock and rechecks
-references/retention immediately before each mutation; an active local Docker
-build also vetoes the sweep. Docker has no atomic compare-and-delete tag API:
+tag moves and keep-file replacement. The sweep never waits for the lock: if a
+producer holds it, nothing is touched and it exits 1. Holding it, the sweep
+rechecks references/retention immediately before each mutation; an active
+local Docker build also vetoes the sweep. Docker has no atomic compare-and-delete tag API:
 the lock contract is required, not protection against uncoordinated tag writers
 or remote clients starting builds. Use the `lock_file` reported above (default
 `${XDG_STATE_HOME:-$HOME/.local/state}/cel/docker-images.lock`):
@@ -1636,11 +1735,10 @@ required images from a syntactically valid set: completeness is the producer's
 admission contract. `keep_dir` is additive to contract v1; existing `keep_file`
 consumers remain compatible.
 
-
 ## What runs in the background
 
-Four kinds of thing run without you: **one timer**, **long-lived servers**, **a
-per-turn hook**, and **the agents themselves**. Nothing else is hidden.
+Four kinds of thing run without you: **one timer**, **long-lived servers**,
+**hooks**, and **the agents themselves**. Nothing else is hidden.
 
 ### The steward — the only scheduled process
 
@@ -1660,41 +1758,108 @@ journalctl --user -u cel-steward       # what it did, and when
 
 A **systemd user timer** rather than a shell loop in a pane, because the
 steward's whole job is to be running when nobody is watching, and a pane loop
-dies silently with the herdr session. `Persistent=true`, so a tick missed while
-the box slept runs on wake — a ticket moved to the trigger state overnight is
-still waiting in the morning. Enable `loginctl enable-linger` or it stops when
-you log out.
+dies silently with the herdr session. The timer is monotonic: two minutes
+after boot, one minute after the timer itself starts (`OnActiveSec`, so a
+user-manager restart or a `systemctl --user start` schedules a tick rather
+than leaving `NEXT` at `-`), then every interval. `cel doctor` rewrites an
+older installed timer that lacks this, and fails when the last tick is more
+than three intervals old or the timer has no next trigger. Ticks never
+overlap: a tick that finds another still running says so and exits. Enable
+`loginctl enable-linger` or it stops when you log out. `cel steward --no-gc`
+runs a tick without the gc and box sweeps.
 
 Each tick, in order:
 
 | Step | What it does |
 |---|---|
-| **garbage collect** | retains dirty, unlanded, live or unverifiable work; retires only ownership-verified agents observed idle, never merely old processes |
-| **review sweep** | for each repo, `gh pr list --author @me`: approved PRs, changes-requested with nobody working, and red gates with nobody working each nudge the PR's owner - the product agent, or the lane the repo declares (`repos[].lane`; the product agent, with a note once per head, while that lane is not running) |
-| **untracked PRs** | a PR older than a day whose branch carries no ticket id — invisible on the board, so it is surfaced |
+| **Rex restarts** | a Rex server restart this plane did not drive is noticed first, before any sweep reads the missing agents as gone; [resumable agents are resumed](#rex-server-restarts-and-rex-upgrades) and root gets one summary |
+| **Rex upgrade** | at most every 30 minutes, the managed `rex` upgrade (`cel sessions rex-upgrade`), only while every Rex agent is idle |
+| **garbage collect** | `cel gc --reap 12` (`CEL_STEWARD_REAP_HOURS`; 2 hours when under 2 GiB of memory is available): retains dirty, unlanded, live or unverifiable work; retires only ownership-verified agents observed idle, never merely old processes |
+| **box sweep** | every 6 hours (`CEL_STEWARD_BOX_WINDOW`), docker and toolchain caches (`cel gc --box`) |
+| **sample** | one line of load, memory, swap and every pane's status to `~/.local/share/cel/samples.jsonl` (newest 2000 kept) for the dashboard |
+| **review sweep** | for each repo, our own open PRs (`--author @me`, plus `repos[].pr_authors`), drafts and `hold`/`superseded` labels left alone: approved at the current head, changes requested at the current head, and failing checks each nudge the PR's owner - the product agent, or the lane the repo declares (`repos[].lane`; the product agent, with a note once per head, while that lane is not running). In a Linear workspace, a PR older than a day whose branch carries no ticket id is surfaced too |
+| **solo sweep** | a solo product's PR approved at its head with every check green is "land it: `cel solo land`", and a recorded `changes` verdict at the current head is "address it" - each once per head |
+| **feature teams** | a member still `reserved` 10 minutes after `cel team add`, or specialist verdicts older than the repo's candidate head, are told to the team's lead once; nothing is retired |
+| **root unread** | unread escalations, decisions and blockers to root older than an hour with nobody reading root's mailbox raise one `blocked` item per workspace |
+| **AFK** | an AFK window whose `--until` has passed but is still on is said once |
 | **blocked agents** | any agent waiting on input is named every tick, deliberately without dedup; that is your queue |
-| **stalled agents** | an agent whose provider stream died sends no mail and reads as `idle`; a fatal pane marker quiet for 15 minutes, or an agent gone from the roster, escalates to root naming the pane, stall age, and what is unpushed |
-| **stale mailboxes** | unread mail older than 30 minutes is surfaced to the owning agent for follow-up; the steward never types into the recipient's pane |
+| **stale mailboxes** | an escalation, decision or blocker from someone else unread for 30 minutes gets an inbox reminder to its recipient, at most every 4 hours; the steward never types into a pane. Once a day root hears how many owner decisions are open, and each asker is asked to confirm or withdraw its questions idle for 3 days (`cel decide confirm` keeps one quiet for 7 days) |
 | **page feedback** | feedback whose publishing pane is gone stays a warning until someone drains it |
-| **ready tickets** | tickets in the workspace's `trigger_state` with no branch anywhere are handed to the product's agent, else root — this is what makes "move it to Todo" start work |
-| **servers** | `cel dash --ensure` - the one dashboard, never one per workspace; expired public shares are deleted, not merely refused |
-| **ensure product agents** | every product declaring `orchestrator: auto` with no live pane gets its solo agent (`cel run orchestrator`), at most once every 30 minutes so a crash-looping one is not relaunched every tick |
-| **updates** | once a day, whether this plane is behind — the newest release tag on the `release` channel, the commits on `origin/main` on the `main` channel, rolled up into one root item naming how many and which build you are on |
+| **updates** | once a day: on the `main` channel, one status item naming how many commits main is ahead of your build; on `release`, the newer tag is logged and written for the console |
+| **ready tickets** | Linear workspaces only: tickets in `tickets.trigger_state` (default `Ready`), unassigned or yours, with no branch anywhere, are handed to the product's agent, else root |
+| **API balances** | a provider below its floor that a profile routes to raises a blocker (profiles routed there are vetoed); one that recovers takes it down |
+| **subscriptions** | the 80% / 100% items per signed-in account, the orchestrators' own Claude pool, and the on-pace forecast ([Subscriptions](#subscriptions)) |
+| **memory** | under 10% available, one blocker per workspace naming the largest trees and servers (cleared at 15%); under pressure each product agent is told once per condition. Nothing is killed |
+| **orphans** | the `cel gc --orphans` sweep; one line to root when the set changes |
+| **services** | probes every service with a `health:`; two consecutive misses raise a blocker (`restart: auto` restarts it once first) |
+| **suite lock** | names the live holder of the box-wide test lock once it has been held 30 minutes ([below](#the-suite-lock)) |
+| **servers** | `cel dash --ensure` and both `cel pages --ensure` tiers; expired public shares are deleted, not merely refused |
+| **orphan test servers** | a pages/dash server left running in a worktree with no live agent is reported, and stopped once it is an hour old |
+| **ensure product agents** | every product resolving `orchestrator: auto`, homed on this login, with no live agent gets one (`cel run orchestrator`), at most every 30 minutes; a failed start is not alerted while an open owner decision names that agent |
+| **inbox hooks** | an orchestrator or lane that came back without its inbox hook, or whose inbox watcher died, is restarted with its full launch line, only while it is idle and its composer is provably empty; otherwise root is told once |
+| **older launch lines** | after an update, agents still on an older launch line are named to root once per change (silenced while an owner decision names them) |
+| **ledgered servers** | `cel serve` servers past their TTL, idle, or whose checkout is gone are stopped and their owner mailed the restart command |
+| **previews** | previews of PRs that closed or merged are stopped and their checkouts removed |
+| **unledgered servers** | changes to the set of servers nobody registered go to root and to the owning agent |
+| **build daemons** | idle Gradle/Kotlin daemons are reported to their owner once |
+| **fleet cache** | refilled in the background when stale, so the first console read is recent |
 
-Nudges are **rate-limited per subject** (4 hours; the update check, 24) through
-`~/.local/share/cel/steward-state`, so a stuck agent is reminded rather
-than spammed.
+Nudges are **rate-limited per subject** (4 hours, `CEL_STEWARD_WINDOW`; the
+update check, 24) through `~/.local/share/cel/steward-state`, so a stuck agent
+is reminded rather than spammed; the solo "land it" and "changes" nudges and
+lane notes go once per PR head.
+
+**An open owner decision holds every nudge about its PRs.**
+`cel decide ask … --pr <repo>#<n>` (repeatable) links a PR to the question.
+`<repo>` is a declared repo name (resolved through that workspace's `url`),
+`owner/name`, or a remote URL (scp, ssh or https, GitHub or Forgejo); it is
+matched case-insensitively on `owner/name`, with the forge host ignored, and a
+bare name the workspace declares no URL for matches only inside that
+workspace. While the question is open, no per-PR nudge about that PR goes
+out - approved, changes requested, failing checks, no ticket, solo "land it"
+and recorded `changes` - and nothing is recorded either, so the first tick
+after the question is answered or withdrawn nudges as usual. The steward
+reads every workspace's open decisions once per tick, so a decision filed in
+one workspace holds the PR wherever another workspace's sweep finds it. Only
+the explicit `--pr` link counts; free text naming "#7" does not, and
+re-asking without `--pr` unlinks the PRs.
+
+#### The suite lock
+
+`tests/run.sh` takes one box-wide `flock` so only one suite runs at a time:
+`CEL_SUITE_LOCK`, else `$XDG_RUNTIME_DIR/cel-suite.lock`, else
+`${TMPDIR:-/tmp}/cel-suite-<uid>.lock` (`none` turns it off). A queued gate
+looks exactly like a hung one, so the steward watches the lock. Who holds it
+is the kernel's answer, not the lock file's, which names only whoever last
+wrote it (and a plain `flock <lockfile> <cmd>` writes nothing): the holder is
+the process `/proc/locks` lists with a `FLOCK` on the lock's inode, confirmed
+by one of its descriptors that resolves to the lock path and shows that lock
+in its `fdinfo`; waiters and POSIX/OFD locks count for nothing. The runner
+writes a holder record beside the lock (pid, start time, mailbox, workspace,
+checkout, files, when it took the lock), used only when its pid and start
+time match the live holder. Once the lock has been held for
+`CEL_SUITE_HOLD_WARN_SECS` (default 1800), the steward says who holds it, for
+how long, where and what it is running - to root in the box's first
+workspace and to the holder's own mailbox (the record's agent, or for a
+process cel did not start, the agent whose directory it runs in) - once per
+4-hour window, and kills nothing. When the lock is free again, every mailbox
+that was told has the item taken down. A runner waiting in the queue names
+the same live holder in its own waiting line, and repeats it with the
+holder's directory after `CEL_SUITE_WAIT_WARN` seconds (default 120).
 
 ### Servers — started on demand, kept alive by the steward
 
-Each runs under `setsid`, so it outlives the pane or agent that started it, and
-logs to `~/.local/share/cel/logs/`.
+With a systemd user manager the dashboard and both pages tiers are installed
+user units (`cel-dash`, `cel-pages`, `cel-pages-public`), each in its own
+cgroup and restarted on failure; without one they run under `setsid`. All log
+to `~/.local/share/cel/logs/`, and the steward ensures every one of them each
+tick.
 
 | Service | Where | Kept alive by |
 |---|---|---|
 | `cel dash` | one for the box: `dash: port:` in `~/.local/share/cel/config.yaml`, else `:7770`; a workspace's own `dash.port` is ignored (doctor names it) | the steward, every tick |
-| `cel pages` | tailnet tier, `:7780` | `cel pages --ensure` |
-| `cel pages --public` | internet-reachable tier, `:7781` | `cel pages --ensure` |
+| `cel pages` | tailnet tier, `:7780` | the steward, every tick (`cel pages --ensure`) |
+| `cel pages --public` | internet-reachable tier, `:7781` | the steward, every tick (`cel pages --public --ensure`) |
 | `cel pages tunnel` | cloudflared/ngrok, for sharing without Tailscale | started by hand |
 
 `--ensure` is idempotent: it starts the service only if it is not already
@@ -1788,99 +1953,75 @@ never restarted.
 
 ### Hooks — session-bound actions
 
-Claude's global preferences install the submit hook; `cel run` adds the
-active-turn Stop hook. Other hooks are configured where their runtime uses
-them. Hook programs fail open on their own errors:
+`cel setup` installs Claude's global `UserPromptSubmit` drain; `cel run` adds
+the async `SessionStart`/`UserPromptSubmit` session hook and the active-turn
+`Stop` hook to every Claude launch. Claude's `PreToolUse` guard,
+`inbox-guard.sh` and `learn-stow.sh` are **not** installed by cel: register
+them in `~/.claude/settings.json` yourself (each file's header gives the
+entry). Pi and omp load their inbox and guard extensions from `agents.yaml`
+on every guarded launch, OpenCode its plugin, and agy's come from the
+`celestial` entry cel merges into `~/.gemini/config/hooks.json`. Hook
+programs fail open on their own errors, except where a row says otherwise:
 
 | Hook | Event | What it does |
 |---|---|---|
 | `inbox-drain.sh` | Claude `UserPromptSubmit` | drains the pane's mailbox when a turn is submitted; it does not wake an idle session |
 | `inbox-stop.sh` | Claude `Stop` | blocks once for mail arriving during the active turn; it does not wake an idle session |
-| `claude-session.sh` / `claude-idle-mail.py` | Claude async session/submit hooks, then native peer socket | reports the exact native session and retains one lifetime-bound watcher as Claude's own child; never writes terminal input |
+| `claude-session.sh` / `claude-idle-mail.py` | Claude async session/submit hooks, then native peer socket | reports the exact native session; in a Rex launch, retains one lifetime-bound watcher as Claude's own child that wakes it idle; never writes terminal input |
+| `inbox.omp.ts` | Pi/omp extension, every launch | runs `cel inbox watch --parent` for `ui.notify`, drains unread mail into the next turn (starting one when idle), registers the `/cel-*` commands and runs reviewer retirement; never types into the composer |
+| `orchestrator-guard.omp.ts` | Pi/omp extension: core, root, product-agent, member and reviewer launches | the same guard as `orchestrator-guard.sh` |
+| `guard-classify.sh` | called by every guard adapter | the one classifier: `command`, `path` (write) or `read` → `allow` or `deny <reason>`; exits 2 when it cannot decide |
+| `agy-guard.sh` | agy `PreToolUse` | the guard for Antigravity, for every agy session by where it stands; refuses what it cannot judge for an agent cel launched |
+| `agy-hook.sh` | agy `SessionStart`, `PreInvocation`, `Stop` | reports the conversation id to Rex, attaches waiting mail to a turn, and keeps a `cel inbox wait` running as agy's wake |
 | `inbox-guard.sh` | Claude `Stop` | when configured, blocks once for unresolved decisions/blockers and gives resolution steps; it does not wake an idle session |
-| `orchestrator-guard.sh` | `PreToolUse` | **read-only coordinators**: from a root, core or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools); a solo pane may write and push but not start other agents or `gh pr merge`. In every pane the hook runs in - claude panes of any role; omp/pi root, orchestrator and solo panes - the forge API token (`~/.config/cel/forge`) is refused to shell commands and the native read/edit tools, and so is sourcing `lib/forge.sh` or calling its `_forge_*`/`forge_*` functions (also via `eval` or a variable; they reach the forge without `cel forge`'s checks) and running any `cel` command on a line that sets, exports or declares a `CEL_*` or `HERDR_*` variable (even to empty; `CEL_GUARD_ALLOW_ONCE` aside). No pane posts a forge review verdict: `gh pr review --approve|-a|--request-changes|-r`, a `gh api`/curl/`tea api` write to a PR's `/reviews` (events and dismissals too, percent-encoded too), a graphql review mutation or a graphql query the guard cannot read (`--input`, `query=@file`), and `tea pr approve|reject|review` (or a prefix, `tea pr r`) are refused, through any wrapper (`env -u X`, `xargs -n1`, `sudo`); so is `gh alias set|import|delete`. An agent's verdict is `cel solo review`, reported by inbox (`review.post: github` is retired; `cel doctor` says so); comments (`gh pr review --comment`, `gh pr comment`) are not refused. `cel forge pr close|ready` and `run rerun` are the product agent's alone, refused to core, root, members and reviewers. These are text tripwires, not a sandbox (a script file still runs); `cel forge` and `cel team` themselves also check who is asking and change nothing for a process with no agent identity, and `cel team` refuses an identity its launch's `/proc` environ does not carry. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call, except a forge verdict, a gh alias write and in a member's pane (every adapter, OpenCode included). An adapter whose classifier cannot run fails open, except for a member and for a verdict-shaped command |
+| `orchestrator-guard.sh` | Claude `PreToolUse` (registered by hand) | **read-only coordinators**: from a root, core or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools); a solo pane may write and push but not start other agents or `gh pr merge`. In every pane a guard adapter runs in - Claude panes where the hook is registered; omp/pi core, root, product-agent, member and reviewer launches; OpenCode (shell, write, edit, patch - not reads); agy - the forge API token (`~/.config/cel/forge`) is refused to shell commands and the native read/edit tools that adapter checks, and so is sourcing `lib/forge.sh` or calling its `_forge_*`/`forge_*` functions (also via `eval` or a variable; they reach the forge without `cel forge`'s checks) and running any `cel` command on a line that sets, exports or declares a `CEL_*` or `HERDR_*` variable (even to empty; `CEL_GUARD_ALLOW_ONCE` aside). No pane posts a forge review verdict: `gh pr review --approve|-a|--request-changes|-r`, a `gh api`/curl/`tea api` write to a PR's `/reviews` (events and dismissals too, percent-encoded too), a graphql review mutation or a graphql query the guard cannot read (`--input`, `query=@file`), and `tea pr approve|reject|review` (or a prefix, `tea pr r`) are refused, through any wrapper (`env -u X`, `xargs -n1`, `sudo`); so is `gh alias set|import|delete`. An agent's verdict is `cel solo review`, reported by inbox (`review.post: github` is retired; `cel doctor` says so); comments (`gh pr review --comment`, `gh pr comment`) are not refused. `cel forge pr close|ready` and `run rerun` are the product agent's alone, refused to core, root, members and reviewers. These are text tripwires, not a sandbox (a script file still runs), and **no adapter inspects MCP tool calls**; codex has no guard. `cel forge` and `cel team` themselves also check who is asking and change nothing for a process with no agent identity, and `cel team` refuses an identity its launch's `/proc` environ does not carry. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call, except a forge verdict, a gh alias write and in a member's pane (every adapter, OpenCode included). An adapter whose classifier cannot run fails open, except for a member, a verdict-shaped command or a classifier that did not finish within `CEL_GUARD_TIMEOUT` seconds (default 10); agy's adapter fails closed for any agent cel launched, and OpenCode's refuses every classifier failure but the classifier's own error exit |
 | `learn-stow.sh` | `SessionEnd` | decays and budgets the workspace's `learnings.md` |
 
 Inbox hooks use explicit `CEL_INBOX_ME`/`CEL_INBOX_WS` when the launcher
 provides them; otherwise the inbox command derives identity from the working
 directory.
 
-`cel inbox watch` streams notices without moving a cursor. It is not itself
+#### Claude's idle watcher (Rex launches)
+
+`cel inbox watch` streams notices without moving a cursor; it is not itself
 an idle-wake API. Claude's idle watcher instead uses the socket published to
-its hooks as `CLAUDE_CODE_MESSAGING_SOCKET` (observed with native Claude Code
-2.1.318). It requires an exact launch recipient/workspace, a live matching Rex
-receipt, runtime PID ancestry, and the native conversation UUID. Before every
-send, Linux `SO_PEERCRED` must match the receipt's PID/UID/start time; each event
-also carries the native session ID. Missing support or ambiguous identity has
-**no terminal-input fallback**. In particular, Rex `send`/`send-key` and screen
-capture cannot atomically establish that an owner's composer is empty.
+its hooks as `CLAUDE_CODE_MESSAGING_SOCKET`. It requires an exact launch
+recipient/workspace, a live matching Rex receipt, runtime PID ancestry and
+the native conversation UUID; before every send, Linux `SO_PEERCRED` must
+match the receipt's PID/UID/start time. Missing support or ambiguous identity
+has **no terminal-input fallback**: Rex `send`/`send-key` and screen capture
+cannot establish that an owner's composer is empty.
 
-New launches register the watcher as an **asynchronous native command hook**
-and keep it in the foreground of that hook. This preserves the native process
-ancestry that lets Claude recognize an own-child message, including in
-`bypassPermissions` mode, without changing inbound policy. Detaching the hook
-watcher would erase that proof and cause bypass-mode Claude to hold its mail.
-The adapter does not assert a fake peer permission mode or forge a sender.
+Launches register the watcher as an **asynchronous native command hook** and
+keep it in that hook's foreground, which preserves the process ancestry that
+lets Claude accept an own-child message, including in `bypassPermissions`
+mode, without changing inbound policy. It polls every five seconds; each
+unread generation has one stable notification ID. A socket write is
+`notified_not_delivered`, never delivery: retries reconcile the hook-provided
+transcript first (complete, session-matched top-level rows only, read 1 MiB
+at a time), and a matching native receipt suppresses further sends. With an
+authoritative absent receipt and an idle target it retries after 30 seconds
+and then every 120 seconds; attempts and the next retry live beside the Rex
+receipt (`<receipt>.inbox/state.json`). Uncertain evidence produces
+`blocked_receipt_unknown` (or `blocked_read_error`) rather than a guess, and
+the watcher never consumes mail to clear a block. If the runtime does not
+publish the socket, the state is `unavailable`. MCP channels are not
+substituted, and attaching to a Claude session cel did not launch is not
+supported. An idle launch from before these hooks gains them only through a
+canonical resume (`cel run <role> --restart`), which keeps the saved
+conversation, model and thinking. See Claude's
+[inbound rules](https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages)
+and [async hooks](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background).
 
-The watcher polls every five seconds. Each unread generation has one stable
-notification ID; later mail gets a new ID even when its unread count is
-unchanged. Native duplicate suppression is time-limited, so retries reconcile
-the exact hook-provided transcript first: a matching native queue/user receipt
-suppresses further sends even after that window expires. This is notification
-receipt, **not mailbox delivery**. Only complete, session/ID-matched top-level
-rows count; nested API-request copies do not. Reads are bounded to 1 MiB per
-poll. Partial, oversized, malformed, replaced or truncated transcripts retain
-unread debt and suppress retries instead of guessing absence.
+The opt-in integration `python3 tests/claude-idle-native.py` (installed
+Claude Code, Linux pidfds, `python3-pexpect`) runs a real isolated Claude
+against a deterministic loopback provider with a fake key (no paid
+inference) and proves own-child idle wake, permission-failure recovery,
+exactly-once Stop-hook delivery, refusal of a foreign session and receipt
+suppression, with the owner's unsubmitted draft preserved. The normal gate
+runs the credential-free regressions without launching Claude.
 
-With an authoritative absent receipt and an idle target, the watcher retries
-after 30 seconds and then every 120 seconds until recovery. The backoff is
-capped, not the debt's lifetime: three transient failed writes do not strand
-the same unread set forever. A lock and private atomic state beside the Rex
-receipt (`<receipt>.inbox/state.json`) retain attempts, next retry time and the
-pre-send transcript boundary across watcher restarts. Socket write success is
-`notified_not_delivered`, never delivery. Native receipt suppresses retries;
-uncertain evidence instead produces `blocked_receipt_unknown` (or
-`blocked_read_error`) with an explicit reason and a transition-only stderr
-notice. The watcher never guesses absence or consumes mail to clear a block.
-An operator must inspect the native transcript or use the canonical launcher
-to recover missing evidence. New mail rearms notification identity; an ordinary
-prompt/Stop hook can still drain the backlog. Replacing the runtime PID,
-native session or receipt ends the old watcher. No conversation is forked,
-model changed, lane restarted or terminal draft submitted.
-
-If the native runtime does not publish the socket, state says `unavailable`:
-the prerequisite is native Claude peer messaging enabled for that session.
-MCP channels are a separate preview facility, require launch-time registration
-and consent/policy eligibility, and do not acknowledge notification delivery;
-they are not silently substituted. Updating files alone cannot retrofit the
-new async hook registrations into an already-idle old launch. A later
-owner-authorized native resume can use the new launch hooks while preserving
-the saved conversation/model; this patch never restarts a lane itself.
-
-External attach is deliberately **not supported**. A user-settings file alone
-cannot prove effective native permission policy across project/local, managed
-and CLI layers, and the adapter must not guess consent or widen policy.
-Existing launches acquire the new own-child hook through a root-coordinated
-canonical resume preserving the exact saved conversation, actual model and
-thinking settings. The [native inbound rules](https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages)
-and [async hook contract](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background)
-describe why an own-child watcher is different from an external sender.
-
-The opt-in integration `python3 tests/claude-idle-native.py` requires installed
-Claude Code, Linux peer credentials/pidfds, and `python3-pexpect`. It runs a real
-isolated native Claude against a deterministic loopback provider, with a fake
-key and isolated HOME/config (no paid inference). It proves own-child idle wake
-in the production bypass mode, three real Unix-socket permission failures and
-recovery for the same unread set, exactly-once Stop-hook delivery, refusal of a
-foreign session, receipt-based suppression beyond the native dedup window,
-own-child watcher recovery and later mail. The unsubmitted owner draft is
-preserved until the fixture's explicit Enter. Only fixture-local poll/backoff
-constants are accelerated; the native runtime, kernel transport, identity,
-receipts, inbox cursor and hooks remain real. No native permission policy is
-changed. Evidence remains in the printed
-fixture directory. Native support missing is a failure with the prerequisite,
-not a source-test pass. The normal gate runs the credential-free selector,
-identity, cursor, and retry regressions without launching Claude.
+#### Launch drift
 
 Launch diagnostics compare the canonical **effective product plan**: SOLO
 role/profile overrides (including `workspace.local.yaml`), the actual runtime,
@@ -1911,6 +2052,7 @@ services:
     cmd: pnpm --filter builder dev   # with a cmd it can be started and stopped
     cwd: repos/widget
     health: /                        # a path that must answer 200 within 2 s
+    # health_auth: "bearer $TOKEN"   # optional: literal, $VAR or $(cmd), sent on stdin
     env: { MODE: dev }
     restart: auto                    # the steward tries once before it escalates
 ```
@@ -1920,8 +2062,9 @@ health path answers, else `down`), the port, the pid and the resident memory of
 the process tree in its cwd, how long it has been up, and **reach** — the URL
 that works from somewhere that is not this box. `cel services start|stop|
 restart|logs <name>` runs it in a herdr pane under the workspace's own pane and
-remembers the pane in `<ws>/.cel/services.json`; a service without a `cmd` is
-observe-only and says so.
+remembers the pane in `<ws>/.cel/services.json`; `cel services open <name>`
+prints its reach URL (and opens it where `xdg-open` exists). A service without
+a `cmd` is observe-only and says so.
 
 Reach exists because every dev server and every preview binds `127.0.0.1`,
 which from a laptop is the laptop. The dashboard already listens on the tailnet
@@ -1940,9 +2083,10 @@ for one release; `cel doctor` names the dashboard and any leftover
 per-workspace server (`cel dash --restart` stops them).
 
 The steward probes every service that declares `health:` once per tick. Two
-consecutive down ticks raise one rolled-up blocker to root naming the service
-and the last line of its pane; back up clears it. `restart: auto` restarts it
-once first, and says so in the blocker.
+consecutive down ticks raise one rolled-up blocker to the workspace's root
+naming the service and the last line of its pane; back up clears it. With
+`restart: auto` the steward restarts it once, at the second consecutive miss,
+in the same tick, and says so in the blocker.
 
 Some services belong to the **box** rather than to any workspace — the auth
 gateway is used by every workspace and owned by none. They are
@@ -1951,16 +2095,14 @@ in exactly the shape of a `services:` row plus a bare `port:` shorthand, `0600`
 in a `0700` directory because `env` may carry a bearer. They appear in
 `cel services` under a `box` block — after the workspace's own rows, or alone
 when you run it from outside every workspace — carry `workspace: "box"` in
-`--json`, start and stop by name, are probed by the same steward sweep, and
+`--json`, start and stop by name, are probed by the same steward sweep (their
+blocker is filed under `box`, not under a workspace's root), and
 keep their state in `~/.local/share/cel/services/<name>.json` rather than in
 any workspace. `env` values whose key looks like a credential are rendered
 `***` everywhere. `cel gateway install` writes the gateway's, and `cel doctor` says
 how many the box declares and how many are healthy.
 
-### The agents
-
-Agents are terminal sessions, not services: Herdr by default, or Rex for
-`cel run ... --session-backend rex`. They stop when their terminal does.
+### Previews (`cel preview`)
 
 `cel preview <repo>#<pr>` runs any open pull request, from any
 agent or shell: it checks out the PR head under
@@ -1978,12 +2120,16 @@ preview:
   url:   "http://{host}:{port}"
 ```
 
-Every step runs under `env -i` - provider keys, gateway tokens, `GH_TOKEN`
-and the workspace's own env never reach it - and a PR that tracks a `.env` or
-`.dev.vars` file is refused. That is environment containment only - not
-network isolation, and `HOME` is the real one, so files such as `~/.npmrc` or
-a CLI's saved login stay readable - so a cmd that would otherwise call a paid
-API says `--mock`. Each
+Every step runs under `env -i` - it sees only `PATH`, `HOME`, `LANG`, `PORT`,
+`CEL_PREVIEW=1` and the block's `env`, so provider keys, gateway tokens,
+`GH_TOKEN` and the workspace's own env never reach it - and a PR that tracks a
+`.env`, `.env.*` or `.dev.vars` file (other than `*.example`, `*.sample` or
+`*.template`) is refused. That is environment containment only - not network
+isolation. A plain preview's `HOME` is the real one, so files such as
+`~/.npmrc` or a CLI's saved login stay readable (a QA agent's preview gets a
+private, empty `HOME` of its own); a cmd that would otherwise call a paid API
+says `--mock`. `{port+N}` is substituted too; `--port N` fixes the port,
+`--no-wait` returns without waiting for the url. Each
 preview is a `cel serve` server (8h TTL, `--ttl` to change): `cel preview
 --list` shows them, `--stop` ends one, the same head is reused rather than
 started twice, a new head replaces the old preview, and the steward stops a
@@ -2019,8 +2165,11 @@ orchestrator, solo, reviewer, qa and direct (not `member` or `team-<role>`).
 
 `agents.yaml` records each runtime's model flag and how it takes a reasoning
 level — claude `--effort`, omp/pi `--thinking`, codex
-`-c model_reasoning_effort=…`, opencode not at all; a level a runtime doesn't
-accept is **clamped down its own ladder**. `fallback:` names the same model
+`-c model_reasoning_effort=…`, agy `--effort` (low, medium, high only),
+OpenCode through its scoped native config rather than a flag; a level a
+runtime doesn't accept is **clamped down its own ladder**. A profile bound to
+`reviewer` gives a reviewer a model and level, never a runtime: reviewers run
+on pi. `fallback:` names the same model
 reached a different way and is checked before the pane spawns: if the
 primary's key is missing, the fallback is used and said out loud. Keys live in
 the workspace's gitignored `env.local`; nothing but the model id ever reaches
@@ -2164,16 +2313,19 @@ role_profiles:
 
 ### Subscriptions
 
-Agents do not run on API keys alone. They run on two **signed-in
-subscriptions** — Claude (through pi's OAuth and through Claude Code) and
-Codex (ChatGPT, through omp) — and a five-hour window at 100% stops every
+Agents do not run on API keys alone. They run on **signed-in subscriptions**
+— Claude and Codex (ChatGPT) — and a five-hour window at 100% stops every
 agent on that account just as hard as an empty balance does, without an error
 message anywhere anyone looks.
 
-`cel quota` asks both accounts directly and prints them above the API
-balances: one row per signed-in account, each window with its percentage and
-the local time it resets, and whether extra usage is still a path. A token is
-stable id. The readings are cached for 60 seconds, so `cel fleet --json` and
+`cel quota` reads every signed-in account and prints them above the API
+balances, one row per account (provider plus email): first the CLIProxyAPI
+vault (each account's usage read with the vault's own access token, never
+refreshed), then `omp usage --json`, then the credential files of pi, Claude
+Code and the Codex CLI for any provider neither answered for, and OpenCode
+Go. Each window shows its percentage, the local time it resets, and whether
+extra usage is still a path. A token is never printed anywhere — an account
+is named by its provider and a short stable id. The readings are cached for 60 seconds, so `cel fleet --json` and
 the dashboard's Subscriptions card read the cache rather than calling a
 provider on every draw. A window whose reset time has passed shows as
 `reset, no fresh reading` until a fresh read — never its old percentage —
@@ -2187,21 +2339,33 @@ instead that the account has `not read since <time>`, why, and what to do —
 and an unread window at 100% stays at risk, said as `100% spent (last known,
 not read since <time>)`.
 
-A gateway account whose access token has expired is asked about read only,
-through CLIProxyAPI's management listing — at most once a minute (the answer,
-or the failure, is cached 0600 beside the subscription cache), and only at a
-loopback address (`127.0.0.1`, `::1`, `localhost`), since the management
-secret opens the whole vault. When the gateway's own refresh was refused
-(`invalid grant` — the refresh token is dead) the row says
+A vault account whose access token has expired is not refreshed here —
+CLIProxyAPI is the only refresher on the box; Celestial never refreshes a
+credential itself. It reads `token stale - refreshed next time this account
+serves traffic` unless the gateway reports why its own refresh failed. That
+is one read-only `GET /v0/management/auth-files` with the management key,
+sent only to a loopback address (`127.0.0.1`, `::1`, `localhost`) because
+that key opens the whole vault; the answer, or the failure, is cached for
+`CEL_SUB_TTL` seconds (60) in `gateway-states.json` (0600) beside the
+subscription cache. A refused refresh (invalid grant, unauthorised, revoked)
+and a 401/403 from the provider for a token the vault calls live both read
 `needs login: cel gateway login <provider>`, because only a person at a
-browser can bring it back. Celestial never refreshes a credential itself.
+browser can bring it back. Any other refresh error reads `token stale - the
+gateway refresh is failing (…)`.
 
-The steward checks the windows once a tick and raises **one rolled-up item per
-account** — a status over `CEL_SUB_WARN_PCT` (80), a blocker at 100 — and
-takes it down again when the window drops, or once the reset it quoted has
-passed; a fresh reading of the new window over the line raises it again at
-once. A profile routed at a spent 5h window is vetoed before its pane spawns,
-the same way a dry balance is.
+The steward raises **one rolled-up item per signed-in credential-file
+account** (pi, Claude Code, the Codex CLI) — a status over `CEL_SUB_WARN_PCT`
+(80), a blocker at 100 — and takes it down when the window drops or once the
+reset it quoted has passed; a fresh reading of the new window over the line
+raises it again at once. A profile routed at one of those accounts whose 5h
+window is spent is vetoed before its pane spawns, the same way a dry balance
+is. Vault and omp accounts reach the steward through the pace item: one item
+naming every account that, at this week's pace, hits 100% before its reset or
+is already at 95%, and every account not read for `CEL_SUB_UNREAD_AFTER_H`
+hours. Separately, the orchestrators' own Claude pool (omp's Anthropic
+credentials) raises one blocker when every live credential is at or above
+`CEL_ORCH_POOL_WARN_PCT` (85) of its 5h or 7d window, and one more, once per
+change, naming credentials omp has disabled (`omp login anthropic`).
 
 ## Gateway — several subscriptions behind one door
 
@@ -2210,9 +2374,12 @@ behind one loopback door and spreads agents across them, and shows what each
 one has left.
 
 ```bash
-cel gateway install          # CLIProxyAPI as one box service, loopback only
+cel gateway install          # CLIProxyAPI as one box service, loopback only (--no-start)
 cel gateway status           # one row per account: provider, id, plan, email
 cel gateway login claude     # sign another subscription in (--no-browser: device flow)
+cel gateway logout <provider> <id>
+cel gateway panel            # the loopback management panel's URL and an ssh -L tunnel
+cel gateway refresh          # re-apply config, service and pi/omp model registrations (cel update runs it)
 cel gateway rotate-key       # a client-key rotation: accepted keys, old-key holders, restart plan
 ```
 
@@ -2225,26 +2392,38 @@ account, so one hitting its five-hour limit stalled the rest while another
 account sat at 16%. omp is still installed — it is an agent runtime — but
 nothing under `cel gateway` calls it.
 
-`cel gateway install` writes the proxy's `config.yaml` (it has no flag-only
-mode) with four settings that are not negotiable: `host: 127.0.0.1`, because
-one api-key unlocks every subscription in the vault; `routing.session-affinity:
-true`, because it defaults to **false** and false means an agent switches
-account mid-conversation; no management block at all, so there is no remote
-control surface to get wrong; and an auth-dir in the box state dir. Health is
-`GET /healthz`, unauthenticated — the real probe the old gateway never had.
+`cel gateway install` writes the proxy's `config.yaml` with settings that are
+not negotiable: `host: 127.0.0.1`, because one api-key unlocks every
+subscription in the vault; `routing.session-affinity: true` (TTL 1h), because
+it defaults to **false** and false means an agent switches account
+mid-conversation; a management API with `allow-remote: false` and its own
+secret in `<state>/management-key` (0600), so the web panel answers on
+loopback only; and an auth-dir in the box state dir. Health is
+`GET /healthz`, unauthenticated.
+
+**Every request carrying a gateway secret goes direct.** curl honours
+`http_proxy`/`HTTPS_PROXY`/`ALL_PROXY` even for `127.0.0.1` unless told
+otherwise, which would hand a proxy the api-key or the management key. So
+every such curl - model listings, rotate-key probes, management reads,
+loopback service health checks with a bearer - runs with the proxy variables
+unset, `--noproxy '*'`, and `--disable` as its first argument so a
+`~/.curlrc` cannot add a proxy or a header. The bearer rides curl's stdin,
+never its argv.
 
 A profile reaches it with one field:
 
 ```yaml
 worker_profiles:
-  gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
+  gw: { runtime: pi, model: gpt-6.1-sol, via: gateway }
 ```
 
 For Pi profiles, `cel run <role> --profile gw` writes the gateway's providers
-into pi's own agent dir, `~/.pi/agent/models.json` by default (merged — the owner's other providers are untouched,
-and the model list comes from the gateway's own `/v1/models`, with plain ids:
-Claude models go through pi's `anthropic-messages` surface, everything else
-through `openai-completions`). Every gateway launch passes `OMP_GATEWAY_TOKEN`
+into pi's own agent dir, `~/.pi/agent/models.json` by default (merged — the
+owner's other providers are untouched, and the model list comes from the
+gateway's own `/v1/models`, with plain ids: Claude models go through pi's
+`anthropic-messages` surface, Codex-family models (`gpt-`, `codex-`, `o<n>`)
+through `openai-responses`, and other ids are not registered; the provider
+sends `x-session-id` from `CEL_SESSION_ID`). Every gateway launch passes `OMP_GATEWAY_TOKEN`
 and `CEL_SESSION_ID` as `env K=V` words on the launch line, scoped to the
 launched process - nothing is exported into the pane's shell, so a later command
 in that pane never inherits one agent's session key. Pi resolves its key there
@@ -2277,9 +2456,10 @@ Three things are worth knowing before you rely on it:
 - **Affinity defaults off upstream.** The config this writes turns it on; a
   hand-edited config that loses the line gives every agent a different account
   from turn to turn, which is worse than one account.
-- **The proxy reports no usage.** Built-in usage accounting was removed
-  upstream, so an account row carries no windows until the usage reader lands;
-  "no usage probe" is not "0% used".
+- **The proxy reports no usage; Celestial reads it.** CLIProxyAPI keeps no
+  usage accounting, so `cel quota` reads each vault account's windows from
+  the provider with that account's stored access token, never refreshing it.
+  An expired one reads `token stale` or `needs login`, never 0%.
 - **One api-key grants every subscription in the vault** to anything that can
   reach the port. The service binds loopback only, the config is `0600`, and
   nothing prints the key.
@@ -2331,52 +2511,77 @@ QUOTA view's `via gateway` section, the dashboard's Subscriptions card, and
 ## Tickets
 
 Set `tickets: { system: linear }` and the plane wires Linear's **official MCP
-server** into Claude sessions at sync, while every other runtime shares
-`cel-linear` (a thin GraphQL shim). The lifecycle contract —
-In Progress on start, In Review + PR link on open, Done on merge — rides the
-policy block into every agent.
+server** into Claude Code at sync (`claude mcp add` at user scope, OAuth on
+first use; skipped when `claude` is not installed), while every runtime can
+use `cel-linear` (a thin GraphQL shim in `core/skills/linear/bin`, on PATH
+through `cel shellenv` and every agent launch; it reads `LINEAR_API_KEY` from
+the workspace's `env.local`). The lifecycle contract — In Progress on start,
+In Review when the PR opens (Linear links the PR from the ticket ID in the
+branch name), Done on merge, each set by the agent with `cel-linear state` —
+rides the policy block into every agent; nothing moves tickets for it. A repo
+names its Linear team with `repos[].linear_team`. With the default
+`tickets: { system: none }` there are no tickets, and the steward's ticket
+steps do nothing.
 
 ## Commands
 
+`cel help` prints the same list with every flag; this is the map.
+
 | Command | What |
 |---|---|
-| `cel setup` / `cel doctor` | install everything / verify the box |
-| `cel fleet [--json]` | the whole box in one deterministic read: per product its mode, agent and lane liveness and memory, and root's mail per workspace |
-| `cel update [--check·--rollback·--channel]` | move to the newest release tag (or to `origin/main` on the main channel), re-link and re-render, then verify; `--check` prints what you have not got yet and exits 1 when behind; `--rollback` undoes the last update; `--channel main·release` picks which stream this box follows |
+| **The box** | |
+| `cel setup [--agents a,b\|all]` / `cel doctor` | install tools, agents and externals, link core / verify the box (non-zero on problems) |
+| `cel update [--check [--agents]·--rollback·--channel main·release·--restart-orchestrators·--skip-agents·--components]` | move to the newest release tag (or to `origin/main` on the main channel), re-link and re-render, update installed agents to their pins, then verify; see [Versioning & updates](#versioning--updates) |
+| `cel version` · `cel agents` · `cel shellenv` | the build you run / runtimes, install status and injection strategy / the PATH line for your shell rc |
+| `cel plugins list · install` | opt-in pinned full plugins ([EGM](#optional-elephant-goldfish-model-plugin)) |
+| `cel fleet [--json] [--workspace w]` | the whole box in one deterministic read: per product its mode, agent and lane liveness and memory, and root's mail per workspace |
+| `cel dash [--port n] [--ensure·--restart]` | the box's one dashboard |
+| `cel sessions [--json]` · `cel sessions rex-upgrade [--check]` · `cel sessions retire-reviewer <repo>#<n>` | live Herdr and managed Rex agent sessions / the managed rex upgrade / retire a finished Rex reviewer ([Sessions](#sessions-herdr-and-rex)) |
+| `cel budget [--json]` | live helpers (reviewers, team members, other) against `budget.max_live_agents` (default 8) and team members against `budget.max_team_members` (default 4); product agents and core shown, not counted; and the memory floor |
+| `cel quota [provider] [--json]` | the signed-in subscriptions — every window, its percentage and when it resets — above the credit left per API provider; a route below its floor, or on a spent 5h window, is vetoed before a pane spawns |
+| `cel gateway install · status · login · logout · panel · refresh · pi-models · omp-scope · opencode-models · rotate-key` | [several subscriptions behind one door](#gateway--several-subscriptions-behind-one-door) |
+| `cel steward [--no-gc]` · `cel steward --install [--interval m] \| --remove` | one proactive tick over the whole box / run it on a timer (the thing that makes any of it proactive) |
+| `cel gc [--reap h] [--orphans] [--box] [--dry-run]` | reclaim merged worktrees, closed PRs' reviewers and checkouts, idle agents; `--orphans` reaps processes with no owner; `--box` sweeps docker and toolchain caches ([what it keeps](#what-cel-gc-keeps)) |
+| `cel box space [--json]` · `cel box diag` | what is large, what is reclaimable and what is nobody's to delete / two bounded lines for a disk alert |
+| `cel box docker-safety` · `cel box sweep-docker [--dry-run]` | the versioned Docker retention contract / the Docker-only fail-closed sweep |
+| `cel build-slot -- <cmd>` | run a heavy build in the box-wide slot: one at a time by default (`build.slots` / `CEL_BUILD_SLOTS`); sets `CARGO_BUILD_JOBS` to half the cores unless already set; the slot is held while anything the command forked still runs |
+| `cel watchdog [status·print·install·uninstall]` | a system timer that restarts the user manager after an OOM kill, then `cel dash --ensure` and `cel pages --ensure`; `install` needs passwordless sudo, `print` gives the owner the one-time commands; `cel doctor` warns while it is not installed |
+| `cel services [--json]` · `start · stop · restart · logs · open <name>` | everything this box runs on a port ([Services](#services)) |
+| `cel serve start · list · stop · adopt` | the ledger of agents' own servers ([Servers](#servers--started-on-demand-kept-alive-by-the-steward)) |
+| `cel publish <file>` · `cel pages [--public] [--ensure]` · `cel pages tunnel · bundle` | self-hosted documents |
+| `cel effects install · status` | optional Canvas UI dashboard effects (Chrome) |
+| **Workspaces** | |
 | `cel ws new · add · sync · list · push · env` | workspace setup |
 | `cel ws up · down · reset · status <name>` | a workspace has a declared shape and this puts it back: `up` reconciles (herdr workspace, declared panes, an agent per product that wants one, and a rename for any live agent herdr has lost the name of) and is safe to run twice; `down` stops the agents it owns and closes its **panes**, refusing over work that is neither pushed nor landed; `reset` is down-then-up; `status` is `up --dry-run` as a table. It never removes a worktree |
+| `cel profiles` · `cel people [--workspace w] [--json]` | profiles, role bindings and the exact launch flags each resolves to / who is who in a [team workspace](#team-workspaces) |
+| `cel learn add · list · reinforce · stow` | durable facts the workspace has established — pinned / aging / perishable — budgeted into every agent's policy block |
+| `cel release <product> <version\|bump> [--repo r] [--dry-run]` · `cel release status` | [cut a release of a product](#releasing-a-product) |
+| `cel spike <name>` / `cel promote <spike>` | throwaway repo → real repo |
+| **Agents** | |
 | `cel core` | the box coordinator: one agent over every workspace, root's mail; `cel console`, `cel run core` and `cel run console` are aliases |
 | `cel run solo --product <p> [--lane <name>]` | start a product's agent, or a further lane for a parallel goal |
-| `cel run [root·orchestrator·reviewer]` | start an agent, role injected; `orchestrator` starts the product's solo agent |
+| `cel run [root·orchestrator·reviewer]` | start an agent, role injected; `orchestrator` starts the product's solo agent; no role is Direct mode |
 | `cel mode [<p>] [solo]` | show a product's mode, or set it to solo |
+| `cel here <verb>` | what `/cel-<verb>` runs inside an agent |
+| `cel team start · add · ack · event · verdict · status · retire · close · cap` | a [feature team](#feature-teams) under the product's lead |
+| `cel inbox send · read · count · watch · wait` | agent messages that never type into a pane; `--all-workspaces` for core |
+| `cel inbox open [--ranked] · resolve · whoami · prune · migrate` | decisions stay open until resolved; reading one does not answer it |
+| `cel decide ask · list · answer · drop · withdraw · confirm` | the owner's one queue of decisions, every workspace; `ask --pr <repo>#<n>` holds that PR's nudges |
+| `cel drive list · tail · send · receipt` | see an orchestrator's conversation (from its session file) and mail it as owner, with a receipt |
+| `cel afk on · off · status · log · resolve-thread · rebase-retry` | away from keyboard: the factory may land approved, green, gate-verified PRs and rebase ones pushed behind - nothing else |
+| **PRs** | |
 | `cel solo review · land <repo>#<n>` | record a reviewer's verdict bound to the head (`--focus f` for an extra reviewer; `--qa f --evidence file...` for a QA agent, which may also say `blocked`) / merge a PR approved by every required reviewer and QA agent, green |
-| `cel solo approvals <repo>#<n>... [--json]` | each reviewer a PR needs (plain, and every extra one `review.extra` requires) and its word on the current head, by land's rule |
+| `cel solo approvals <repo>#<n>... [--json]` | each reviewer a PR needs and its word on the current head, by land's rule |
+| `cel preview <repo>#<pr>` | run an open PR's head ([Previews](#previews-cel-preview)) |
+| `cel forge repo · whoami <repo>` | a repo's forge (GitHub or Forgejo) and the account this workspace acts as on it |
 | `cel forge pr view · checks · reviews · list · create <repo>[#<n>]` | a PR in Celestial's words on GitHub or Forgejo alike (`--json` for the normalised value) |
 | `cel forge pr close <repo>#<n> [--comment-file f]` · `cel forge pr ready <repo>#<n>` | close a PR (the comment posted first, the branch kept) or take it out of draft (Forgejo: the `WIP:` title prefix removed; a no-op if it is not a draft) - only the product's own agent (`CEL_ROLE` solo or orchestrator, its product from `CEL_PRODUCT` or its `<product>-orch` mailbox), on its OWN product's repos and its own account's PRs (or a migrated Forgejo PR, author Ghost). A process with no agent identity is refused: the owner closes or readies PRs in the forge's web UI (Forgejo or GitHub) or with `gh` |
-| `cel forge run list <repo> [--branch b] [--sha <head>] · view <repo> <run-id> · logs <repo> <job-id> [--tail N] [--raw]` | CI runs, a run's jobs and a job's log, read-only for every role: Forgejo Actions over its API (no web login, no token in the agent's hands), GitHub through `gh run`; ids are the API's (the web page's run number shows as `web #N`), `--sha` lists a commit's runs with their job ids, and `view`/`logs` also take a run's or job's web page when it maps exactly; states are success · failure · cancelled · skipped · running · queued; `logs` drops per-line timestamps unless `--raw` (GitHub shows the job's failed steps) |
+| `cel forge run list <repo> [--branch b] [--sha <head>] · view <repo> <run-id> · logs <repo> <job-id> [--tail N] [--raw]` | CI runs, a run's jobs and a job's log, read-only for every role: Forgejo Actions over its API (no web login, no token in the agent's hands), GitHub through `gh run`; ids are the API's (the web page's run number shows as `web #N`), `--sha` lists a commit's runs with their job ids, and `view`/`logs` also take a run's or job's web page when it maps exactly; `logs` drops per-line timestamps unless `--raw` |
 | `cel forge run rerun <repo> <job-id>` | run one job again on the same head (an approval of it stands) - only the product's own agent on its own product's repos; the owner reruns in the forge's web UI or with `gh run rerun` |
-| `cel budget [--json]` | live helpers (reviewers, team members, other) against `budget.max_live_agents` (default 8) and team members against `budget.max_team_members` (default 4); product agents and core shown, not counted; and the memory floor |
-| `cel team start · add · ack · event · verdict · status · retire · close · cap` | a [feature team](#feature-teams) under the product's lead: budget-admitted, scoped members, head-bound verdicts, a lead-set spend cap, close that keeps unpushed work |
-| `cel here <verb>` | what `/cel-<verb>` runs inside an agent |
-| `cel profiles` | profiles, role bindings and the exact launch flags each resolves to |
-| `cel people [--workspace w] [--json]` | who is who in a [team workspace](#team-workspaces): people, forge logins, roles per product, which person this login is (`me:`) and which login runs each product (`home:`) |
-| `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |
-| `cel quota [provider] [--json]` | the signed-in Claude and Codex subscriptions — every window, its percentage and when it resets — above the credit left per API provider; a route below its floor, or on a spent 5h window, is vetoed before a pane spawns |
-| `cel learn add · list · reinforce · stow` | durable facts the workspace has established — pinned / aging / perishable — budgeted into every agent's policy block |
-| `cel inbox open · resolve` | decisions stay open until resolved; reading one does not answer it; `--ranked` puts the most urgent unread first |
-| `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review. The complete gate output of every attempt is kept as a private artifact (`$CEL_VERIFY_ARTIFACT_DIR`, default `~/.local/state/cel/verify`) and its path, size and sha256 are in `gate.artifact` beside the exact exit code. Output streams into the artifact from the start; a killed verifier (TERM/INT/HUP) records no_verdict, a SIGKILLed one leaves the artifact and an `attempt.json` still marked `running` (no verdict is ever faked); an artifact root inside any git work tree or not 0700/owned by you is refused (exit 4) |
-| `cel dash` | the box's one dashboard |
-| `cel publish` / `cel pages` | self-hosted documents |
-| `cel gc [--reap h] [--orphans] [--box]` | reclaim merged worktrees + idle agents; `--orphans` reaps processes with no owner; `--box` sweeps docker and toolchain caches |
-| `cel box space [--json]` | what is large on this box, what is reclaimable, and what is nobody's to delete |
-| `cel box diag` | two bounded lines for a disk alert: docker images, build cache and volumes, and running docker builds with their owning agent |
-| `cel box docker-safety` | versioned Docker retention contract and producer lock/declaration paths |
-| `cel box sweep-docker [--dry-run]` | Docker-only fail-closed sweep; exact unprotected image IDs and unused build cache |
-| `cel inbox send · read · count · watch` | agent messages that never type into a pane; `--all-workspaces` for core |
-| `cel steward` | one proactive tick over the whole box |
-| `cel spike` / `cel promote` | throwaway repo → real repo |
+| `$CEL_ROOT/core/skills/verify/bin/cel-verify <worktree> [--gate cmd]` | the verify skill's executable (not on PATH): a structured verdict for a branch - gate result, red-then-green, diff, CI, review. The complete gate output of every attempt is kept as a private artifact (`$CEL_VERIFY_ARTIFACT_DIR`, default `~/.local/state/cel/verify`) and its path, size and sha256 are in `gate.artifact` beside the exact exit code; a killed verifier records no verdict rather than faking one (exit 3), and an artifact root inside any git work tree or not 0700/owned by you is refused (exit 4) |
 
-Retired on 2026-11-08 and refused for one release: `cel-fanout`, `cel run worker|scout|spike`, `cel mode <p> fleet`, `cel work`, `cel history`.
+Retired on 2026-11-08 with per-ticket fan-out, and refused for one release so a habit gets an answer: `cel-fanout`, `cel run worker|scout|spike`, `cel mode <p> fleet`, `cel work`, `cel history`.
+A product's own solo agent, its lanes and its [feature teams](#feature-teams) do that work now.
 
 ## What lives where
 
@@ -2410,6 +2615,90 @@ Celestial operations share lifecycle locks; unrelated manual Git/herdr changes
 cannot be made transactional with external tools. Atomic state replacement
 prevents partial readers, but is not a promise of power-loss durability.
 
+### What `cel gc` keeps
+
+`cel gc` removes a worktree only when it can show the tree is finished and
+nobody is in it. Anything it cannot read counts as in use.
+
+**Which trees.** Herdr worktrees; each solo agent's own worktrees
+(`<ws>/.cel/solo/<product>/`); and every other linked worktree
+`git worktree list` records for any repo a registered workspace declares. A
+repo is taken by the real path of its clone, so `repos/<name>` may be a
+symlink to a clone outside `~/ws`, and its worktrees may sit beside it, in
+`/tmp`, or anywhere; a clone several workspaces name is swept once. Those
+trees go by the solo rules: a merged or closed PR whose head is exactly the
+tree's HEAD, a clean attached HEAD that has landed, no live process and no
+agent. A clone is asked about as the GitHub account its workspace declares;
+one registered by workspaces declaring different accounts is not asked
+about, so its trees are kept. Trees under the review-checkout directory are
+left to that pass.
+
+**Kept before any other rule, in every pass:**
+
+- `owner`: anything under `~/orca/workspaces`, compared as given and resolved.
+- `follow-main owned`: a tree whose directory name starts `local-`. A
+  product's follow-main loop makes one per main commit and retires them
+  itself.
+- `claimed`: a tree that contains the owner root, another worktree, a clone,
+  a workspace or its `repos/<name>`, or the review checkouts; is a registered
+  checkout; is locked in git; or (repo trees only) has a pane or agent in it -
+  an unreadable pane list claims every repo tree.
+
+After those come `symlink`, `live`, `detached` (no branch, so no PR can speak
+for it), `open-pr`, `no-pr`, `unlanded`, `busy`, `unidentified` and `refused`
+(git or herdr refused the plain, non-forced remove). A tree with a Rex agent
+in it is never removed.
+
+**Which process keeps a tree live.** Only this user's processes are visible.
+One whose cwd is in the tree keeps it. One whose cwd cannot be read keeps
+every tree, with three exceptions:
+
+- **A zombie or dead process** (`Z`/`X`) runs nothing and keeps nothing - unless
+  it is a thread-group leader whose other threads still run: a `Z` leader with
+  any thread that is not `Z`/`X` is alive. A pid whose state cannot be read
+  counts as alive.
+- **Fixed system processes:** the user's own `systemd`, `(sd-pam)`,
+  `ssh-agent`, `sshd-session` and `sftp-server`, matched by exact name.
+- **An own-uid `smbd`** (Samba forks one per client, running as the connecting
+  user) occupies exactly the directories Samba exports: a tree inside, equal to
+  or containing a share is kept, and nothing else is. The shares come from
+  `testparm -s`, else `/etc/samba/smb.conf` with its includes, plus
+  `net usershare` files when usershares are enabled; `[homes]` is the passwd
+  home and symlinks are resolved. If they cannot all be named (a `%`-macro or
+  relative path, an unparsable line, an unreadable usershare), that `smbd`
+  keeps everything.
+
+The sweep reads `/proc` once to choose, then walks it again (and reads the
+shares afresh) immediately before each removal. The reviewer-checkout pass
+applies the same rules to open files as well as cwds.
+
+**Stale records.** A record whose directory is gone is pruned with
+`git worktree prune --expire 7.days.ago` (git measures the age of the
+record's admin files, not how long the directory has been missing). An
+owner's record, and one whose parent directory is missing too
+(`parent-missing`: an unmounted disk or share, a dangling symlink), are kept;
+prune clears every due record of a clone at once, so one such record keeps
+all of that clone's stale records (`stale`), as does a record younger than the
+grace. `--dry-run` names what would be pruned.
+
+**Reviewer checkouts** under `~/.local/state/cel/reviews` go once all of these
+are facts: the PR is merged or closed - asked of the repo's own forge, the
+answer naming exactly that PR; unreadable is kept - and closed more than
+`CEL_REVIEW_CHECKOUT_KEEP_DAYS` (default 3) days ago; no reviewer of the PR is
+recorded and no pane, process cwd or open file is in it (by the rules above);
+no retained Rex retirement packet cites it; and it holds nothing of its own -
+an untracked or modified file (ignored build output does not count) or a
+commit only it has keeps it, and the sweep names it. A private clone must
+also be the PR's (HEAD at or behind the PR's head, or cloned from the repo).
+All of it is asked again right before the remove, under the lock `cel run`
+holds while it starts a reviewer. At most `CEL_GC_REVIEW_CHECKOUT_CAP`
+(default 30) are asked of the forge per pass, oldest first.
+
+Each sweep prints one line per registered repo with worktrees: total,
+removed, stale records pruned, left to the review-checkout pass, and kept by
+reason. `cel doctor` repeats them from the last sweep (`last gc sweep Nm
+ago`), read from `~/.local/state/cel/gc-kept.json`.
+
 ### Private HTTP services
 
 Private pages and dashboard listeners are local/tailnet control surfaces, not
@@ -2436,14 +2725,16 @@ local/tailnet caller can obtain the token.
 
 ## Requirements
 
-GNU/Linux with Bash, GNU coreutils, `/proc`, Git, Python 3 and
-curl **7.55.0 or newer**. Tests and the Node services use Node **24.x**; YAML
-processing uses Python `yq` (the jq wrapper), not the Go program of the same
-name. [herdr](https://herdr.dev) supplies panes. A systemd user session is
-required only for the optional steward timer. macOS and other kernels are
-rejected before CLI dispatch.
+GNU/Linux with Bash, GNU coreutils, `/proc`, Git, jq, Python 3 and
+curl **7.55.0 or newer**. CI runs the tests and Node services on Node
+**24.x**; YAML processing uses Python `yq` (the jq wrapper), not the Go
+program of the same name. [herdr](https://herdr.dev) supplies panes (Rex is
+optional, installed from its own apt source). A systemd user session is
+required only for the optional steward timer and per-agent Rex memory
+scopes. macOS and other kernels are rejected before CLI dispatch.
 
-`cel setup` installs missing prerequisites through apt when available;
+`cel setup` installs missing prerequisites (git, jq, curl, tar, gzip and a C
+compiler) through apt when available, and Python yq through pipx;
 otherwise it tells you what to install manually. Fresh application versions
 and native checksums live in [`agents.yaml`](agents.yaml), external plugin
 commits in [`externals.yaml`](externals.yaml), and Pi extension versions in
@@ -2454,18 +2745,21 @@ declarations are rejected. Node is the one base tool recorded as an alias: mise'
 node and its mise selection are kept, and `cel update` does not touch them.
 
 `npm_tools` in [`externals.yaml`](externals.yaml) lists global npm tools that
-register themselves with the runtimes. Only the base file can declare them;
-workspace overlays cannot. The first is
-[REA](https://github.com/morluto/rea) (`rea-agents`, MIT), a reverse-engineering
-MCP server. `cel setup` downloads the exact registry tarball and checks its
-sha512 integrity before npm installs it, and keeps any release at or above the
-pin. It then runs `rea doctor` and runs `rea setup` only for agent roots that
-doctor does not report as healthy. omp and pi are registered as separate roots,
-the ones cel launches them with (`CEL_OMP_AGENT_DIR`, `CEL_PI_AGENT_DIR`). A node
-outside the package's own `engines` range is refused before npm runs.
-REA's `reverse-engineer-anything` skill comes from `rea setup` and is not
-vendored. REA's tools can run commands, debuggers and browsers, and write files.
-No runtime's celestial guard inspects MCP tool calls. `cel update` runs the
+register themselves with the runtimes. Only the base file is read; an
+`npm_tools` block in a workspace overlay is ignored. The first is
+[REA](https://github.com/morluto/rea) (`rea-agents`, MIT), a
+reverse-engineering MCP server. `cel setup` downloads the exact registry
+tarball and checks its sha512 integrity before npm installs it (npm runs the
+package's own install scripts; REA's native binding needs one), and keeps any
+release at or above the pin. A node outside the package's own `engines`
+range is refused before npm runs. It then runs `rea doctor` and runs
+`rea setup` only for agent roots that doctor does not report as healthy:
+Claude Code, Codex, OpenCode, Antigravity and omp against omp's root, and pi
+against its own - the roots cel launches them with (`CEL_OMP_AGENT_DIR`,
+`CEL_PI_AGENT_DIR`). REA's `reverse-engineer-anything` skill comes from
+`rea setup` and is not vendored. REA's tools can run commands, debuggers and
+browsers, and write files, and **no runtime's celestial guard inspects MCP
+tool calls** ([Runtimes](#runtimes)). `cel update` runs the
 same step, so a tool missing from the active node's global root (after mise's
 `lts` alias moved to a new node release) is installed there again.
 
@@ -2495,10 +2789,14 @@ write the mise config that `cel update` leaves alone, bypass the integrity
 check `npm_tools` installs through, and split Pi from `pi update --self`, which
 installs into the active node's global prefix.
 
-The current pi, omp and Claude Code pins are 1.2.0, 18.10.4 and 2.1.300.
-Updating Pi on an already-configured box is explicit because `cel setup` keeps
-installed runtime versions. Apply the pin in [`agents.yaml`](agents.yaml) with
-its scoped npm installer (currently `npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@1.2.0"`), then restart existing Pi panes and verify `pi --version`. Do not install the unrelated bare `pi` npm package.
+The current pins are Claude Code 2.1.300, omp 18.14.0, pi 1.4.0, codex
+0.154.0, OpenCode 2.2.5 and agy 1.5.14 ([Runtimes](#runtimes)). Updating Pi
+on an already-configured box is explicit because `cel setup` keeps installed
+runtime versions. Apply the pin in [`agents.yaml`](agents.yaml) with its
+scoped npm installer (currently
+`npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@1.4.0"`),
+then restart existing Pi panes and verify `pi --version`. Do not install the
+unrelated bare `pi` npm package.
 Gateway-backed Pi upgrades are a matched rollout: `gateway_pi_models_write`
 must emit the provider key, protocol, URL, and model list consumed by the same
 revision's `cel run`, whose shell launch line exports that key. Update them
@@ -2554,8 +2852,9 @@ does not prove a completed review.
 - **Pi:** the pinned bundle is registered as one Pi package (`pi install`
   with the local path), so skills load in place. Pi has no native subagents,
   so the fresh-context review skills (`egm-review`, `egm-review-loop`,
-  `egm-brainstorm`) stop and say so unless a Pi subagent extension is
-  installed.
+  `egm-brainstorm`) stop and say so unless a Pi subagent extension is loaded
+  (`cel setup` installs `pi-subagents`; whether EGM's skills use it is
+  untested).
 - **OpenCode:** the global config gains a `skills` entry pointing into the
   pinned bundle and the 9 reviewer personas as `subagent` agents. This is
   compatible with Celestial's scoped launch; the default agent is unchanged.
@@ -2595,34 +2894,67 @@ skill_sets: [cloudflare, expo]
 ```
 
 `cel ws sync` (so `cel update`) links those skills into
-`<workspace>/.cel/skills` and removes any no longer declared; nothing goes
-into a repo. Every `cel run` launch for that workspace names that directory
-(agents.yaml `workspace_skills`: claude `--add-dir`, omp `--plugin-dir`, pi
-`--skill`, OpenCode `OPENCODE_CONFIG`), which also covers reviewers, whose
-checkout is outside the workspace. Codex has no per-launch skill directory, so
-they are linked into `~/.codex/skills` disabled in a marked `config.toml`
-block and a launch enables its workspace's with `-c skills.config=[...]`. An
-agent picks a change up when it is next launched or restarted.
+`<workspace>/.cel/skills` and removes any no longer declared; with none
+declared the directory goes, and an unknown set is a warning that changes
+nothing. Nothing goes into a repo. Every `cel run` launch for that workspace
+names that directory (agents.yaml `workspace_skills`: claude `--add-dir`, omp
+`--plugin-dir`, pi `--skill`, OpenCode `OPENCODE_CONFIG`, agy the `skills:`
+list of the agent file each launch writes), which also covers reviewers,
+whose checkout is outside the workspace. Codex has no per-launch skill
+directory, so every scoped skill is linked into `~/.codex/skills`, disabled in
+a marked `config.toml` block, and a launch enables its workspace's with
+`-c skills.config=[...]`; a `config.toml` that already configures `skills`,
+holds an incomplete or repeated block of ours, or is not valid TOML is left
+alone, and Codex gets none of them. A launch whose runtime cannot scope the
+workspace's skills is refused. An agent picks a change up when it is next
+launched or restarted.
 
-Skills whose upstream text has an agent deploy, publish, submit to an app
-store, spend money or run paid builds or generation open with a patched note:
-under celestial rules those steps wait for the owner's approval (`cel decide`).
+**Approval notes.** Skills whose upstream text has an agent deploy, publish,
+submit to an app store, spend money or run paid builds or generation open
+with an owner-approval note: `mcp-builder`, `anthropic-skill-creator`,
+`workers-best-practices`, `durable-objects`, `wrangler`, `agents-sdk`,
+`workers-profiling`, `expo-native-ui`, `expo-dev-client`, `eas-workflows` and
+`eas-app-stores`. The note is part of the skill's recorded patch
+(`tools/skills/patches/<name>.patch`), so `vendor.py verify` reproduces it
+from upstream. It tells the agent to ask the owner (`cel decide ask`) and wait
+before each step it names by command, and says that a request in the task, an
+earlier approval or the skill's own wording is not that approval. The test
+suite holds each of those skills to the note as the first text after the
+frontmatter, and no other skill may carry it.
+
+**No skill pre-approves shell commands.** Claude Code runs a skill's
+`allowed-tools` entries without asking, and `Bash(node:*)` or a pattern with
+a leading `*` admits any code, so `vendor.py` refuses any `allowed-tools`
+that mentions Bash (its list of reviewed exceptions is empty) and the tests
+refuse any `allowed-tools` line at all, in either tree, the plane's own
+skills included. Upstream `eas-workflows` and `expo-ui` had one; their
+patches remove it.
 
 [`vendored-skills.yaml`](vendored-skills.yaml) pins each to an exact upstream
 commit and records its repository, path, licence (MIT or Apache-2.0 only) and
 a digest of the committed tree. The GitHub content is committed, so agents read
-reviewed bytes with no network. Modern Web Guidance's CLI and search index ship
-only in its npm package; `cel setup` and `cel update` fetch them from the
+reviewed bytes with no network. Modern Web Guidance's CLI and search index
+ship only in its npm package; `cel setup` and `cel update` fetch them from the
 pinned tarball (sha512 integrity, per-file sha256) into the skill directory,
-gitignored, and keep them once present, so search and retrieve run offline.
-Never run its own per-project installer (`npx modern-web-guidance install`).
+gitignored. Files already present with their pinned sha256 are kept, so
+search and retrieve run offline once fetched; a failed fetch is a warning and
+leaves the skill linked. The skill runs that CLI only through its `run.sh`,
+which turns its telemetry off. Never run its own per-project installer
+(`npx modern-web-guidance install`).
 
 ```sh
-python3 tools/skills/vendor.py check     # offline: pins, licences, digests, names
-python3 tools/skills/vendor.py verify    # re-fetch every pin, compare byte for byte
-python3 tools/skills/vendor.py sync ui-sdk   # after moving a pin
+python3 tools/skills/vendor.py check            # offline: pins, licences, digests, names, fetched-file hashes
+python3 tools/skills/vendor.py fetch [NAME...]  # complete npm inputs (cel setup/update run this)
+python3 tools/skills/vendor.py verify [NAME...] # re-fetch every pin, rebuild, compare byte for byte
+python3 tools/skills/vendor.py sync NAME...     # after moving a pin: rebuild and record new digests
+python3 tools/skills/vendor.py names SKILL.md...  # frontmatter rules, incl. the allowed-tools refusal
+python3 tools/skills/vendor.py set cloudflare   # the skills in a set (an unknown set is refused)
 ```
 
+`vendor.py` also has `description`, `scoped` (every skill in a set) and
+`codex-config` (the Codex `config.toml` block), which `cel` uses itself.
+Adding a third-party skill means a `vendored-skills.yaml` entry, `sync`, and
+a patch for any note or `allowed-tools` removal it needs.
 
 ## Development and security
 
@@ -2677,9 +3009,10 @@ where that product's releases come from, because the previous version of this
 command passed every local check for anyone who was not the maintainer and
 then took a 403 from GitHub at the last step, looking like it should have
 worked. On a TTY the run is followed to its conclusion and the resulting tag
-and Release URL are printed. `cel release status` gives one row per releasable
-repo: current version, commits since that tag, any run in flight, the newest
-Release.
+and Release URL are printed (`--follow` / `--no-follow` override that); with
+AFK on, AFK must admit the dispatch. `cel release status` gives one row per
+releasable repo: current version, commits since that tag, any run in flight,
+the newest Release.
 
 Celestial's own workspace declares exactly this block for celestial
 (`workflow: release.yml`, `input: version`, `accepts: semver`, `version_file:
@@ -2705,13 +3038,13 @@ truth and every release is announced on
 [GitHub Releases](https://github.com/geoffwellman/celestial/releases) with
 notes from [CHANGELOG.md](CHANGELOG.md) — **Watch → Custom → Releases** to get
 notified. On the box, `cel version` tells you what you're running as
-`celestial v0.2.0+31 (d43910c, main)`: the nearest tag, **the commits since
+`celestial v0.5.0+31 (d43910c, main)`: the nearest tag, **the commits since
 it**, the sha and the branch — the `+31` is the part people quote, because a
-version alone says v0.2.0 for thirty-odd merges.
+version alone says v0.5.0 for thirty-odd merges.
 
 Cutting a version of celestial is the same verb every other product gets:
-`cel release celestial <x.y.z>` (or the **Release**
-workflow's `Cut` job in the Actions tab) runs the suite and the hygiene scans,
+`cel release celestial <x.y.z>` (or **Run workflow** on the Release workflow
+in the Actions tab, whose `cut` job is "Open the version bump PR") runs the suite and the hygiene scans,
 bumps `VERSION`, turns `[Unreleased]` into that version's section and opens a
 `release: v<x.y.z>` pull request — main takes no direct pushes, so the bump is
 reviewed like any other change. Merging it tags `v<x.y.z>` and publishes the
@@ -2741,6 +3074,18 @@ build, lists their subjects oldest first and the `[Unreleased]` notes you
 haven't got, and `cel update` fast-forwards to main's tip. Both channels
 refuse to touch a dirty tree or one that is off `main`, record where they came
 from, and undo with `cel update --rollback`.
+
+`cel update` also brings every installed coding agent up to date with the
+updater `agents.yaml` names ([Runtimes](#runtimes)), Pi extensions to their
+pins, and npm tools and gateway registrations, unless `--skip-agents` is
+given; `--components` runs only that step. An agent named in the box
+config's `update.hold` (or `CEL_UPDATE_HOLD`) is reported and left alone, an
+updater that "succeeds" while still behind counts as a failure, and the old
+version is recorded for `--rollback`. `--check --agents` compares installed
+agents with their latest releases. `--restart-orchestrators` restarts the
+idle orchestrators still on an older launch line, resumed. The steward checks
+once a day and tells you when a release (or new main commits) is waiting; it
+never updates Celestial itself.
 
 ## Licence
 
