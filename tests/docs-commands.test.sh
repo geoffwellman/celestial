@@ -154,10 +154,10 @@ test_cel_help_names_every_dispatched_command() {
   [ -z "$missing" ] || { echo "cel help does not name:$missing"; return 1; }
 }
 
-# ...and every verb of the commands whose help drifted (box, sessions, team,
-# watchdog), read from their own case labels by tests/lib/docs_commands.py.
-# `sessions note` is the Rex hook's internal call, not a command a person runs.
-test_cel_help_names_every_verb_of_box_sessions_team_watchdog() {
+# ...and every verb of every command that takes one (VERB_COMMANDS), read
+# from its own case labels by tests/lib/docs_commands.py. An internal verb is
+# listed and marked internal, not hidden; only `<cmd> help` itself is exempt.
+test_cel_help_names_every_verb_of_every_command() {
   local out
   out="$(python3 - "$CEL_ROOT" <<'PY'
 import re, subprocess, sys
@@ -166,12 +166,13 @@ sys.path.insert(0, root + "/tests/lib")
 import docs_commands
 _, verbs, _ = docs_commands.commands(root)
 text = subprocess.run(["bash", root + "/bin/cel", "help"], capture_output=True, text=True).stdout
-internal = {("sessions", "note"), ("team", "help")}
-for cmd in ("box", "sessions", "team", "watchdog"):
-    if not verbs.get(cmd):
+if len(verbs) < 15:
+    print(f"read verbs for only {len(verbs)} commands")
+for cmd in sorted(verbs):
+    if not verbs[cmd]:
         print(f"cel {cmd}: no verbs read")
     for verb, live in sorted(verbs.get(cmd, {}).items()):
-        if live and (cmd, verb) not in internal \
+        if live and verb != "help" \
                 and not re.search(r"(?<![a-z-])" + re.escape(verb) + r"(?![a-z-])", text):
             print(f"cel {cmd} {verb}")
 PY
